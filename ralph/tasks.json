@@ -1,0 +1,2157 @@
+[
+ {
+  "id": "0.0",
+  "model": "sonnet",
+  "execution": "bootstrap",
+  "description": "BOOTSTRAP (the one task that runs interactively on the host, Michael + principal, because it creates the image and the runner; preflight checklist docs/PREFLIGHT.md must be complete first): docker/Dockerfile + compose.yml for the essaydown-dev image per §4 (Node 22, Rust stable, Tauri Linux deps, webkit2gtk-driver, tauri-driver, xvfb, pandoc, typst, JDK, Claude Code CLI, Codex CLI); poppler-utils, Claude Code CLI, Codex CLI, Grok Build CLI, all versions pinned in docker/versions.env); entrypoints `claude-task`, `claude-review`, `codex-review`, `grok-review` (`grok -p` with the login-state dir mounted read-only); ralph/ralph.sh implementing docs/RUNNER-SPEC.md (task branches, integration transaction, review snapshots, phase close, generated summaries) + stop-check.sh + PROMPT.md (from BUILD-DEFAULTS.md template, phase placeholders filled); ralph/generate-tasks.mjs (PRD §8 → immutable ralph/tasks.json: `execution` defaults, review-set expansion, needsCI gate expansion, targetBranch derivation), ralph/bootstrap.sh and ralph/sync-state.sh (RUNNER-SPEC §6), ralph.sh commands exactly as listed in RUNNER-SPEC §11 (run, retry, resume, resolve-conflict, abandon, plan, plan-retry, plan-abandon, rerun, close, sync-state, status, doctor, admin mark-integrated | admin retry | admin resolve-request) and ralph/test/ conformance suite (§12), scripts/gate.sh consuming `ci` objects (§3) with `--resume a<n>`, `rerun`, `abandon` and `gc` subcommands and ralph/validate-tasks.mjs (plain Node, no deps: raw JSON parses, unique ids, expanded ids unique, dependencies resolve after macro rewriting, execution enum per RUNNER-SPEC §3, needsCI ⇒ ci object, loop-external ⇒ externalRepo, human ⇒ recordTarget or evidence-only, review attempts chain, targetBranch derivation, expanded count, `blockedOnHuman` only on `execution:human`, acyclic); docs/progress.md (generated at reconciliation), docs/progress/journal-main.md, docs/RUNNER-SPEC.md (copied from BUILD-DEFAULTS templates), docs/lessons.md, docs/reviews/TEMPLATE.md seeded from BUILD-DEFAULTS templates; .gitattributes with `merge=union` for docs/lessons.md only; /work/.evidence created and mounted as /logs in every entrypoint; CLAUDE.md and AGENTS.md generated from BUILD-DEFAULTS.md + project specifics, with ralph/check-agent-rules.sh (a `cmp` of both files below line 1); logs/ and .claude/settings.local.json gitignored.",
+  "acceptance": "`docker compose build` succeeds on OrbStack; `docker compose run claude-task --version`, `codex-review --version` and `grok-review --version` print versions with credentials mounted read-only and the credential boundary holds inside the container: no environment variable matching `*_API_KEY|GH_TOKEN|GITHUB_TOKEN`, `git config --show-origin --get-all credential.helper` empty, no SSH_AUTH_SOCK, no ~/.ssh or ~/.config/gh mount, and `git ls-remote https://github.com/MLSavage/essaydown-private-authcheck` fails with 'Authentication failed' (a private empty repo Michael creates for this check); `pdfimages -v` runs in the container; `node ralph/validate-tasks.mjs` passes and reports the expanded task count recorded in ralph/EXPECTED_COUNT (generated from PRD §8; 122 at v14: 86 raw tasks + 21 review-set expansion + 15 CI gates; the validator recomputes it); `ralph/bootstrap.sh` runs 0.0's own checks and, only on success, makes the initial commit on phase/0 and initialises `.evidence/state/tasks.json` with 0.0 recorded as passed (ralph/tasks.json has no status field); `ralph/ralph.sh --dry-run` then prints the first unblocked task id (0.1) and the branch it would create (task/0.1); in a disposable fixture repo under /tmp, `git merge` of two branches that each appended a distinct line to a `merge=union` lessons.md merges cleanly with both lines, (the journal test is not needed: implementation is sequential and only lessons.md is union-merged); `ralph/check-agent-rules.sh` exits 0. This task passes its own checks; §9.3 applies from 0.1. `bootstrap.sh` also validates the external clone at /work/.ext/build-defaults (clean tree, refs/heads/main present, `node scripts/validate-defaults.mjs` passes) and writes .evidence/external/build-defaults/state.json with that SHA, and writes .evidence/state/phases.json with the Phase 0 base_main_sha. `ralph/test/` conformance suite (RUNNER-SPEC §12) passes against disposable fixture repos: integration CAS, approval rejection → plan request → rewire, code-failed CI → replacement verifier, transient rerun a2, failed review r0 → r1 chain with candidate resolved from N.verify.r1h, close crash before/after the ref transaction, 4→6→5→terminal phase records, verifier g1 repair then r0→r1→r1.g1 chain, crash injection around the candidate tag, update-ref and state write (doctor names the one admin command, run refuses until clean, wrong admin command refused), an incomplete CI attempt resumed by run_id without a new run, gate.sh gc scope, digest mismatch rejected by consumers, rerun refused after a workflow-file change, validator rejecting gateKind publication, completed-close re-entry, sync-state refusing mutation, validator rejecting each schema violation.",
+  "dependencies": [],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.1",
+  "model": "sonnet",
+  "description": "Scaffold monorepo: pnpm workspaces, packages/core|editor|modes|coach|export, apps/desktop (Tauri 2 + React + Vite), Vitest with @vitest/coverage-v8 and a per-file threshold config, ESLint/Prettier, e2e/web (Playwright) and e2e/shell (WebdriverIO) folders with placeholder configs; tests/agent-rules.test.ts (Vitest) re-asserting CLAUDE.md ≡ AGENTS.md below line 1.",
+  "acceptance": "`pnpm install && pnpm test` passes with one placeholder test per package; `pnpm tauri dev` opens a window titled 'Essay Down' (under xvfb in the container); `pnpm coverage` prints a per-file table. Does NOT add editor code or CI.",
+  "dependencies": [
+   "0.0"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.2",
+  "model": "sonnet",
+  "description": "CI: .github/workflows/ci.yml running pnpm lint, pnpm test, cargo test on ubuntu-latest, macos-latest, windows-latest; installs a JDK, poppler-utils, and pinned epubcheck and html-validate versions (from docker/versions.env, so container and CI agree) for later phases; caches pnpm and cargo.",
+  "acceptance": "ci.yml lints under `actionlint` locally and `act --dryrun` resolves the three jobs; versions in the workflow match docker/versions.env.",
+  "dependencies": [
+   "0.1"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "ci.yml passes on all three runners; `epubcheck --version`, `npx html-validate --version` and `pdfimages -v` succeed in the workflow log on all three.",
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.2h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "0.2",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "description": "CI gate for 0.2: scripts/gate.sh 0.2h pushes integrated_sha of 0.2 to ci/0.2/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\"] into /logs/ci/0.2/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "ci.yml passes on all three runners; `epubcheck --version`, `npx html-validate --version` and `pdfimages -v` succeed in the workflow log on all three.",
+  "dependencies": [
+   "0.2"
+  ]
+ },
+ {
+  "id": "0.3",
+  "model": "opus",
+  "description": "Write docs/MARKDOWN-STYLE.md (ATX headings, `-` bullets, `1.` ordered with incrementing numbers, fenced code with ``` and info string preserved, pipe tables with aligned columns, one blank line between blocks, `*emphasis*`/`**strong**`, inline links, images as `![alt](relative/path)`, no hard wrap, exactly one trailing newline) and configure remark-parse/remark-stringify in packages/core/src/{parse,format}.ts with the §4 extension set and byte-preserving handlers for html and yaml nodes.",
+  "acceptance": "format(parse(x)) for the 12 examples in MARKDOWN-STYLE.md equals the listed output byte-for-byte (12 assertions); an html node and a yaml block are byte-identical after the trip (2 assertions); `[^1]` parses as text (1 assertion); the front-matter fixtures with quoted, commented, block-scalar, duplicate and malformed forms round-trip byte-identical when no app-owned key changes (5 assertions).",
+  "dependencies": [
+   "0.1"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.4",
+  "model": "sonnet",
+  "description": "Fixture corpus part 1: 44 short .md files in fixtures/markdown covering every §6.1 node, nested lists 3 deep, tables with escaped pipes, code fences containing ``` and ~~~, images with spaces in paths, front matter (plain, quoted values, inline comment, block scalar `question: |`, duplicate `title:` key, malformed front matter), raw html block, footnote syntax (as text), CRLF line endings, missing trailing newline, tabs. Each gets a `.canonical.md` sibling from format(parse(x)). fixtures/markdown/index.json lists per file: node types, blockCount, sectionCount, and for each paragraph its 1-based start line in the canonical file.",
+  "acceptance": "44 files + 44 canonical siblings present; index.json validates against fixtures/markdown/index.schema.json; a test asserts no supported node type is absent from the union of node types; blockCount for nested-lists.md, table-escaped-pipes.md, code-fence-nested.md, front-matter.md and raw-html.md equals a hand-computed value written in the test (the Phase 0 reviewers independently hand-verify five further fixtures of their choosing).",
+  "dependencies": [
+   "0.3"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.5",
+  "model": "sonnet",
+  "description": "Fixture corpus part 2: fixtures/markdown/essay-fixture.md — a ~5,000-word essay with 12 H2/H3 headings, 2 tables, 3 code fences, 2 images, 1 blockquote, lists — supplied by Michael if provided in docs/fixture-essay.md, otherwise written by the agent on a neutral topic (the history of the fountain pen). Add its canonical sibling and index.json entry.",
+  "acceptance": "Word count 4,500–5,500; exactly 12 headings; index.json entry present with paragraph line offsets; invariants A/B/C hold for it.",
+  "dependencies": [
+   "0.4"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.6",
+  "model": "opus",
+  "description": "Round-trip invariant tests in packages/core: A idempotence, B semantic preservation (positions stripped), C byte fidelity on `.canonical.md` and on opaque nodes. Fix format.ts until green.",
+  "acceptance": "`pnpm --filter core test -- roundtrip` runs 135 assertions (3 × 45 fixtures) and passes; CRLF fixture normalizes to LF on parse (asserted).",
+  "dependencies": [
+   "0.5"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.7",
+  "model": "opus",
+  "description": "core/hash.ts (unsigned 64-bit FNV-1a as BigInt → zero-padded 13-char base-36) and core/blocks.ts: `blocksOf(root)` with contentIds per §6.1, `sectionsOf(root)`, `replaceBlock`, `moveBlock`, `moveSection`, `setHeadingDepth` (re-depths descendants), all pure.",
+  "acceptance": "fnv1a64('') === 0xcbf29ce484222325n and fnv1a64('hello') === 0xa430d84680aabd0bn (published FNV-1a 64 vectors), and their encodings are exactly 13 chars ('hello' → '2hvyo96lq8v0r'); essay-fixture yields sectionCount and blockCount from index.json; two identical paragraphs get ids ending -0 and -1; moveSection(2,0) then format() equals expected/essay-fixture.moved.md (created and committed by this task); setHeadingDepth on an H2 with H3 children yields H3/H4. 100% branch coverage on blocks.ts (coverage threshold set in vitest config).",
+  "dependencies": [
+   "0.6"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.8",
+  "model": "opus",
+  "description": "core/sentences.ts: `sentencesOf(paragraph)` via Intl.Segmenter with the §6.1 abbreviation post-filter; `replaceSentence(root, blockId, index, text)` and `reorderSentences(root, blockId, order)` preserving inline marks by offset mapping.",
+  "acceptance": "packages/core/test/sentences.cases.json with 30 cases passes under Node, e.g. 'Dr. Smith went home. He slept.' → 2; 'It cost 3.50 dollars. Then more.' → 2; 'See e.g. the chart. Next.' → 2; replaceSentence on 'A **bold** start. And *emphasis* here.' index 0 with 'A quiet start.' → 'A quiet start. And *emphasis* here.' (marks inside the replaced range go with it), and with 'A **quiet** start.' → 'A **quiet** start. And *emphasis* here.'; a link spanning a boundary survives on both sides.",
+  "dependencies": [
+   "0.7"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.9",
+  "model": "opus",
+  "description": "core/segment-fallback.ts: rule-based sentence segmenter (terminal punctuation + closing quotes/brackets + whitespace + capital/number, with the same abbreviation list) and `segmenterSelfTest()` which runs 5 canary cases against the runtime Intl.Segmenter and returns which implementation to use.",
+  "acceptance": "The fallback passes ≥ 27/30 of sentences.cases.json (the 3 allowed misses are listed in the test); selfTest returns 'intl' under Node ≥ 20 and 'fallback' when `Intl.Segmenter` is stubbed to undefined.",
+  "dependencies": [
+   "0.8"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.10",
+  "model": "opus",
+  "description": "core/sidecar.ts: zod schema, `attach(sidecar, root)` implementing the five-step resolution order of §6.2, `refresh(sidecar, root)`, front-matter mirror of title/question with the byte-preservation rule of §6.1.",
+  "acceptance": "A variant anchored to a sentence survives changing one word elsewhere in the paragraph; survives a two-character change in the sentence itself; orphans after a complete rewrite; an in-app reorderSentences of two identical sentences moves each variant with its logical sentence; an external swap of the same two sentences (file re-parsed) leaves each variant at its recorded position; the same two cases for two identical H2 headings; missing version → zod error 'sidecar version missing'; `question:` front matter round-trips to topicQuestion; saving with an unchanged topic question leaves the yaml block byte-identical; changing it in-app rewrites only the `question:` line. Front matter with a block-scalar, duplicate or otherwise unsupported app-owned key → FrontMatterUnsupported and the block stays byte-identical on save; quoted values and inline comments are rewritten preserving quoting and comment.",
+  "dependencies": [
+   "0.9"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.11",
+  "model": "opus",
+  "description": "core/undo.ts: snapshot undo stack per §6.5 — push(root, sidecar, {coalesceKey, at}), undo(), redo(), coalescing pushes with the same key within 1,000 ms, cap 500 with structural sharing.",
+  "acceptance": "20 unit tests: 3 pushes with key 'typing' inside 1 s collapse to one undo step; a 'rewrite' push between them does not coalesce; 600 pushes retain the last 500; undo/redo restore identical (deep-equal) root and sidecar.",
+  "dependencies": [
+   "0.10"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.verify",
+  "model": "sonnet",
+  "description": "Phase 0 verification: freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "0.2h",
+   "0.11"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full Phase 0 suite (pnpm lint, pnpm test, cargo test) green on ubuntu, macos and windows at the implementation SHA; logs in /logs/ci/0.verify/accepted/.",
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.verifyh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "0.verify",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "description": "CI gate for 0.verify: scripts/gate.sh 0.verifyh pushes integrated_sha of 0.verify to ci/0.verify/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\"] into /logs/ci/0.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full Phase 0 suite (pnpm lint, pnpm test, cargo test) green on ubuntu, macos and windows at the implementation SHA; logs in /logs/ci/0.verify/accepted/.",
+  "dependencies": [
+   "0.verify"
+  ]
+ },
+ {
+  "id": "0.12.r0a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "description": "Review attempt r0, claude reviewer, for review set 0.12 (phase 0). Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build.",
+  "acceptance": "/logs/reviews/0/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verifyh"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build."
+ },
+ {
+  "id": "0.12.r0b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "description": "Review attempt r0, sol reviewer, for review set 0.12 (phase 0). Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build.",
+  "acceptance": "/logs/reviews/0/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verifyh"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build."
+ },
+ {
+  "id": "0.12.r0c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "description": "Review attempt r0, grok reviewer, for review set 0.12 (phase 0). Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build.",
+  "acceptance": "/logs/reviews/0/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verifyh"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build."
+ },
+ {
+  "id": "0.12.r0d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Reconciliation of review attempt r0 for review set 0.12 (phase 0): copy the three reports to docs/reviews/phase-0-r0-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-0-r0 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 0.verify.r1 and 0.12.r1a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "0.12.r0a",
+   "0.12.r0b",
+   "0.12.r0c"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build."
+ },
+ {
+  "id": "0.close",
+  "model": "opus",
+  "execution": "runner",
+  "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/0 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/1; then finalise .evidence/closes and the next phase base record.",
+  "acceptance": "main == reconciliation_sha of the newest Phase 0 review attempt (verdict PASS); suite green on that commit; branch phase/1 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
+  "dependencies": [
+   "0.12.r0d"
+  ],
+  "nextPhase": "1",
+  "nextBranch": "phase/1",
+  "phase": "0",
+  "sourceBranches": [
+   "phase/0"
+  ],
+  "targetBranch": "main"
+ },
+ {
+  "id": "1.1",
+  "model": "opus",
+  "description": "ProseMirror schema in packages/editor/src/schema.ts mapping 1:1 to §6.1, `mdastToPM(root)` and `pmToMdast(doc)`; html nodes become a non-editable `raw` node rendering a grey box; yaml is held outside the PM doc and re-attached on serialize.",
+  "acceptance": "For all 45 fixtures (count read from index.json): format(pmToMdast(mdastToPM(parse(x)))) === format(parse(x)) (one assertion per fixture, count read from index.json); the raw-html fixture's html node is byte-identical after the trip.",
+  "dependencies": [
+   "0.close"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.2",
+  "model": "opus",
+  "description": "Formatter position map in packages/core/src/positions.ts: `formatWithMap(root)` returns the canonical string plus a map from every mdast node (by path) to its `{startLine, startCol, endLine, endCol}` in that string, and `nodeAt(map, line, col)` for the reverse lookup; built by instrumenting remark-stringify's per-node output rather than re-parsing.",
+  "acceptance": "For all 45 fixtures (count read from index.json), every paragraph's mapped startLine equals index.json's recorded line; nodeAt(map, l, c) for 200 seeded random (l, c) positions returns a node whose range contains (l, c) or null only on blank lines; the map is a pure function of root (two calls deep-equal).",
+  "dependencies": [
+   "0.close"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.3",
+  "model": "opus",
+  "description": "Typora-style input rules and keymap: `# ` heading, `- `/`1. ` lists, `> ` blockquote, ``` opens a code block, `**x**`/`*x*`/`` `x` `` convert on close, `---` rule, `|a|b|`+Enter makes a 2-col table, Tab/Shift-Tab list indent, Backspace on an empty list item exits the list. No history plugin (undo comes from the store in 1.6).",
+  "acceptance": "e2e/web/editor-input.spec.ts (Playwright, dev route /dev/editor) with 22 scenarios typing keystrokes into a blank doc and asserting the resulting canonical Markdown (e.g. '# Title⏎Hello **world**' → '# Title\\n\\nHello **world**\\n').",
+  "dependencies": [
+   "1.1"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.4",
+  "model": "opus",
+  "description": "Reveal-on-active-line decorations: Markdown delimiters for emphasis/strong/code/links/headings are shown only on the block containing the cursor and hidden elsewhere.",
+  "acceptance": "Playwright: cursor inside a strong span → DOM contains the literal `**` adjacent to the text; cursor moved to another block → removed; heading `#` marks follow the same rule; 8 assertions.",
+  "dependencies": [
+   "1.3"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.5",
+  "model": "sonnet",
+  "description": "CodeMirror 6 source view in packages/editor/src/source.ts with lang-markdown and a highlight theme color-coding 7 token classes: headings (by depth), emphasis/strong, links/images, code, blockquotes, list markers, table delimiters; light and dark via prefers-color-scheme; history extension not installed.",
+  "acceptance": "Dev route /dev/source renders essay-fixture; Playwright asserts each of the 7 token classes has a distinct computed color in both light and dark (14 assertions).",
+  "dependencies": [
+   "1.1"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.6",
+  "model": "opus",
+  "description": "Document store (Zustand) with the undo stack from 0.11 wired to both views: PM transactions push coalesced 'typing' snapshots; Cmd/Ctrl+Z and Shift+Z bound at store level in PM and CM keymaps.",
+  "acceptance": "Playwright: type 3 words quickly then Cmd+Z → all 3 gone; type, wait 1.5 s, type, Cmd+Z → only the second burst gone; redo restores it. 6 assertions.",
+  "dependencies": [
+   "1.4",
+   "1.5"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.7",
+  "model": "opus",
+  "description": "Source toggle: Cmd/Ctrl+/ swaps PM ↔ CM over the store; cursor mapped by (line, ch) ↔ PM position through the position map from 1.2; a toggle closes the active coalescing group but creates no history entry; unparseable intermediate source (unclosed fence) is allowed and re-parses leniently. Dev-only top bar on /dev/editor: 'Load fixture…' and 'Copy Markdown' (for the Phase 1 human gate).",
+  "acceptance": "Playwright: cursor in paragraph 7 sentence 2 of essay-fixture, toggle, CM cursor line equals index.json's paragraph line; edit in source, toggle back, rendered text updated; 200 seeded random toggle+edit operations never throw and end with invariant A holding. Undo test: type a word, toggle to source and back, Cmd/Ctrl+Z → the word is gone in one step (no no-op undo); Cmd/Ctrl+Shift+Z restores it.",
+  "dependencies": [
+   "1.2",
+   "1.6"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.8",
+  "model": "sonnet",
+  "description": "Outline PROTOTYPE (throwaway, dev route /dev/outline): topic-question field, add/nest/drag list of question strings (dnd-kit), 'Produce' button opening /dev/editor pre-populated with front matter `question: <topic>`, one H2 per top-level question and H3 per nested question, each with its question shown as a muted line above the heading. No persistence.",
+  "acceptance": "Playwright: enter 3 questions, nest one, click Produce → canonical Markdown is '---\\nquestion: <topic>\\n---\\n\\n## Q1\\n\\n## Q2\\n\\n### Q2a\\n' and three `.question-hint` elements are visible.",
+  "dependencies": [
+   "1.3"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.9",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE: Michael runs `pnpm dev`, writes ~1,000 words on /dev/editor, toggles source, copies Markdown and checks it in Typora; plays with /dev/outline; records his verdict and any re-scoping of Outline via `scripts/gate.sh 1.9` (evidence file only; the Phase 1 reconciliation copies it to DECISIONS.md#002-outline-feel).",
+  "acceptance": "scripts/gate.sh 1.9 wrote .evidence/human/1.9/a<n>.md (accepted.json on ACCEPT) and it validates (the next reconciliation copies it into DECISIONS.md).",
+  "dependencies": [
+   "1.7",
+   "1.8"
+  ],
+  "blockedOnHuman": true,
+  "gateKind": "observation",
+  "recordTarget": "002-outline-feel",
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify",
+  "model": "sonnet",
+  "description": "Phase 1 verification: freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "1.9"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + e2e/web (Playwright) green on all three runners at the implementation SHA; logs in /logs/ci/1.verify/accepted/.",
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verifyh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "1.verify",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "description": "CI gate for 1.verify: scripts/gate.sh 1.verifyh pushes integrated_sha of 1.verify to ci/1.verify/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"playwright-report\"] into /logs/ci/1.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + e2e/web (Playwright) green on all three runners at the implementation SHA; logs in /logs/ci/1.verify/accepted/.",
+  "dependencies": [
+   "1.verify"
+  ]
+ },
+ {
+  "id": "1.10.r0a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "description": "Review attempt r0, claude reviewer, for review set 1.10 (phase 1). Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation).",
+  "acceptance": "/logs/reviews/1/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verifyh"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation)."
+ },
+ {
+  "id": "1.10.r0b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "description": "Review attempt r0, sol reviewer, for review set 1.10 (phase 1). Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation).",
+  "acceptance": "/logs/reviews/1/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verifyh"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation)."
+ },
+ {
+  "id": "1.10.r0c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "description": "Review attempt r0, grok reviewer, for review set 1.10 (phase 1). Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation).",
+  "acceptance": "/logs/reviews/1/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verifyh"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation)."
+ },
+ {
+  "id": "1.10.r0d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Reconciliation of review attempt r0 for review set 1.10 (phase 1): copy the three reports to docs/reviews/phase-1-r0-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-1-r0 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 1.verify.r1 and 1.10.r1a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "1.10.r0a",
+   "1.10.r0b",
+   "1.10.r0c"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation)."
+ },
+ {
+  "id": "1.close",
+  "model": "opus",
+  "execution": "runner",
+  "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/1 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/2; then finalise .evidence/closes and the next phase base record.",
+  "acceptance": "main == reconciliation_sha of the newest Phase 1 review attempt (verdict PASS); suite green on that commit; branch phase/2 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
+  "dependencies": [
+   "1.10.r0d"
+  ],
+  "nextPhase": "2",
+  "nextBranch": "phase/2",
+  "phase": "1",
+  "sourceBranches": [
+   "phase/1"
+  ],
+  "targetBranch": "main"
+ },
+ {
+  "id": "2.1",
+  "model": "sonnet",
+  "description": "Shell e2e harness: e2e/shell with WebdriverIO + @wdio/tauri-service; ci.yml job `e2e-shell` runs it via tauri-driver on ubuntu (with xvfb + webkit2gtk-driver) and windows (msedgedriver), and via the WDIO Tauri plugin's embedded provider on macos marked continue-on-error until Phase 6.",
+  "acceptance": "The smoke spec passes in the container under xvfb via tauri-driver; the `e2e-shell` job is defined for ubuntu, windows and macOS (macOS continue-on-error) and actionlint passes.",
+  "dependencies": [
+   "1.close"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "The smoke spec passes on the ubuntu and windows runners; the macOS result is recorded in the job summary.",
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "2.1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "description": "CI gate for 2.1: scripts/gate.sh 2.1h pushes integrated_sha of 2.1 to ci/2.1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\"] into /logs/ci/2.1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "The smoke spec passes on the ubuntu and windows runners; the macOS result is recorded in the job summary.",
+  "dependencies": [
+   "2.1"
+  ]
+ },
+ {
+  "id": "2.2",
+  "model": "sonnet",
+  "description": "Rust commands open_folder, list_tree (recursive, `.md` only, ignores dotfiles, node_modules, and `.icloud` placeholders which are listed as `{cloudOnly:true}`), read_doc, write_doc (temp + atomic rename, preserves mode), read_sidecar, write_sidecar. Capability file grants fs and asset-protocol scope only to the chosen folder, persisted with tauri-plugin-persisted-scope; CSP per §6.4; `WorkspaceRoot` authority per §6.4 enforced by every path-taking command.",
+  "acceptance": "cargo test: write_doc to a permission-denied dir returns io::ErrorKind::PermissionDenied (Windows variant uses an ACL-denied temp dir under #[cfg(windows)]); no temp file remains after success or failure; list_tree on fixtures/markdown returns exactly the number of `.md` files counted by the test itself, sorted by name; a `x.md.icloud` file is reported cloudOnly; the §6.4 path suite: relative-inside → Ok; `..` escape, symlink-out, parent-symlink, Windows junction, case-folded escape on case-insensitive filesystems, export output outside → PathOutsideWorkspace; any absolute path → InvalidPath; the empty path (the root itself) → Ok for list_tree and watch_folder and InvalidPath for every other command. Capability file contains no `**` scope. A test asserts the plugin registration order in main.rs has tauri-plugin-fs before tauri-plugin-persisted-scope.",
+  "dependencies": [
+   "2.1h"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.3",
+  "model": "sonnet",
+  "description": "Rust commands new_file (`Untitled-N.md` with `# Untitled-N`), rename_file (doc + sidecar + assets/<stem> together, rewriting every relative image URL in the document that points into assets/<oldstem>/ to assets/<newstem>/, with rollback of all three on partial failure), delete_to_trash (trashes doc + sidecar + assets/<stem> together after a confirm dialog listing the three) behind a `TrashBackend` trait (real impl uses the `trash` crate; tests inject a recording fake), reveal_in_folder.",
+  "acceptance": "cargo test: rename with sidecar and assets present renames all three and the document's image URLs now reference assets/<newstem>/ (asserted on the re-read Markdown); rename where the target exists returns AlreadyExists and changes nothing; a simulated failure moving the assets dir rolls back the doc and sidecar names; delete_to_trash calls the fake once per existing item (doc, sidecar, assets dir).",
+  "dependencies": [
+   "2.2"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.4",
+  "model": "sonnet",
+  "description": "File tree sidebar (left): open folder, new file, rename (F2 / context menu), delete to trash, click to open, cloudOnly files shown greyed with a tooltip 'Not downloaded on this device'; last folder and file restored on launch.",
+  "acceptance": "WebdriverIO: create → rename a.md→b.md with sidecar → both renamed, assets/a → assets/b; relaunch restores the same file; clicking a cloudOnly entry shows the tooltip and does not error.",
+  "dependencies": [
+   "2.3"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.5",
+  "model": "opus",
+  "description": "Autosave + external-change handling: debounce 500 ms, save canonical Markdown + refreshed sidecar; notify watcher emits fs:changed; changed file open and not dirty → silent reload; dirty → banner 'Changed on disk' with Reload / Keep mine; partial writes from sync tools (file shrinks then grows within 2 s) are debounced before reload; first-open non-canonical banner per §6.1.",
+  "acceptance": "WebdriverIO: edit, wait 600 ms, file on disk is canonical; external append while not dirty → visible within 1 s; while dirty → banner, Keep mine overwrites, Reload discards; truncate-then-rewrite externally within 1 s triggers one reload, not two; opening the CRLF fixture shows the banner once and saving yields its .canonical.md byte-for-byte.",
+  "dependencies": [
+   "2.2"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.6",
+  "model": "sonnet",
+  "description": "Images: paste/drag → save_image → `![](assets/<docstem>/<file>)`; rendered view resolves relative paths against the document directory and renders through convertFileSrc; broken paths render a labelled placeholder.",
+  "acceptance": "WebdriverIO: paste a 1×1 PNG → file exists, Markdown has the relative path, <img> naturalWidth 1 inside the real webview; open a doc referencing missing.png → placeholder 'Image not found: missing.png'; a doc in a sub-folder with `../shared/img.png` renders; two pastes within the same second produce two distinct files.",
+  "dependencies": [
+   "2.2"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.7",
+  "model": "sonnet",
+  "description": "Settings: JSON in the platform config dir, schema {theme:'system', typewriterScroll:false, coach:{provider:null, baseUrl:'', model:''}} (no key field), zod-validated with defaults, get_settings/set_settings, minimal dialog (Cmd/Ctrl+,); `set_coach_key`/`has_coach_key`/`clear_coach_key` commands per §6.4 backed by the `keyring` crate with an in-memory backend under test and `ESSAYDOWN_COACH_KEY` env override; when the OS store is locked or unavailable, `has_coach_key` reports the status and the settings dialog shows 'Credential store unavailable — set ESSAYDOWN_COACH_KEY or unlock your keychain'.",
+  "acceptance": "Corrupt settings file → defaults + one logged warning; typewriterScroll persists across relaunch; after set_coach_key the settings JSON on disk contains no key material (grep for the value returns nothing), has_coach_key returns {present:true, backend:'available'} and no IPC response ever contains the value (asserted on the recorded IPC log); env var wins over the store; a backend returning an error yields backend:'unavailable'. Does NOT render any coach UI.",
+  "dependencies": [
+   "2.2"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.8",
+  "model": "sonnet",
+  "description": "Scripted 10-minute robustness session (e2e/shell/robustness.spec.ts) against a folder containing `.icloud` placeholders and a Syncthing `.stfolder`, exercising open/edit/rename/external-change/image paste in a loop, with the webview console and Rust log captured.",
+  "acceptance": "Spec passes in the container with zero unhandled promise rejections and zero Rust panics in the captured logs.",
+  "dependencies": [
+   "2.4",
+   "2.5",
+   "2.6",
+   "2.7"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.9",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE: Michael installs the macOS debug build fetched by the 2.verify CI gate (/logs/ci/2.verify/accepted/EssayDown-debug-<sha>.dmg, SHA named in .evidence/human/2.9/a<n>.md (accepted.json on ACCEPT)), opens his real synced folder on the MacBook Pro, edits a document, edits the same document in Typora, and confirms both directions survive.",
+  "acceptance": "scripts/gate.sh 2.9 records the artifact SHA and the result in .evidence/human/2.9/a<n>.md (accepted.json on ACCEPT).",
+  "dependencies": [
+   "2.verifyh"
+  ],
+  "blockedOnHuman": true,
+  "gateKind": "observation",
+  "recordTarget": "006-mac-sync-smoke",
+  "phase": "2",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.verify",
+  "model": "sonnet",
+  "description": "Phase 2 verification: freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "2.8"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "macos-debug-dmg"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + e2e/shell smoke and robustness specs green on ubuntu and windows (macOS recorded) at the implementation SHA; a macOS debug .dmg built by the workflow at that SHA is fetched to /logs/ci/2.verify/accepted/EssayDown-debug-<sha>.dmg.",
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.verifyh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "2.verify",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "macos-debug-dmg"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "description": "CI gate for 2.verify: scripts/gate.sh 2.verifyh pushes integrated_sha of 2.verify to ci/2.verify/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\",\"macos-debug-dmg\"] into /logs/ci/2.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + e2e/shell smoke and robustness specs green on ubuntu and windows (macOS recorded) at the implementation SHA; a macOS debug .dmg built by the workflow at that SHA is fetched to /logs/ci/2.verify/accepted/EssayDown-debug-<sha>.dmg.",
+  "dependencies": [
+   "2.verify"
+  ]
+ },
+ {
+  "id": "2.10.r0a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "description": "Review attempt r0, claude reviewer, for review set 2.10 (phase 2). Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean.",
+  "acceptance": "/logs/reviews/2/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "2.verifyh",
+   "2.9"
+  ],
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "reviewSet": "2.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean."
+ },
+ {
+  "id": "2.10.r0b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "description": "Review attempt r0, sol reviewer, for review set 2.10 (phase 2). Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean.",
+  "acceptance": "/logs/reviews/2/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "2.verifyh",
+   "2.9"
+  ],
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "reviewSet": "2.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean."
+ },
+ {
+  "id": "2.10.r0c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "description": "Review attempt r0, grok reviewer, for review set 2.10 (phase 2). Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean.",
+  "acceptance": "/logs/reviews/2/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "2.verifyh",
+   "2.9"
+  ],
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "reviewSet": "2.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean."
+ },
+ {
+  "id": "2.10.r0d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Reconciliation of review attempt r0 for review set 2.10 (phase 2): copy the three reports to docs/reviews/phase-2-r0-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-2-r0 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 2.verify.r1 and 2.10.r1a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "2.10.r0a",
+   "2.10.r0b",
+   "2.10.r0c"
+  ],
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "reviewSet": "2.10",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean."
+ },
+ {
+  "id": "2.close",
+  "model": "opus",
+  "execution": "runner",
+  "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/2 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/3; then finalise .evidence/closes and the next phase base record.",
+  "acceptance": "main == reconciliation_sha of the newest Phase 2 review attempt (verdict PASS); suite green on that commit; branch phase/3 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
+  "dependencies": [
+   "2.10.r0d"
+  ],
+  "nextPhase": "3",
+  "nextBranch": "phase/3",
+  "phase": "2",
+  "sourceBranches": [
+   "phase/2"
+  ],
+  "targetBranch": "main"
+ },
+ {
+  "id": "3.1",
+  "model": "opus",
+  "description": "Mode bar (Outline / Produce / Rewrite / Reorder, Cmd/Ctrl+1–4); store holds root, sidecar, cursor position; all mode mutations go through core pure functions and push one undo snapshot each.",
+  "acceptance": "WebdriverIO: switching modes 100× never changes format(root); an injected store mutation (test-only `window.__essaydown.dispatch(moveBlock(...))`) followed by Cmd/Ctrl+Z restores the exact prior Markdown and sidecar.",
+  "dependencies": [
+   "2.close"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.2",
+  "model": "opus",
+  "description": "Outline mode per §6.3, re-scoped by payload.verdictText in /logs/human/1.9/accepted.json (Michael's Outline verdict; copied to DECISIONS.md#002-outline-feel at the Phase 1 reconciliation): section tree with drag-to-reorder and drag-to-nest, question fields, topic question field, 'New question'.",
+  "acceptance": "WebdriverIO on essay-fixture: set a question on section 3 → sidecar has it, Markdown unchanged; drag section 5 under section 2 → Markdown equals expected/essay-fixture.nested.md (created here); add 'Why now?' → new '## Why now?' heading anchored; delete the sidecar and reopen → headings with empty question fields.",
+  "dependencies": [
+   "3.1",
+   "1.9"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.3",
+  "model": "sonnet",
+  "description": "Produce mode per §6.3.",
+  "acceptance": "WebdriverIO: sidebars display:none, editor width ≤ 68ch, heading 2's question text present in `.question-hint`; typewriterScroll keeps the caret within ±40 px of vertical center across 30 typed lines; Esc returns to the previous mode.",
+  "dependencies": [
+   "3.1"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.4",
+  "model": "opus",
+  "description": "Rewrite mode per §6.3, persisting variants/history/chosen in the sidecar; sidebar auto-scrolls to the cursor's sentence; 'Unattached' section for orphans with drag-to-reattach.",
+  "acceptance": "WebdriverIO on essay-fixture paragraph 4: add 2 variants to sentence 2, choose variant 2 → Markdown equals expected/essay-fixture.rewrite.md (created here) with inline emphasis preserved; Cmd/Ctrl+Z reverts sentence and `chosen`; relaunch → variants still anchored; edit elsewhere in the paragraph → still anchored; retype the sentence entirely → card in 'Unattached'; drag it onto sentence 1 → re-anchored.",
+  "dependencies": [
+   "3.1"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.5",
+  "model": "opus",
+  "description": "Reorder mode per §6.3 with mouse and keyboard (Space pick up, arrows, Space drop).",
+  "acceptance": "WebdriverIO: sentence 3 → 1 in paragraph 4 → expected/essay-fixture.reorder-sentence.md (created here) with marks intact; paragraph 2 → 4 in section 3 → expected/essay-fixture.reorder-para.md; keyboard-only section move equals the mouse result; each is one undo step, and a Reorder drag followed by Cmd/Ctrl+Z restores the exact prior Markdown and sidecar.",
+  "dependencies": [
+   "3.1"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.6",
+  "model": "sonnet",
+  "description": "Author e2e/shell/one-workflow.spec.ts implementing §3 steps 1–6 on a fresh temp folder and fresh Untitled file (step 7 added in 4.4, step 8 in 5.2): open folder, outline 3 questions, produce 2 paragraphs under each, rewrite one sentence, reorder two sentences, toggle source and back, assert final Markdown against expected/one-workflow.md (created here).",
+  "acceptance": "Spec passes in the container (Linux) against expected/one-workflow.md.",
+  "dependencies": [
+   "3.2",
+   "3.3",
+   "3.4",
+   "3.5"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verify",
+  "model": "sonnet",
+  "description": "Phase 3 verification: freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "3.6"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + one-workflow steps 1–6 green on ubuntu and windows (macOS recorded) at the implementation SHA; logs in /logs/ci/3.verify/accepted/.",
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verifyh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "3.verify",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "description": "CI gate for 3.verify: scripts/gate.sh 3.verifyh pushes integrated_sha of 3.verify to ci/3.verify/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\"] into /logs/ci/3.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + one-workflow steps 1–6 green on ubuntu and windows (macOS recorded) at the implementation SHA; logs in /logs/ci/3.verify/accepted/.",
+  "dependencies": [
+   "3.verify"
+  ]
+ },
+ {
+  "id": "3.7.r0a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "description": "Review attempt r0, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "acceptance": "/logs/reviews/3/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "3.verifyh"
+  ],
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "reviewSet": "3.7",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+ },
+ {
+  "id": "3.7.r0b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "description": "Review attempt r0, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "acceptance": "/logs/reviews/3/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "3.verifyh"
+  ],
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "reviewSet": "3.7",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+ },
+ {
+  "id": "3.7.r0c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "description": "Review attempt r0, grok reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "acceptance": "/logs/reviews/3/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "3.verifyh"
+  ],
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "reviewSet": "3.7",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+ },
+ {
+  "id": "3.7.r0d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Reconciliation of review attempt r0 for review set 3.7 (phase 3): copy the three reports to docs/reviews/phase-3-r0-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-3-r0 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 3.verify.r1 and 3.7.r1a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "3.7.r0a",
+   "3.7.r0b",
+   "3.7.r0c"
+  ],
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "reviewSet": "3.7",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+ },
+ {
+  "id": "3.close",
+  "model": "opus",
+  "execution": "runner",
+  "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/3 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/4; then finalise .evidence/closes and the next phase base record.",
+  "acceptance": "main == reconciliation_sha of the newest Phase 3 review attempt (verdict PASS); suite green on that commit; branch phase/4 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
+  "dependencies": [
+   "3.7.r0d"
+  ],
+  "nextPhase": "4",
+  "nextBranch": "phase/4",
+  "phase": "3",
+  "sourceBranches": [
+   "phase/3"
+  ],
+  "targetBranch": "main"
+ },
+ {
+  "id": "4.0",
+  "model": "sonnet",
+  "description": "SPIKE prep (a normal task on task/4.0; its CI gate pushes the integrated 4.0 SHA to the immutable ref ci/4.0/a<n>): add a disposable workflow .github/workflows/spike-pdf.yml that on all three runners installs the pinned pandoc/typst, exports essay-fixture.md (with its relative images) via `pandoc -f gfm --resource-path=<docdir> --pdf-engine=typst`, and on failure tries the fallback (copy/resolve images into a temp Typst root); uploads PDFs, `pdfimages -list` output and logs as artifacts.",
+  "acceptance": "spike-pdf.yml passes actionlint; the Linux leg runs in the container and uploads its artifacts to a local path.",
+  "dependencies": [
+   "3.close"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.0/a{n}",
+   "workflow": "spike-pdf.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "spike-pdf"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "spike-pdf.yml ran on all three runners at the integrated 4.0 SHA on ref ci/4.0/a<n>; artifacts are in /logs/ci/4.0/accepted/; run.json records the expanded ref and it was deleted after fetch.",
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.0h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "4.0",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.0/a{n}",
+   "workflow": "spike-pdf.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "spike-pdf"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "description": "CI gate for 4.0: scripts/gate.sh 4.0h pushes integrated_sha of 4.0 to ci/4.0/a{n}, writes run.json, waits for spike-pdf.yml, fetches [\"spike-pdf\"] into /logs/ci/4.0/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "spike-pdf.yml ran on all three runners at the integrated 4.0 SHA on ref ci/4.0/a<n>; artifacts are in /logs/ci/4.0/accepted/; run.json records the expanded ref and it was deleted after fetch.",
+  "dependencies": [
+   "4.0"
+  ]
+ },
+ {
+  "id": "4.0r",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "SPIKE decision: read /logs/ci/4.0/accepted/ and write docs/DECISIONS.md#004-pdf-pipeline naming the pipeline that embedded both images on each OS; delete .github/workflows/spike-pdf.yml from the phase branch in the same commit.",
+  "acceptance": "DECISIONS.md#004 states the pipeline per OS with the `pdfimages -list` lines pasted; spike-pdf.yml absent; no other product file changed.",
+  "dependencies": [
+   "4.0h"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.1",
+  "model": "sonnet",
+  "description": "scripts/fetch-sidecars.ts reading scripts/sidecars.lock.json (exact pandoc and typst versions, per-platform URLs and SHA-256s, committed by this task): download and verify 8 archives — pandoc (linux x86_64 tarball, windows zip, macOS .pkg arm64, macOS .pkg x86_64 with payload extraction) and typst (linux, windows, macOS arm64, macOS x86_64) — extracting 8 pre-lipo artifacts: `pandoc-x86_64-unknown-linux-gnu`, `pandoc-x86_64-pc-windows-msvc.exe`, `typst-…` likewise, plus four macOS slices under scripts/.cache/sidecars/ (gitignored; never under src-tauri/binaries/).",
+  "acceptance": "`pnpm fetch-sidecars` produces exactly 8 verified artifacts with matching checksums (4 platform binaries + 4 macOS slices); `pandoc --version` and `typst --version` run for the host OS's binary or slice; a tampered checksum aborts with a non-zero exit.",
+  "dependencies": [
+   "4.0r"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.2",
+  "model": "sonnet",
+  "description": "macOS universal sidecars: `lipo -create` the two pandoc slices and the two typst slices into `pandoc-universal-apple-darwin` and `typst-universal-apple-darwin`; place all 6 target-suffixed files in src-tauri/binaries/ (slices stay in scripts/.cache/, gitignored, outside the distributables); configure exactly two externalBin entries, `binaries/pandoc` and `binaries/typst` (Tauri picks the file with the current target-triple suffix); scope `shell:allow-spawn` to those two sidecars with validated argument shapes (`-f gfm`, `--standalone`, `--resource-path=<inside workspace>`, `-o <inside workspace>`, `--pdf-engine=typst`, `-t <format>`), nothing else.",
+  "acceptance": "Six distributables present with exactly two externalBin base entries; the cargo shell-scope test rejects `--lua-filter` and any path outside the workspace; `pnpm tauri build` succeeds in the container and the Linux app contains the Linux binaries; no `slices` directory under src-tauri/binaries.",
+  "dependencies": [
+   "4.1"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "tauri-build"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "`pnpm tauri build` on macos-latest and windows-latest includes the platform binaries; on macOS `lipo -info` reports both architectures for both universal sidecars and `pandoc --version` runs from inside the built .app; on Windows `pandoc --version` runs from inside the built app (workflow log in /logs/ci/4.2/accepted/).",
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.2h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "4.2",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "tauri-build"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "description": "CI gate for 4.2: scripts/gate.sh 4.2h pushes integrated_sha of 4.2 to ci/4.2/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"tauri-build\"] into /logs/ci/4.2/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "`pnpm tauri build` on macos-latest and windows-latest includes the platform binaries; on macOS `lipo -info` reports both architectures for both universal sidecars and `pandoc --version` runs from inside the built .app; on Windows `pandoc --version` runs from inside the built app (workflow log in /logs/ci/4.2/accepted/).",
+  "dependencies": [
+   "4.2"
+  ]
+ },
+ {
+  "id": "4.3",
+  "model": "sonnet",
+  "description": "packages/export argument builders + Rust `export` command + File → Export menu (DOCX / HTML / Other pandoc format string): `-f gfm --standalone --resource-path=<docdir>`, stderr streamed to a progress toast, reveal_in_folder on success.",
+  "acceptance": "Integration test exports essay-fixture: DOCX validated with pinned tooling only (`unzip -t` from versions.env + `fast-xml-parser` pinned in packages/export/package.json): the ZIP is readable, `word/document.xml`, `word/styles.xml` and `[Content_Types].xml` exist, exactly 12 paragraphs carry Heading styles, two `w:tbl` elements exist, and `word/media/` holds 2 images; HTML passes html-validate with the committed config; a doc with a missing image exports with a warning toast, not a failure.",
+  "dependencies": [
+   "4.2h"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.4",
+  "model": "sonnet",
+  "description": "PDF (per DECISIONS #004 pipeline) and EPUB export; append §3 step 7 to e2e/shell/one-workflow.spec.ts.",
+  "acceptance": "In the container: PDF has ≥ 3 pages, 2 embedded images (`pdfimages -list`), and `pdftotext` output contains every one of the 12 heading titles, the code-block text, and one cell from each of the 2 tables; EPUB passes epubcheck with 0 errors and its XHTML contains the 12 headings; HTML passes html-validate and contains the 12 headings and both `<table>` elements; one-workflow steps 1–7 pass under xvfb.",
+  "dependencies": [
+   "4.3"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.verify",
+  "model": "sonnet",
+  "description": "Phase 4 verification: freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "4.4"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "export-validation"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and windows (macOS recorded) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; logs in /logs/ci/4.verify/accepted/.",
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.verifyh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "4.verify",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.verify/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "export-validation"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "description": "CI gate for 4.verify: scripts/gate.sh 4.verifyh pushes integrated_sha of 4.verify to ci/4.verify/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\",\"export-validation\"] into /logs/ci/4.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and windows (macOS recorded) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; logs in /logs/ci/4.verify/accepted/.",
+  "dependencies": [
+   "4.verify"
+  ]
+ },
+ {
+  "id": "4.5.r0a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "description": "Review attempt r0, claude reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
+  "acceptance": "/logs/reviews/4/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "4.verifyh"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "reviewSet": "4.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+ },
+ {
+  "id": "4.5.r0b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "description": "Review attempt r0, sol reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
+  "acceptance": "/logs/reviews/4/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "4.verifyh"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "reviewSet": "4.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+ },
+ {
+  "id": "4.5.r0c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "description": "Review attempt r0, grok reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
+  "acceptance": "/logs/reviews/4/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "4.verifyh"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "reviewSet": "4.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+ },
+ {
+  "id": "4.5.r0d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Reconciliation of review attempt r0 for review set 4.5 (phase 4): copy the three reports to docs/reviews/phase-4-r0-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-4-r0 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 4.verify.r1 and 4.5.r1a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "4.5.r0a",
+   "4.5.r0b",
+   "4.5.r0c"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "reviewSet": "4.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+ },
+ {
+  "id": "4.close",
+  "model": "opus",
+  "execution": "runner",
+  "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/4 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/6; then finalise .evidence/closes and the next phase base record.",
+  "acceptance": "main == reconciliation_sha of the newest Phase 4 review attempt (verdict PASS); suite green on that commit; branch phase/6 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
+  "dependencies": [
+   "4.5.r0d"
+  ],
+  "targetBranch": "main",
+  "sourceBranches": [
+   "phase/4"
+  ],
+  "nextPhase": "6",
+  "nextBranch": "phase/6",
+  "phase": "4"
+ },
+ {
+  "id": "5.0",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Verify, against the pinned Claude Code CLI version in docker/versions.env (`claude --version`), the exact arguments for: no tools (`--tools \"\"`), no MCP servers, and NO settings sources of any kind (user, project, local), plus stream-json partial-message streaming; record the exact argv and the minimum version in docs/DECISIONS.md#007-claude-cli-sandbox with the help-text lines pasted.",
+  "acceptance": "DECISIONS.md#007 exists with the exact argv array and the `claude --help` excerpts proving each flag; a fixture `tests/fixtures/claude-cli-argv.json` contains that argv for 5.3c's tests.",
+  "dependencies": [
+   "2.7",
+   "6.close"
+  ],
+  "phase": "5",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.1",
+  "model": "opus",
+  "description": "packages/coach: OpenAI-compatible chat-completions client (streaming SSE) via Rust `coach_complete` (reqwest; no CORS); prompt templates for 'coach this sentence' and 'coach this paragraph' taking the sentence, its paragraph, the section question, and the topic question; system prompt forbids replacement text and requires 2–4 questions.",
+  "acceptance": "Unit tests with a mock server: tokens stream in order; 401 → 'Coach endpoint rejected the key'; ECONNREFUSED → 'Coach endpoint unreachable at <url>'; prompt template snapshots.",
+  "dependencies": [
+   "5.0"
+  ],
+  "phase": "5",
+  "execution": "loop",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.2",
+  "model": "sonnet",
+  "description": "Coach UI: 'Ask the coach' on each Rewrite sentence card and paragraph header ONLY when settings.coach.provider !== null; streamed answers under the card; pin to sidecar coach[]; settings dialog gains Base URL / Model / API key and 'Test connection' (GET /v1/models). Append §3 step 8 to one-workflow behind a mock endpoint.",
+  "acceptance": "WebdriverIO: with provider null no element with data-testid^=coach- exists anywhere and the proxy log shows zero outbound connections during a 5-minute scripted session; with the mock endpoint the button appears, streams 3 questions, pinning persists across relaunch; Test connection shows the model name.",
+  "dependencies": [
+   "5.1"
+  ],
+  "phase": "5",
+  "execution": "loop",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.3a",
+  "model": "opus",
+  "description": "Question-only enforcement filter: keep only lines ending in '?', drop any line with Dice ≥ 0.6 to the user's sentence, re-ask once with a stricter prompt if < 2 survive, then show 'The coach couldn't form a question here.' Ship scripts/coach-eval.ts which runs 20 essay-fixture sentences against a configured endpoint and prints a pass-rate table.",
+  "acceptance": "15 filter unit cases pass (including a disguised rewrite phrased as a question, 'Would you say: <rewrite>?', which is dropped); coach-eval runs against the mock server and prints the table.",
+  "dependencies": [
+   "5.2"
+  ],
+  "phase": "5",
+  "execution": "loop",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.3b",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE: Michael runs scripts/coach-eval.ts against Ollama on the MacBook Pro with a ~8B and a 70B+ open-weight model and pastes the tables plus notes on any leaked rewrites into `scripts/gate.sh 5.3b` (run 1; evidence file only, copied to DECISIONS.md#003-coach-prompts at reconciliation). Pass threshold per tier: ≥ 90% two-question yield and 0% leaks.",
+  "acceptance": "scripts/gate.sh 5.3b wrote .evidence/human/5.3b/a<n>.md (accepted.json on ACCEPT) and it validates (the next reconciliation copies it into DECISIONS.md).",
+  "dependencies": [
+   "5.3a"
+  ],
+  "blockedOnHuman": true,
+  "gateKind": "observation",
+  "recordTarget": "003-coach-prompts",
+  "phase": "5",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.3d",
+  "model": "opus",
+  "description": "Conditional prompt tuning: read /logs/human/5.3b/accepted.json and its payload.tierResults; if run 1 passed both tiers, write 'no tuning needed' to docs/coach-eval/run-1.md and pass; otherwise revise the prompt templates (one round) targeting the failing tier, with the filter unit tests still green.",
+  "acceptance": "Either docs/coach-eval/run-1.md says 'no tuning needed', or the prompt template snapshot changed and the 15 filter cases still pass.",
+  "dependencies": [
+   "5.3b"
+  ],
+  "phase": "5",
+  "execution": "loop",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.3e",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE: if tuning happened, Michael re-runs coach-eval (run 2) and pastes the tables into `scripts/gate.sh 5.3e`; then records the outcome (evidence file only): both tiers pass / one tier passes (other model listed as unsupported in settings) / neither passes and v1 ships with the coach disabled ('Coach unavailable in this build'). If no tuning happened, he records the outcome from run 1.",
+  "acceptance": "scripts/gate.sh 5.3e wrote .evidence/human/5.3e/a<n>.md (accepted.json on ACCEPT) and it validates (the next reconciliation copies it into DECISIONS.md).",
+  "dependencies": [
+   "5.3d"
+  ],
+  "blockedOnHuman": true,
+  "gateKind": "observation",
+  "recordTarget": "003-coach-prompts",
+  "phase": "5",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.3c",
+  "model": "sonnet",
+  "description": "`claude-cli` CoachProvider, CONTEXT-ONLY: settings gain provider {kind:'openai-compatible'|'claude-cli'} and, for claude-cli, `cliPath` (auto-detected via `which claude`) and `contextFiles` (user-selected files from the writing-room repo, e.g. its CLAUDE.md and chosen skill .md files). Per request the app reads the selected files itself and inlines their contents into the system prompt, creates an EMPTY temp dir, and spawns the CLI with exactly the argv recorded in DECISIONS.md#007 (from 5.0: headless stream-json with partial messages, no tools, no MCP servers, no settings sources of any kind) with cwd = that temp dir, so no project or user hooks, skills, MCP servers or slash commands can load; text deltas come from `content_block_delta` events; the 5.3a filter applies; the temp dir is deleted after the call. Full agentic writing-room access is explicitly out of scope for v1.",
+  "acceptance": "Unit tests with a fake `claude` script on PATH emitting recorded stream-json: deltas stream in order; fragmented and malformed lines handled as before; the fake asserts it received exactly the argv in tests/fixtures/claude-cli-argv.json and that cwd is a temp dir containing only the selected context files; an integration test runs with HOME pointed at a fixture home containing a malicious user-level `~/.claude/settings.json` hook, an MCP config and a plugin, plus a fixture writing-room repo with a project-level hook and skill, and asserts after a coach call that no file outside the temp dir was created or modified (directory hashes before/after for HOME and the repo), no child process other than `claude` was spawned (process-tree capture), and the temp dir is gone; exit code 1 with 'Not logged in' → mapped error; version below the pin → 'Claude Code CLI too old'.",
+  "dependencies": [
+   "5.3a",
+   "5.0"
+  ],
+  "phase": "5",
+  "execution": "loop",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "post.1",
+  "model": "opus",
+  "description": "Retrospective proposal: read docs/lessons.md, docs/reviews/*, docs/progress/journal-*.md and the per-task metrics; write docs/RETRO.md with the §10.4 metrics table and a proposed diff to BUILD-DEFAULTS.md (new defaults, removed defaults, changed thresholds), one line of evidence per change, every hunk carrying a stable id `H-<n>`.",
+  "acceptance": "docs/RETRO.md exists with the metrics table and a unified diff block against BUILD-DEFAULTS.md in which every hunk has an `Evidence:` line.",
+  "dependencies": [
+   "5.3e",
+   "5.3c"
+  ],
+  "targetBranch": "phase/5",
+  "phase": "5",
+  "execution": "loop"
+ },
+ {
+  "id": "post.2",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE: Michael accepts or rejects each hunk of the RETRO.md diff by id via `scripts/gate.sh post.2` (observation gate: the record is complete when every H-<n> has an ACCEPT or REJECT decision in the payload — per-hunk REJECTs do not reject the gate; the Phase 5 reconciliation copies it to DECISIONS.md#009-retro-approval).",
+  "acceptance": "scripts/gate.sh post.2 wrote .evidence/human/post.2/a<n>.md (accepted.json on ACCEPT) with exactly one decision per H-<n> in RETRO.md and it validates.",
+  "dependencies": [
+   "post.1"
+  ],
+  "blockedOnHuman": true,
+  "targetBranch": "phase/5",
+  "gateKind": "observation",
+  "recordTarget": "009-retro-approval",
+  "phase": "5"
+ },
+ {
+  "id": "post.3",
+  "model": "sonnet",
+  "execution": "loop-external",
+  "description": "(loop-external per RUNNER-SPEC §7; externalRepoId build-defaults at /work/.ext/build-defaults, target refs/heads/main, verify `node scripts/validate-defaults.mjs`; its journal entry lives in /logs/external/build-defaults/) reads payload.hunkDecisions from /logs/human/post.2/accepted.json and Apply the accepted hunks to the local clone of `MLSavage/build-defaults` under /work/.ext/build-defaults (cloned by Michael onto the bind mount), bump its version and retro log, commit there.",
+  "acceptance": "The build-defaults clone has a new local commit whose diff equals the ACCEPT hunks; version and retro-log lines updated.",
+  "dependencies": [
+   "post.2"
+  ],
+  "targetBranch": "phase/5",
+  "externalRepoId": "build-defaults",
+  "externalRepoPath": "/work/.ext/build-defaults",
+  "externalTargetRef": "refs/heads/main",
+  "externalVerify": "node scripts/validate-defaults.mjs",
+  "phase": "5"
+ },
+ {
+  "id": "post.4",
+  "model": "sonnet",
+  "description": "(on phase/5) Copy the approved BUILD-DEFAULTS.md from the build-defaults clone into this repo and commit.",
+  "acceptance": "This repo's BUILD-DEFAULTS.md is byte-identical to the build-defaults commit.",
+  "dependencies": [
+   "post.3"
+  ],
+  "targetBranch": "phase/5",
+  "phase": "5",
+  "execution": "loop"
+ },
+ {
+  "id": "5.version",
+  "model": "sonnet",
+  "description": "Set all version fields to 0.2.0 with the equality test; update docs/RELEASE-NOTES-v0.2.0.md draft from Phase 5 DECISIONS entries (coach + retrospective).",
+  "acceptance": "Version test asserts 0.2.0 everywhere; RELEASE-NOTES-v0.2.0 draft exists.",
+  "dependencies": [
+   "post.4"
+  ],
+  "phase": "5",
+  "execution": "loop",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.verify",
+  "model": "sonnet",
+  "description": "Phase 5 verification: freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "5.version"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/5.verify/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + one-workflow steps 1–8 (step 8 via the mock coach endpoint) green on all three runners at the integrated 5.verify SHA (= implementation_sha); release-candidate.yml built the 4 installers + SHA256SUMS.txt at that SHA with version 0.2.0 (final-package gate; artifacts in /logs/ci/5.verify/accepted/).",
+  "phase": "5",
+  "execution": "loop",
+  "targetBranch": "phase/5"
+ },
+ {
+  "id": "5.verifyh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "5.verify",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/5.verify/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "5",
+  "targetBranch": "phase/5",
+  "description": "CI gate for 5.verify: scripts/gate.sh 5.verifyh pushes integrated_sha of 5.verify to ci/5.verify/a{n}, writes run.json, waits for release-candidate.yml, fetches [\"test-logs\",\"e2e-shell\",\"installers\",\"SHA256SUMS.txt\"] into /logs/ci/5.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + one-workflow steps 1–8 (step 8 via the mock coach endpoint) green on all three runners at the integrated 5.verify SHA (= implementation_sha); release-candidate.yml built the 4 installers + SHA256SUMS.txt at that SHA with version 0.2.0 (final-package gate; artifacts in /logs/ci/5.verify/accepted/).",
+  "dependencies": [
+   "5.verify"
+  ]
+ },
+ {
+  "id": "5.4.r0a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "description": "Review attempt r0, claude reviewer, for review set 5.4 (phase 5). Review set for Phase 5 (coach + retrospective, v0.2.0). Phase checks: proxy-log proof of zero network calls while provider === null; if /logs/human/5.3e/accepted.json payload.coachOutcome is 'disabled', verify the disabled state and skip the red-team; otherwise red-team 10 prompts through each enabled provider, all filtered; retrospective diff reviewed for evidence lines; RELEASE-NOTES-v0.2.0 finalised at reconciliation. The reconciliation writes docs/RETRO-CARRYFORWARD.md with Phase 5's class-level lessons (the retrospective's evidence cutoff precedes this review; RUNNER-SPEC §9).",
+  "acceptance": "/logs/reviews/5/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "5.verifyh"
+  ],
+  "phase": "5",
+  "targetBranch": "phase/5",
+  "reviewSet": "5.4",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 5 (coach + retrospective, v0.2.0). Phase checks: proxy-log proof of zero network calls while provider === null; if /logs/human/5.3e/accepted.json payload.coachOutcome is 'disabled', verify the disabled state and skip the red-team; otherwise red-team 10 prompts through each enabled provider, all filtered; retrospective diff reviewed for evidence lines; RELEASE-NOTES-v0.2.0 finalised at reconciliation. The reconciliation writes docs/RETRO-CARRYFORWARD.md with Phase 5's class-level lessons (the retrospective's evidence cutoff precedes this review; RUNNER-SPEC §9)."
+ },
+ {
+  "id": "5.4.r0b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "description": "Review attempt r0, sol reviewer, for review set 5.4 (phase 5). Review set for Phase 5 (coach + retrospective, v0.2.0). Phase checks: proxy-log proof of zero network calls while provider === null; if /logs/human/5.3e/accepted.json payload.coachOutcome is 'disabled', verify the disabled state and skip the red-team; otherwise red-team 10 prompts through each enabled provider, all filtered; retrospective diff reviewed for evidence lines; RELEASE-NOTES-v0.2.0 finalised at reconciliation. The reconciliation writes docs/RETRO-CARRYFORWARD.md with Phase 5's class-level lessons (the retrospective's evidence cutoff precedes this review; RUNNER-SPEC §9).",
+  "acceptance": "/logs/reviews/5/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "5.verifyh"
+  ],
+  "phase": "5",
+  "targetBranch": "phase/5",
+  "reviewSet": "5.4",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 5 (coach + retrospective, v0.2.0). Phase checks: proxy-log proof of zero network calls while provider === null; if /logs/human/5.3e/accepted.json payload.coachOutcome is 'disabled', verify the disabled state and skip the red-team; otherwise red-team 10 prompts through each enabled provider, all filtered; retrospective diff reviewed for evidence lines; RELEASE-NOTES-v0.2.0 finalised at reconciliation. The reconciliation writes docs/RETRO-CARRYFORWARD.md with Phase 5's class-level lessons (the retrospective's evidence cutoff precedes this review; RUNNER-SPEC §9)."
+ },
+ {
+  "id": "5.4.r0c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "description": "Review attempt r0, grok reviewer, for review set 5.4 (phase 5). Review set for Phase 5 (coach + retrospective, v0.2.0). Phase checks: proxy-log proof of zero network calls while provider === null; if /logs/human/5.3e/accepted.json payload.coachOutcome is 'disabled', verify the disabled state and skip the red-team; otherwise red-team 10 prompts through each enabled provider, all filtered; retrospective diff reviewed for evidence lines; RELEASE-NOTES-v0.2.0 finalised at reconciliation. The reconciliation writes docs/RETRO-CARRYFORWARD.md with Phase 5's class-level lessons (the retrospective's evidence cutoff precedes this review; RUNNER-SPEC §9).",
+  "acceptance": "/logs/reviews/5/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "5.verifyh"
+  ],
+  "phase": "5",
+  "targetBranch": "phase/5",
+  "reviewSet": "5.4",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 5 (coach + retrospective, v0.2.0). Phase checks: proxy-log proof of zero network calls while provider === null; if /logs/human/5.3e/accepted.json payload.coachOutcome is 'disabled', verify the disabled state and skip the red-team; otherwise red-team 10 prompts through each enabled provider, all filtered; retrospective diff reviewed for evidence lines; RELEASE-NOTES-v0.2.0 finalised at reconciliation. The reconciliation writes docs/RETRO-CARRYFORWARD.md with Phase 5's class-level lessons (the retrospective's evidence cutoff precedes this review; RUNNER-SPEC §9)."
+ },
+ {
+  "id": "5.4.r0d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Reconciliation of review attempt r0 for review set 5.4 (phase 5): copy the three reports to docs/reviews/phase-5-r0-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-5-r0 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 5.verify.r1 and 5.4.r1a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions); the disabled outcome is a valid pass.",
+  "dependencies": [
+   "5.4.r0a",
+   "5.4.r0b",
+   "5.4.r0c"
+  ],
+  "phase": "5",
+  "targetBranch": "phase/5",
+  "reviewSet": "5.4",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 5 (coach + retrospective, v0.2.0). Phase checks: proxy-log proof of zero network calls while provider === null; if /logs/human/5.3e/accepted.json payload.coachOutcome is 'disabled', verify the disabled state and skip the red-team; otherwise red-team 10 prompts through each enabled provider, all filtered; retrospective diff reviewed for evidence lines; RELEASE-NOTES-v0.2.0 finalised at reconciliation. The reconciliation writes docs/RETRO-CARRYFORWARD.md with Phase 5's class-level lessons (the retrospective's evidence cutoff precedes this review; RUNNER-SPEC §9)."
+ },
+ {
+  "id": "5.close",
+  "model": "opus",
+  "execution": "runner",
+  "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/5 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; release checks — every version field == 0.2.0, the approved product candidate (accepted attempt of the newest passing attempt's verifier gate, via its accepted.json) has sha == that attempt's verification_sha, an ancestor of the proposed commit differing only by the docs allowlist, tag object v0.2.0 created; write the close intent; one ref transaction moving main, the tag; terminal close (no nextPhase): finalise .evidence/closes/5.json only.",
+  "acceptance": "main == reconciliation_sha of the newest Phase 5 review attempt (verdict PASS); suite green on that commit; all version fields == 0.2.0; tag v0.2.0 points at main; the candidate sha equals the newest passing attempt's verification_sha and is an ancestor; closes/<N>.json follows the v1 schema with tag_object_oid, tag_target_sha and refs[]; no phase record written (terminal); .evidence/closes/5.json written after the ref transaction; a re-run of the close is a no-op.",
+  "dependencies": [
+   "5.4.r0d"
+  ],
+  "targetBranch": "main",
+  "sourceBranches": [
+   "phase/5"
+  ],
+  "releaseVersion": "0.2.0",
+  "phase": "5"
+ },
+ {
+  "id": "6.1",
+  "model": "sonnet",
+  "description": "Release workflows + rc1: set all version fields (tauri.conf.json, Cargo.toml, package.json) to 0.1.0-rc1 with the equality test; release.yml on the final tag v* (publishes) and release-candidate.yml on push to ci/** refs (uploads installers as artifacts, publishes nothing) — both build: macOS universal .dmg, Linux .AppImage + .deb, Windows .msi with sidecars, SHA256SUMS.txt; docs/INSTALL.md with Gatekeeper (`xattr -dr com.apple.quarantine`), SmartScreen, and Arch (`fuse2` for AppImage) notes.",
+  "acceptance": "Version test asserts 0.1.0-rc1 everywhere; release.yml and release-candidate.yml pass actionlint; a local `pnpm tauri build` in the container produces the Linux .AppImage and .deb and SHA256SUMS.txt verifies against them; INSTALL.md present.",
+  "dependencies": [
+   "4.close"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.1/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "release-candidate.yml ran at the integrated 6.1 SHA on ref ci/6.1/a<n> and produced 4 installers + SHA256SUMS.txt as artifacts (rc1); each installer installs and launches on its runner (macOS `open`, Linux AppImage exec, Windows `msiexec /qn`) and writes a launch marker file; artifacts under /logs/ci/6.1/accepted/ and accepted.json records the producer run_id, run URL, SHA and the SHA-256 of every artifact (RUNNER-SPEC §1). No tag is created.",
+  "phase": "6",
+  "execution": "loop",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "6.1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.1/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "description": "CI gate for 6.1: scripts/gate.sh 6.1h pushes integrated_sha of 6.1 to ci/6.1/a{n}, writes run.json, waits for release-candidate.yml, fetches [\"installers\",\"SHA256SUMS.txt\"] into /logs/ci/6.1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "release-candidate.yml ran at the integrated 6.1 SHA on ref ci/6.1/a<n> and produced 4 installers + SHA256SUMS.txt as artifacts (rc1); each installer installs and launches on its runner (macOS `open`, Linux AppImage exec, Windows `msiexec /qn`) and writes a launch marker file; artifacts under /logs/ci/6.1/accepted/ and accepted.json records the producer run_id, run URL, SHA and the SHA-256 of every artifact (RUNNER-SPEC §1). No tag is created.",
+  "dependencies": [
+   "6.1"
+  ]
+ },
+ {
+  "id": "6.2",
+  "model": "sonnet",
+  "description": "Cross-platform measurement workflow: add .github/workflows/measure.yml, triggered by push to ci/** refs, that reads `ci-inputs/measure.json` from the tree — a file THIS TASK writes and commits (gates never commit; RUNNER-SPEC §3) from /logs/ci/6.1/accepted.json: producer run_id, producer SHA, per-artifact SHA-256 — downloads the rc1 installers from that exact producer run via the GitHub API, verifies the hashes, then on all three runners installs them, runs one-workflow against the installed app, runs sentences.cases.json inside each real webview via the WDIO harness, captures per-OS screenshots of essay-fixture in rendered view, and uploads all of it plus a producer-manifest artifact. Validated locally (actionlint; the Linux leg runs in the container against artifacts copied from /logs/ci/6.1/accepted/).",
+  "acceptance": "measure.yml passes actionlint; ci-inputs/measure.json is part of this task's commit and a test asserts it matches /logs/ci/6.1/accepted.json (run_id, sha, every artifact digest); the Linux leg runs in the container against the accepted rc1 artifacts and produces the artifact types; a unit test asserts the workflow fails when a hash in ci-inputs/measure.json mismatches.",
+  "dependencies": [
+   "6.1h"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.2/a{n}",
+   "workflow": "measure.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "one-workflow-results",
+    "segmenter-results",
+    "screenshots",
+    "producer-manifest"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "measure.yml ran on all three runners at the integrated 6.2 SHA (which already contains ci-inputs/measure.json) on ref ci/6.2/a<n>, downloaded the rc1 installers from the producer run named in ci-inputs/measure.json with matching hashes (producer-manifest artifact records run id, SHA and hashes), and its artifacts are under /logs/ci/6.2/accepted/.",
+  "phase": "6",
+  "execution": "loop",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.2h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "6.2",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.2/a{n}",
+   "workflow": "measure.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "one-workflow-results",
+    "segmenter-results",
+    "screenshots",
+    "producer-manifest"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "description": "CI gate for 6.2: scripts/gate.sh 6.2h pushes integrated_sha of 6.2 to ci/6.2/a{n}, writes run.json, waits for measure.yml, fetches [\"one-workflow-results\",\"segmenter-results\",\"screenshots\",\"producer-manifest\"] into /logs/ci/6.2/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "measure.yml ran on all three runners at the integrated 6.2 SHA (which already contains ci-inputs/measure.json) on ref ci/6.2/a<n>, downloaded the rc1 installers from the producer run named in ci-inputs/measure.json with matching hashes (producer-manifest artifact records run id, SHA and hashes), and its artifacts are under /logs/ci/6.2/accepted/.",
+  "dependencies": [
+   "6.2"
+  ]
+ },
+ {
+  "id": "6.2m",
+  "model": "sonnet",
+  "execution": "replan",
+  "description": "Measurement analysis (a RE-PLANNING GATE, not a fix task): from /logs/ci/6.2/accepted/ write docs/PLATFORM-NOTES.md listing every divergence (fonts, scrollbars, drag ghosts, segmenter diffs) with a proposed fix and size; treat the rc1 captures as diagnostic inputs only (kept in /logs/ci/6.2/accepted/, not committed). Emits DONE 6.2m; after integration the runner emits `REPLAN 6.2r` (RUNNER-SPEC §2).",
+  "acceptance": "PLATFORM-NOTES.md exists with the divergence table; segmenter results per webview recorded; no fix was attempted in this task.",
+  "dependencies": [
+   "6.2h"
+  ],
+  "replanTarget": "6.2r",
+  "phase": "6",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.2r",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Re-planning (principal engineer, interactive): convert PLATFORM-NOTES.md (from 6.2m) into explicit tasks 6.2.1 … 6.2.n appended to PRD §8 and ralph/tasks.json, each with its own acceptance criterion, each depending on 6.2r; make 6.3 depend on all of them. If there are zero divergences, record that and make 6.3 depend on 6.2r alone.",
+  "acceptance": "PRD §8 and tasks.json contain the 6.2.x tasks (or the explicit zero-divergence note); `node ralph/validate-tasks.mjs` passes.",
+  "dependencies": [
+   "6.2m"
+  ],
+  "phase": "6",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.3",
+  "model": "sonnet",
+  "description": "Final cross-platform verification: layout parity assertions added to one-workflow (heading count, editor column width, no horizontal overflow); generate candidate per-OS baseline PNGs of essay-fixture from the post-fix build (via the CI gate, which builds the post-fix app in the same workflow run rather than consuming rc artifacts) into e2e/shell/baselines/candidate/.",
+  "acceptance": "Parity assertions pass in the container; Linux candidate baseline generated locally.",
+  "dependencies": [
+   "6.2r"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.3/a{n}",
+   "workflow": "measure.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "one-workflow-results",
+    "screenshots",
+    "build-manifest"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "measure.yml ran on all three runners at the integrated 6.3 SHA; parity assertions green on all three; candidate baselines for macOS and Windows fetched to /logs/ci/6.3/accepted/.",
+  "phase": "6",
+  "execution": "loop",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.3h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "6.3",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.3/a{n}",
+   "workflow": "measure.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "one-workflow-results",
+    "screenshots",
+    "build-manifest"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "description": "CI gate for 6.3: scripts/gate.sh 6.3h pushes integrated_sha of 6.3 to ci/6.3/a{n}, writes run.json, waits for measure.yml, fetches [\"one-workflow-results\",\"screenshots\",\"build-manifest\"] into /logs/ci/6.3/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "measure.yml ran on all three runners at the integrated 6.3 SHA; parity assertions green on all three; candidate baselines for macOS and Windows fetched to /logs/ci/6.3/accepted/.",
+  "dependencies": [
+   "6.3"
+  ]
+ },
+ {
+  "id": "6.3v",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE (approval; outcomes ACCEPT/REJECT): Michael views the three candidate baselines from /logs/ci/6.3/accepted/ and accepts or rejects each via `scripts/gate.sh 6.3v`.",
+  "acceptance": "scripts/gate.sh 6.3v wrote .evidence/human/6.3v/a<n>.md (accepted.json on ACCEPT) with ACCEPT or REJECT per OS and an overall outcome (ACCEPT only if all three accepted); on REJECT the runner records a plan-gate request (RUNNER-SPEC §2) and 6.3a stays blocked until an attempt with outcome ACCEPT exists.",
+  "dependencies": [
+   "6.3h"
+  ],
+  "blockedOnHuman": true,
+  "gateKind": "approval",
+  "recordTarget": "008-visual-baselines",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "REJECT": "plan-gate"
+  },
+  "phase": "6",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.3a",
+  "model": "sonnet",
+  "description": "Promote the candidate baselines whose payload.baselineDecisions entry is ACCEPT in /logs/human/6.3v/accepted.json to e2e/shell/baselines/<os>/ and add the per-OS 0.5% pixel-delta assertion to one-workflow.",
+  "acceptance": "Approved PNGs committed under baselines/<os>/; Linux comparison passes in the container.",
+  "dependencies": [
+   "6.3v"
+  ],
+  "phase": "6",
+  "execution": "loop",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.3b",
+  "model": "sonnet",
+  "description": "Release candidate 2: bump version fields to 0.1.0-rc2 (tauri.conf.json, Cargo.toml, package.json) and validate they agree (no tag; the CI gate packages the integrated 6.3b SHA from an immutable ci ref).",
+  "acceptance": "A test asserts all version fields equal 0.1.0-rc2.",
+  "dependencies": [
+   "6.3a"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.3b/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "release-candidate.yml ran at the integrated 6.3b SHA on ref ci/6.3b/a<n> and produced 4 installers + SHA256SUMS.txt (version 0.1.0-rc2) as artifacts under /logs/ci/6.3b/accepted/; the run SHA equals the integrated 6.3b SHA. No tag is created.",
+  "phase": "6",
+  "execution": "loop",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.3bh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "6.3b",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.3b/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "description": "CI gate for 6.3b: scripts/gate.sh 6.3bh pushes integrated_sha of 6.3b to ci/6.3b/a{n}, writes run.json, waits for release-candidate.yml, fetches [\"installers\",\"SHA256SUMS.txt\"] into /logs/ci/6.3b/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "release-candidate.yml ran at the integrated 6.3b SHA on ref ci/6.3b/a<n> and produced 4 installers + SHA256SUMS.txt (version 0.1.0-rc2) as artifacts under /logs/ci/6.3b/accepted/; the run SHA equals the integrated 6.3b SHA. No tag is created.",
+  "dependencies": [
+   "6.3b"
+  ]
+ },
+ {
+  "id": "6.4",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE: Michael installs the rc2 build from the artifacts under /logs/ci/6.3b/accepted/ on the MacBook Pro, the Mini, the Omarchy machine, and his son's Windows machine and runs the one workflow by hand on each.",
+  "acceptance": "scripts/gate.sh 6.4 wrote .evidence/human/6.4/a<n>.md (accepted.json on ACCEPT) and it validates (the next reconciliation copies it into DECISIONS.md).",
+  "dependencies": [
+   "6.3bh"
+  ],
+  "blockedOnHuman": true,
+  "gateKind": "observation",
+  "recordTarget": "005-v1-acceptance",
+  "phase": "6",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.verify",
+  "model": "sonnet",
+  "description": "Phase 6 verification: freeze dependencies (no lockfile change), run the full suite in the container, (release-candidate.yml already exists from 6.1) so the CI gate is the final-package gate: installers built from the exact product tree that will be tagged (the tagged commit adds only the review documents; docs/PUBLISH.md's manual check compares the packages rebuilt from the tagged commit against the digests in this gate's accepted.json).",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "6.6"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.verify/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + one-workflow steps 1–7 green on all three runners at the integrated 6.verify SHA (= implementation_sha); release-candidate.yml built the 4 installers + SHA256SUMS.txt at that SHA with version 0.1.0 (the final-package gate; artifacts under /logs/ci/6.verify/accepted/; the tagged commit will differ from this SHA only by review documents).",
+  "phase": "6",
+  "execution": "loop",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.verifyh",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "6.verify",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/6.verify/a{n}",
+   "workflow": "release-candidate.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "installers",
+    "SHA256SUMS.txt"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "description": "CI gate for 6.verify: scripts/gate.sh 6.verifyh pushes integrated_sha of 6.verify to ci/6.verify/a{n}, writes run.json, waits for release-candidate.yml, fetches [\"test-logs\",\"e2e-shell\",\"installers\",\"SHA256SUMS.txt\"] into /logs/ci/6.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + one-workflow steps 1–7 green on all three runners at the integrated 6.verify SHA (= implementation_sha); release-candidate.yml built the 4 installers + SHA256SUMS.txt at that SHA with version 0.1.0 (the final-package gate; artifacts under /logs/ci/6.verify/accepted/; the tagged commit will differ from this SHA only by review documents).",
+  "dependencies": [
+   "6.verify"
+  ]
+ },
+ {
+  "id": "6.5.r0a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "description": "Review attempt r0, claude reviewer, for review set 6.5 (phase 6). Review set for Phase 6 (whole-release review at the implementation SHA: diff from the Phase 6 base SHA, rc2 installers from /logs/ci/6.3b/accepted/ and the final-package installers from /logs/ci/6.verify/accepted/, INSTALL.md, PLATFORM-NOTES.md, RELEASE-NOTES, Michael's #005 notes). Blockers from Michael's manual runs or any reviewer require fix tasks and a replacement review set; only nits and explicitly approved non-blocking findings enter docs/V1.1-BACKLOG.md.",
+  "acceptance": "/logs/reviews/6/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "6.verifyh"
+  ],
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "reviewSet": "6.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 6 (whole-release review at the implementation SHA: diff from the Phase 6 base SHA, rc2 installers from /logs/ci/6.3b/accepted/ and the final-package installers from /logs/ci/6.verify/accepted/, INSTALL.md, PLATFORM-NOTES.md, RELEASE-NOTES, Michael's #005 notes). Blockers from Michael's manual runs or any reviewer require fix tasks and a replacement review set; only nits and explicitly approved non-blocking findings enter docs/V1.1-BACKLOG.md."
+ },
+ {
+  "id": "6.5.r0b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "description": "Review attempt r0, sol reviewer, for review set 6.5 (phase 6). Review set for Phase 6 (whole-release review at the implementation SHA: diff from the Phase 6 base SHA, rc2 installers from /logs/ci/6.3b/accepted/ and the final-package installers from /logs/ci/6.verify/accepted/, INSTALL.md, PLATFORM-NOTES.md, RELEASE-NOTES, Michael's #005 notes). Blockers from Michael's manual runs or any reviewer require fix tasks and a replacement review set; only nits and explicitly approved non-blocking findings enter docs/V1.1-BACKLOG.md.",
+  "acceptance": "/logs/reviews/6/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "6.verifyh"
+  ],
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "reviewSet": "6.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 6 (whole-release review at the implementation SHA: diff from the Phase 6 base SHA, rc2 installers from /logs/ci/6.3b/accepted/ and the final-package installers from /logs/ci/6.verify/accepted/, INSTALL.md, PLATFORM-NOTES.md, RELEASE-NOTES, Michael's #005 notes). Blockers from Michael's manual runs or any reviewer require fix tasks and a replacement review set; only nits and explicitly approved non-blocking findings enter docs/V1.1-BACKLOG.md."
+ },
+ {
+  "id": "6.5.r0c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "description": "Review attempt r0, grok reviewer, for review set 6.5 (phase 6). Review set for Phase 6 (whole-release review at the implementation SHA: diff from the Phase 6 base SHA, rc2 installers from /logs/ci/6.3b/accepted/ and the final-package installers from /logs/ci/6.verify/accepted/, INSTALL.md, PLATFORM-NOTES.md, RELEASE-NOTES, Michael's #005 notes). Blockers from Michael's manual runs or any reviewer require fix tasks and a replacement review set; only nits and explicitly approved non-blocking findings enter docs/V1.1-BACKLOG.md.",
+  "acceptance": "/logs/reviews/6/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "6.verifyh"
+  ],
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "reviewSet": "6.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 6 (whole-release review at the implementation SHA: diff from the Phase 6 base SHA, rc2 installers from /logs/ci/6.3b/accepted/ and the final-package installers from /logs/ci/6.verify/accepted/, INSTALL.md, PLATFORM-NOTES.md, RELEASE-NOTES, Michael's #005 notes). Blockers from Michael's manual runs or any reviewer require fix tasks and a replacement review set; only nits and explicitly approved non-blocking findings enter docs/V1.1-BACKLOG.md."
+ },
+ {
+  "id": "6.5.r0d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "description": "Reconciliation of review attempt r0 for review set 6.5 (phase 6): copy the three reports to docs/reviews/phase-6-r0-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-6-r0 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 6.verify.r1 and 6.5.r1a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "6.5.r0a",
+   "6.5.r0b",
+   "6.5.r0c"
+  ],
+  "phase": "6",
+  "targetBranch": "phase/6",
+  "reviewSet": "6.5",
+  "reviewAttempt": "r0",
+  "reviewSetDescription": "Review set for Phase 6 (whole-release review at the implementation SHA: diff from the Phase 6 base SHA, rc2 installers from /logs/ci/6.3b/accepted/ and the final-package installers from /logs/ci/6.verify/accepted/, INSTALL.md, PLATFORM-NOTES.md, RELEASE-NOTES, Michael's #005 notes). Blockers from Michael's manual runs or any reviewer require fix tasks and a replacement review set; only nits and explicitly approved non-blocking findings enter docs/V1.1-BACKLOG.md."
+ },
+ {
+  "id": "6.6",
+  "model": "sonnet",
+  "description": "Version and draft release notes: set all version fields (tauri.conf.json, Cargo.toml, package.json) to 0.1.0 with a test asserting equality; write docs/RELEASE-NOTES-v0.1.0.md as a draft from DECISIONS.md entries for Phases 0–4 and 6 so far (Phase 6 dispositions and the final backlog are added by the 6.5 reconciliation, a docs-only change).",
+  "acceptance": "Version test asserts 0.1.0 everywhere; RELEASE-NOTES draft exists and lists every DECISIONS entry by id.",
+  "dependencies": [
+   "6.4"
+  ],
+  "phase": "6",
+  "execution": "loop",
+  "targetBranch": "phase/6"
+ },
+ {
+  "id": "6.close",
+  "model": "opus",
+  "execution": "runner",
+  "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/6 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; release checks — every version field == 0.1.0, the approved product candidate (accepted attempt of the newest passing attempt's verifier gate, via its accepted.json) has sha == that attempt's verification_sha, an ancestor of the proposed commit differing only by the docs allowlist, tag object v0.1.0 created; write the close intent; one ref transaction moving main, the tag and creating phase/5 (nextPhase 5); then finalise .evidence/closes and the next phase base record.",
+  "acceptance": "main == reconciliation_sha of the newest Phase 6 review attempt (verdict PASS); suite green on that commit; all version fields == 0.1.0; tag v0.1.0 points at main; the candidate sha equals the newest passing attempt's verification_sha and is an ancestor; closes/<N>.json follows the v1 schema with tag_object_oid, tag_target_sha and refs[]; branch phase/5 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
+  "dependencies": [
+   "6.5.r0d"
+  ],
+  "targetBranch": "main",
+  "sourceBranches": [
+   "phase/6"
+  ],
+  "nextPhase": "5",
+  "nextBranch": "phase/5",
+  "releaseVersion": "0.1.0",
+  "phase": "6"
+ }
+]
