@@ -9,11 +9,12 @@ ok()  { printf 'PASS %s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; fail=1; }
 
 echo "== versions"
-for c in "node --version" "pnpm --version" "cargo --version" "rustc --version" "tauri-driver --version" \
+for c in "node --version" "pnpm --version" "cargo --version" "rustc --version" \
          "pandoc --version" "typst --version" "epubcheck --version" "pdfimages -v" "pdftotext -v" \
          "java -version" "html-validate --version" "claude --version" "codex --version" "grok --version" "git --version"; do
-  out=$($c 2>&1 | head -1) && printf '%-22s %s\n' "$c" "$out" || printf '%-22s MISSING\n' "$c"
+  out=$($c 2>&1 | head -1 || true); if [ -n "$out" ]; then printf '%-22s %s\n' "$c" "$out"; else printf '%-22s MISSING\n' "$c"; fi
 done
+printf '%-22s %s\n' "tauri-driver" "$(cargo install --list 2>/dev/null | grep -m1 '^tauri-driver' || echo MISSING) ($(tauri-driver --help 2>&1 | head -1))"
 echo "== poppler-utils (apt) $(dpkg-query -W -f='${Version}' poppler-utils 2>/dev/null)"
 
 echo "== environment"
@@ -31,7 +32,7 @@ done
 if grep -qE ' /home/agent/\.(ssh|config/gh) ' /proc/self/mounts; then bad "ssh or gh mount found"; else ok "no ~/.ssh or ~/.config/gh in /proc/self/mounts"; fi
 
 echo "== private remote"
-out=$(git ls-remote https://github.com/MLSavage/essaydown-private-authcheck 2>&1); rc=$?
+rc=0; out=$(git ls-remote https://github.com/MLSavage/essaydown-private-authcheck 2>&1) || rc=$?
 echo "$out" | head -3
 if [ $rc -ne 0 ] && echo "$out" | grep -qiE 'Authentication failed|could not read Username|terminal prompts disabled|Repository not found|403|401'; then
   ok "git ls-remote of the private authcheck repo failed (rc=$rc)"
@@ -40,7 +41,7 @@ else
 fi
 
 echo "== pdfimages"
-if pdfimages -v >/dev/null 2>&1; then ok "pdfimages -v runs"; else bad "pdfimages missing"; fi
+if pdfimages -v 2>&1 | grep -q "pdfimages version"; then ok "pdfimages -v runs: $(pdfimages -v 2>&1 | head -1)"; else bad "pdfimages missing"; fi
 
 if [ $fail -eq 0 ]; then echo "BOUNDARY-OK"; else echo "BOUNDARY-FAILED"; fi
 exit $fail

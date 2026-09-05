@@ -47,10 +47,10 @@ RUN . /etc/essaydown/versions.env && set -eux \
     && chmod 0755 /usr/local/bin/epubcheck \
     && pandoc --version | head -1 && typst --version && epubcheck --version && pdfimages -v 2>&1 | head -1
 
-# --- pnpm (corepack), html-validate, Claude Code CLI, Codex CLI (all npm, pinned)
+# --- pnpm, html-validate, Claude Code CLI, Codex CLI (all npm, pinned; corepack disabled so nothing downloads at runtime)
 RUN . /etc/essaydown/versions.env \
-    && corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate \
-    && npm install -g "html-validate@${HTML_VALIDATE_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
+    && corepack disable \
+    && npm install -g "pnpm@${PNPM_VERSION}" "html-validate@${HTML_VALIDATE_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
     && pnpm --version && html-validate --version && claude --version && codex --version
 
