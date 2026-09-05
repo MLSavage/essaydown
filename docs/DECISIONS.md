@@ -11,3 +11,16 @@ Append-only log of decisions. Planning-time entries are numbered `#000`; build-t
 - Stated fallbacks (not tasks): Linux on Electron if WebKitGTK parity fails (decided at 6.2r); PDF pipeline per #004; `claude-cli` provider removed if `claude -p` leaves subscription coverage.
 - Reviewers: Claude Opus, GPT-5.6 Sol, Grok 4.6, all on subscription; no API keys anywhere.
 - Name: working codename Essay Down; identifiers fixed (`com.savagesystems.essaydown`, `.essaydown.json`, config dir `essaydown`); a rename is a find-and-replace.
+
+## #010-push-policy (2026-09-05, task 0.0; recorded by the principal from Michael's stated policy)
+
+- `MLSavage/essaydown` is **public**. A GitHub ruleset blocks force-push and deletion on `main`.
+- Push policy: branches (`phase/*`, `task/*`, `plan/*`) and `ci/*` refs are pushed freely from the host; `main` and `v*` tags are pushed only by Michael, by hand, per `docs/PUBLISH.md`. Containers never push (RUNNER-SPEC §2; PRD §9.12).
+- Enforced on the principal's own tool use by `.claude/settings.json` (project scope) `permissions.deny`: `git push --force*`, `git push -f*`, `git push --delete*`, `git push*:*` (any explicit refspec), `git tag -d*`, `gh release*`. Consequence: the principal never pushes a refspec or deletes a ref itself; `scripts/gate.sh` (run by Michael on the host) is the only thing that pushes `ci/<id>/a<n>` refs and deletes them at `gc`.
+- Reversal: delete the six lines from `.claude/settings.json` and the ruleset on GitHub; nothing else depends on them.
+
+## #011-ci-minutes (2026-09-05, task 0.0; recorded by the principal from Michael's stated decision)
+
+- The repo was made public to get **unmetered GitHub Actions minutes** for the three-OS matrix (15 CI gates, macOS runners are the expensive leg).
+- Consequence for content: nothing personal enters the tree. `docs/fixture-essay.md` is **agent-written** (neutral topic, PRD task 0.5's fallback: the history of the fountain pen), never Michael's own essay. This supersedes the first bullet of `#000-lock-decisions` and closes the PREFLIGHT "fixture essay" item as "agent writes the fixture".
+- Leak rule restated for a public repo (BUILD-DEFAULTS §8): scans cover the whole working tree and all history; `.evidence/`, `.ext/`, `.claude/settings.local.json` stay gitignored.
