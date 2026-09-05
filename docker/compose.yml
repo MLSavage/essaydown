@@ -1,0 +1,130 @@
+# docker/compose.yml — essaydown-dev services (task 0.0). Run from the repo root:
+#   docker compose run --rm claude-task <id>        (ralph.sh does this; RALPH_ATTEMPT/RALPH_MODEL set by it)
+#   docker compose run --rm claude-review | codex-review | grok-review <phase> <attempt>
+#   docker compose run --rm boundary-check           (credential-boundary proof, 0.0 acceptance)
+#   docker compose run --rm claude-login | codex-login | grok-login   (one-time, interactive)
+# ESSAYDOWN_ROOT must be the absolute host path of the checkout (the root compose.yml and
+# ralph.sh set it); the repo is mounted at /work AND at its host path so git worktrees, whose
+# .git files carry absolute host paths, resolve inside the container without any rewriting.
+# Credentials: three named volumes owned by the container (DECISIONS #012). Nothing from the
+# host's ~/.ssh, ~/.config/gh, ~/.claude, ~/.codex or ~/.grok is mounted, ever.
+name: essaydown
+
+x-image: &image
+  image: essaydown-dev:0.0
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      NODE_VERSION: ${NODE_VERSION:-22.22.1}
+      DEBIAN_CODENAME: ${DEBIAN_CODENAME:-bookworm}
+
+x-env: &env
+  RALPH_ATTEMPT: ${RALPH_ATTEMPT:-1}
+  RALPH_MODEL: ${RALPH_MODEL:-sonnet}
+  RALPH_MAX_TURNS: ${RALPH_MAX_TURNS:-50}
+  REVIEW_PHASE: ${REVIEW_PHASE:-0}
+  REVIEW_ATTEMPT: ${REVIEW_ATTEMPT:-r0}
+  ESSAYDOWN_ROOT: ${ESSAYDOWN_ROOT:-${PWD}}
+
+services:
+  claude-task:
+    <<: *image
+    entrypoint: ["claude-task"]
+    environment: *env
+    working_dir: /work
+    volumes:
+      - ${ESSAYDOWN_ROOT:-${PWD}}:/work
+      - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence:/logs
+      - essaydown-claude-home:/home/agent/.claude
+      - essaydown-cargo-home:/home/agent/.cargo
+      - essaydown-pnpm-store:/home/agent/.local/share/pnpm
+
+  boundary-check:
+    <<: *image
+    entrypoint: ["boundary-check"]
+    environment: *env
+    volumes:
+      - ${ESSAYDOWN_ROOT:-${PWD}}:/work
+      - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence:/logs
+      - essaydown-claude-home:/home/agent/.claude
+      - essaydown-codex-home:/home/agent/.codex
+      - essaydown-grok-home:/home/agent/.grok
+
+  claude-review:
+    <<: *image
+    entrypoint: ["claude-review"]
+    environment: *env
+    working_dir: /snapshot
+    volumes:
+      - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.wt/review-claude:/snapshot:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence:/logs:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence/reviews/${REVIEW_PHASE:-0}/${REVIEW_ATTEMPT:-r0}/claude:/report
+      - essaydown-claude-home:/home/agent/.claude
+      - essaydown-cargo-home:/home/agent/.cargo
+      - essaydown-pnpm-store:/home/agent/.local/share/pnpm
+
+  codex-review:
+    <<: *image
+    entrypoint: ["codex-review"]
+    environment: *env
+    working_dir: /snapshot
+    volumes:
+      - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.wt/review-sol:/snapshot:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence:/logs:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence/reviews/${REVIEW_PHASE:-0}/${REVIEW_ATTEMPT:-r0}/sol:/report
+      - essaydown-codex-home:/home/agent/.codex
+      - essaydown-cargo-home:/home/agent/.cargo
+      - essaydown-pnpm-store:/home/agent/.local/share/pnpm
+
+  grok-review:
+    <<: *image
+    entrypoint: ["grok-review"]
+    environment: *env
+    working_dir: /snapshot
+    volumes:
+      - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.wt/review-grok:/snapshot:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence:/logs:ro
+      - ${ESSAYDOWN_ROOT:-${PWD}}/.evidence/reviews/${REVIEW_PHASE:-0}/${REVIEW_ATTEMPT:-r0}/grok:/report
+      - essaydown-grok-home:/home/agent/.grok
+
+  # One-time interactive logins (subscription accounts; the login state persists in the named volumes).
+  claude-login:
+    <<: *image
+    entrypoint: ["claude"]
+    command: ["/login"]
+    stdin_open: true
+    tty: true
+    working_dir: /home/agent
+    volumes:
+      - essaydown-claude-home:/home/agent/.claude
+  codex-login:
+    <<: *image
+    entrypoint: ["codex"]
+    command: ["login", "--device-auth"]
+    stdin_open: true
+    tty: true
+    working_dir: /home/agent
+    volumes:
+      - essaydown-codex-home:/home/agent/.codex
+  grok-login:
+    <<: *image
+    entrypoint: ["grok"]
+    command: ["login"]
+    stdin_open: true
+    tty: true
+    working_dir: /home/agent
+    volumes:
+      - essaydown-grok-home:/home/agent/.grok
+
+volumes:
+  essaydown-claude-home:
+  essaydown-codex-home:
+  essaydown-grok-home:
+  essaydown-cargo-home:
+  essaydown-pnpm-store:

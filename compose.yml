@@ -1,0 +1,6 @@
+# Root compose file: lets `docker compose run --rm <service> …` work from the repo root.
+# The real definitions live in docker/compose.yml. ESSAYDOWN_ROOT defaults to this directory's
+# absolute path when run from the repo root (compose exports PWD).
+include:
+  - path: docker/compose.yml
+    env_file: docker/versions.env
