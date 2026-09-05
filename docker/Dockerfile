@@ -60,7 +60,7 @@ RUN . /etc/essaydown/versions.env \
     && mkdir -p /opt/grok-home /opt/grok/bin \
     && HOME=/opt/grok-home GROK_BIN_DIR=/opt/grok/bin bash -c 'curl -fsSL https://x.ai/cli/install.sh | bash -s "$0"' "$GROK_VERSION" \
     && chmod -R a+rX /opt/grok-home /opt/grok \
-    && ln -s /opt/grok/bin/grok /usr/local/bin/grok \
+    && ln -sf /opt/grok/bin/grok /usr/local/bin/grok \
     && HOME=/opt/grok-home grok --version
 
 # --- git identity + safety inside the container; no credential helper anywhere
