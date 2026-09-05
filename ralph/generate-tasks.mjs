@@ -72,7 +72,7 @@ export function expand(raw) {
   const rename = new Map(); // raw id → id that dependents must use instead
   for (const t of raw) {
     const task = { ...t };
-    task.phase = phaseOf(task.id);
+    task.phase = task.phase !== undefined ? String(task.phase) : phaseOf(task.id);
     if (!task.execution) task.execution = task.model === "review-set" ? "review-set" : "loop";
     if (!task.dependencies) task.dependencies = [];
     if (/\.close$/.test(task.id)) {

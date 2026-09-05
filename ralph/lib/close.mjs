@@ -37,7 +37,7 @@ export function closePhase(ctx, phase) {
     if (existsSync(finalPath)) {
       const rec = readJson(finalPath);
       validateRecord(rec);
-      const drift = rec.refs.filter((r) => (refOid(ctx.root, r.ref) ?? ZERO) !== r.intended_oid);
+      const drift = rec.refs.filter((r) => refDrifted(ctx, rec, r));
       if (drift.length) { emit(`CLOSE-DRIFT ${phase}: ${drift.map((d) => `${d.ref}=${(refOid(ctx.root, d.ref) ?? "absent").slice(0, 7)}≠${d.intended_oid.slice(0, 7)}`).join(", ")}`); return { signal: "CLOSE-DRIFT" }; }
       if (ctx.rec(closeTask.id).status !== "passed") ctx.set(closeTask.id, { status: "passed", integrated_sha: rec.main_sha, finished_at: now() }, "close re-entered (no-op)");
       emit(`CLOSED ${phase} (no-op: ${rec.main_sha.slice(0, 7)})`);
@@ -128,6 +128,14 @@ function finalise(ctx, phase, closeTask, rec, intentPath, finalPath) {
   writeSummary(ctx);
   emit(`CLOSED ${phase} main ${rec.main_sha.slice(0, 7)}${rec.tag ? " tag " + rec.tag.name : ""}${rec.next_branch ? " next " + rec.next_branch : ""}`);
   return { ok: true, record: rec };
+}
+
+/** Tags must still equal intended_oid; branches (main at a later close, the next phase branch) legitimately
+ *  advance fast-forward from it, so a branch has drifted only when intended_oid is no longer its ancestor. */
+export function refDrifted(ctx, rec, r) {
+  const cur = refOid(ctx.root, r.ref);
+  if (r.ref.startsWith("refs/heads/")) return !cur || !isAncestor(ctx.root, r.intended_oid, cur);
+  return (cur ?? ZERO) !== r.intended_oid;
 }
 
 function validateRecord(rec) {

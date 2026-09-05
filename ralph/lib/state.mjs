@@ -58,6 +58,7 @@ export class Ctx {
     const t = this.task(id);
     return t.dependencies.every((d) => {
       const r = s[d];
+      if (r && r.status === "superseded") return true; // replaced by a planning commit; only that commit's fix tasks still name it
       if (!r || r.status !== "passed") return false;
       if (this.task(d).execution === "human") return r.outcome === "ACCEPT";
       return true;

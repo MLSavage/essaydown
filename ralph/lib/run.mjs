@@ -207,7 +207,10 @@ function stepPlan(ctx, plan) {
       return { signal: res.signal, id: plan.id };
     }
     // planning commit landed: sync-state; the blocked gate → superseded (replaced by the commit's new tasks)
+    const oldIds = new Set(ctx.spec().map((x) => x.id));
     syncState(ctx, { ref: res.sha, allowSupersede: [plan.gate] });
+    const notRewired = ctx.dependents(plan.gate).filter((x) => oldIds.has(x.id) && ctx.state()[x.id]?.status === "pending").map((x) => x.id);
+    if (notRewired.length) emit(`WARN ${plan.id}: pre-existing dependents of ${plan.gate} not rewired by the planning commit: ${notRewired.join(", ")}`);
     ctx.set(plan.gate, { status: "superseded", notes: `superseded by ${plan.id} (${res.sha.slice(0, 7)})` }, "plan resolved");
     writeSummary(ctx);
     return {};

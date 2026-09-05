@@ -7,6 +7,7 @@ import { emit, ciAttemptStatus } from "./gate.mjs";
 import { repoOf, targetRefOf, finishIntegration, setPlan, startTask } from "./integrate.mjs";
 import { syncState } from "./state.mjs";
 import { writeSummary } from "./summary.mjs";
+import { refDrifted } from "./close.mjs";
 
 function expectedOldOf(repo, candidate) {
   const m = /^Expected-old: ([0-9a-f]{40})/m.exec(gitOut(repo, ["log", "-1", "--format=%B", candidate]));
@@ -41,7 +42,7 @@ export function doctor(ctx) {
     if (t.execution === "human" && t.gateKind === "ci") {
       for (const n of ctx.attempts(t.id)) {
         const st = ciAttemptStatus(ctx, t.id, n);
-        const recorded = (r.status === "passed" && r.accepted_gate_attempt === n) || (r.status === "blocked" && r.attempts === n) || st === "abandoned";
+        const recorded = (r.status === "passed" && r.accepted_gate_attempt === n) || (["blocked", "superseded"].includes(r.status) && r.attempts >= n) || st === "abandoned";
         if (st === "incomplete" && !recorded) add(`incomplete ${t.id} a${n}`, `scripts/gate.sh ${t.id} --resume a${n}`);
         if (st === "accepted-unrecorded" && !recorded) add(`incomplete ${t.id} a${n} (workflow succeeded, state not transitioned)`, `scripts/gate.sh ${t.id} --resume a${n}`);
         if (st === "rejected" && !recorded && r.status !== "superseded") add(`incomplete ${t.id} a${n} (workflow failed, state not transitioned)`, `scripts/gate.sh ${t.id} --resume a${n}`);
@@ -50,7 +51,7 @@ export function doctor(ctx) {
     if (t.execution === "human" && t.gateKind !== "ci") {
       const dir = ctx.humanDir(t.id);
       for (const n of ctx.attempts(t.id)) {
-        const recorded = r.attempts >= n && ["passed", "blocked"].includes(r.status);
+        const recorded = r.attempts >= n && ["passed", "blocked", "superseded"].includes(r.status);
         if (!recorded && existsSync(join(dir, `a${n}.md`))) add(`incomplete ${t.id} a${n} (record on disk, no state transition)`, `scripts/gate.sh ${t.id} --resume a${n}`);
       }
     }
@@ -80,7 +81,7 @@ export function doctor(ctx) {
   if (existsSync(closes)) for (const f of readdirSync(closes)) {
     if (!/^\d+\.json$/.test(f)) continue;
     const rec = readJson(join(closes, f));
-    for (const r of rec.refs) if ((refOid(ctx.root, r.ref) ?? ZERO) !== r.intended_oid) add(`close-drift ${rec.phase} (${r.ref} != ${r.intended_oid.slice(0, 7)})`, `manual repair: DECISIONS.md#repair-${rec.phase}.close`);
+    for (const r of rec.refs) if (refDrifted(ctx, rec, r)) add(`close-drift ${rec.phase} (${r.ref} != ${r.intended_oid.slice(0, 7)})`, `manual repair: DECISIONS.md#repair-${rec.phase}.close`);
   }
   return out;
 }
