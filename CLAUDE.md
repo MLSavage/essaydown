@@ -33,6 +33,7 @@ You are one agent in a Ralph loop on Essay Down, a Tauri 2 + React Markdown essa
 - Every custom Rust command that takes a path enforces the `WorkspaceRoot` contract (PRD §6.4): workspace-relative paths only, canonicalised, traversal/symlink/junction/case-fold tests; `ErrorKind` assertions, not string matches.
 - Tests assert relationships and shape (both summands present, presence and absence cases), never magnitudes copied from one dataset. Counts referenced by acceptance (45 fixtures, 12 headings, 30 cases) are read from their index files where the task says so.
 - Tauri e2e uses WebdriverIO + tauri-driver under xvfb here; Playwright only for pure-web dev routes (Phases 0–1). Exported artifacts are validated by an external reader (`pdfimages`, `pdftotext`, `epubcheck`, `html-validate`).
+- Workflows named in a task's `ci` object trigger on `push` to `ci/**` refs (the gate pushes `ci/<id>/a<n>` at the integrated SHA) and upload exactly the `artifactNames` listed; they read tool versions from `docker/versions.env`.
 - Record every compiler-forced behaviour decision in the commit body rather than silencing it. JSON schemas allow `_note` string fields.
 - Secrets: `.claude/settings.local.json` is gitignored; scan the whole working tree, not just tracked files; the repo is public (DECISIONS #011), so nothing personal enters the tree — the fixture essay is agent-written.
 

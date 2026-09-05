@@ -172,3 +172,13 @@ Append-only. One line per lesson: `[<task-id or review-N>] <ISO timestamp> LESSO
 - [prd-review-12] 2026-09-05 LESSON: a CI manifest without run_id and digests cannot be checked by its consumers → every accepted.json carries run_id and per-artifact SHA-256, and every consumer verifies them.
 - [prd-review-12] 2026-09-05 LESSON: the same command list existed in two places (0.0 description, RUNNER-SPEC §11) and drifted (`plan --new-phase`, duplicates) → one list is canonical and the other says "exactly as listed in".
 - [prd-review-12] 2026-09-05 LESSON: eleven planning rounds with a stated budget: rounds 1–3 fixed the product, rounds 4–11 fixed the runner, and every runner blocker after round 5 was resolved best by removing a feature → set the budget and the cut rule before round one, and cut at the budget instead of specifying further.
+
+## From task 0.0 (2026-09-05, bootstrap on the Mac Mini)
+
+- [0.0] 2026-09-05 LESSON: Claude Code on macOS keeps its login in the Keychain, not in `~/.claude`, so "mount `~/.claude` read-only into the container" cannot work → the container logs in once itself and keeps its state in a named volume (DECISIONS #012); check where a CLI stores credentials before planning a mount.
+- [0.0] 2026-09-05 LESSON: git worktree metadata stores absolute host paths, which break under a bind mount at a different path → mount the repo at `/work` and at its host path; never rewrite `.git` files.
+- [0.0] 2026-09-05 LESSON: macOS ships no `flock` binary, so a spec that says `flock` cannot run on the host → an `O_EXCL` lock file with stale-pid recovery gives the same one-lock semantics without a dependency.
+- [0.0] 2026-09-05 LESSON: `corepack prepare --activate` as root leaves the non-root agent user with a runtime download prompt → install pnpm with `npm install -g` and disable corepack in agent images.
+- [0.0] 2026-09-05 LESSON: under `set -e`, `out=$(cmd)` aborts the script when `cmd` fails, exactly at the step whose failure was the point → write `rc=0; out=$(cmd) || rc=$?` for expected failures.
+- [0.0] 2026-09-05 LESSON: a runner test suite found three spec readings that could not run (fix tasks depending on a superseded gate; close records demanding equality for branches that legitimately advance; a `run` that stops after one task) → conformance fixtures before the first real phase, and record each reading in DECISIONS the day it is taken.
+- [0.0] 2026-09-05 LESSON: `tauri-driver` has no `--version` flag → record cargo-installed tool versions with `cargo install --list`, not by invoking the binary.
