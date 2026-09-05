@@ -2,3 +2,153 @@
 
 One entry per iteration, keyed `- [<task-id>] <ISO>`; never edited, never pruned, never carries its own commit SHA. Template in docs/progress.md. `/logs/state/summary.md` (generated) shows the last five; `docs/progress.md` is regenerated only in reconciliation commits.
 
+- [0.0] 2026-09-05T16:32:39Z Task: bootstrap — image, entrypoints, generator/validator, gate.sh, ralph.sh, conformance suite, bootstrap, agent rules. Status: Complete. Files: docker/, ralph/, scripts/, CLAUDE.md, AGENTS.md, .gitattributes, .gitignore. Tests: conformance suite ; validator 122 tasks. Iterations used: 1 (interactive, principal + Michael). First attempt passed: y. Tool calls: n/a. Reviewer overturned: pending (Phase 0 review set). Notes: versions DEBIAN_CODENAME=bookworm NODE_VERSION=22.22.1 PNPM_VERSION=11.25.0 RUST_TOOLCHAIN=1.98.1 TAURI_DRIVER_VERSION=2.0.6 PANDOC_VERSION=3.11 TYPST_VERSION=0.15.1 EPUBCHECK_VERSION=5.3.0 HTML_VALIDATE_VERSION=11.13.0 CLAUDE_CODE_VERSION=2.1.261 CODEX_VERSION=0.153.4 GROK_VERSION=1.0.13 . Checks (quoted from ralph/bootstrap.sh):
+    == docker compose build
+        #12 DONE 289.5s
+        #13 [ 8/13] RUN . /etc/essaydown/versions.env     && mkdir -p /opt/grok-home /opt/grok/bin     && HOME=/opt/grok-home GROK_BIN_DIR=/opt/grok/bin bash -c 'curl -fsSL https://x.ai/cli/install.sh | bash -s "$0"' "$GROK_VERSION"     && chmod -R a+rX /opt/grok-home /opt/grok     && ln -sf /opt/grok/bin/grok /usr/local/bin/grok     && HOME=/opt/grok-home grok --version
+        #13 1.497 Installing Grok 1.0.13 (linux-aarch64)...
+        #13 1.500   Downloading grok 1.0.13...
+        #13 73.51   Binary linked to /opt/grok/bin/grok and /opt/grok/bin/agent.
+        #13 73.52 Grok 1.0.13 installed to /opt/grok/bin/grok
+        #13 73.52   Symlinked /usr/local/bin/grok -> /opt/grok/bin/grok
+        #13 73.52   Symlinked /usr/local/bin/agent -> /opt/grok/bin/agent
+        #13 73.53   Updated /opt/grok/bin in PATH in /opt/grok-home/.bashrc.
+        #13 73.53 
+        #13 73.53 Run 'grok' or 'agent' to get started!
+        #13 73.53 grok 1.0.13 (5e9a58528b76)
+        #13 DONE 73.6s
+        #14 [ 9/13] RUN git config --system user.name "essaydown-agent"     && git config --system user.email "agent@essaydown.invalid"     && git config --system --add safe.directory '*'     && git config --system init.defaultBranch main     && git config --system pull.rebase true
+        #14 DONE 0.1s
+        #15 [10/13] COPY entrypoints/ /usr/local/bin/
+        #15 DONE 0.0s
+        #16 [11/13] RUN chmod 0755 /usr/local/bin/claude-task /usr/local/bin/claude-review /usr/local/bin/codex-review                /usr/local/bin/grok-review /usr/local/bin/boundary-check /usr/local/bin/essaydown-common.sh
+        #16 DONE 0.1s
+        #17 [12/13] WORKDIR /work
+        #17 DONE 0.0s
+        #18 [13/13] RUN mkdir -p /home/agent/.claude /home/agent/.codex /home/agent/.grok /home/agent/.cargo /home/agent/.local/share/pnpm
+        #18 DONE 0.1s
+        #19 exporting to image
+        #19 exporting layers
+        #19 exporting layers 0.7s done
+        #19 writing image sha256:495338f3c9740067a20aead35ab1e136d7c91f75c41e9dbbf55c821199ef0dd2 done
+        #19 naming to docker.io/library/essaydown-dev:0.0 done
+        #19 DONE 0.7s
+        #20 resolving provenance for metadata file
+        #20 DONE 0.0s
+         Image essaydown-dev:0.0 Built 
+    PASS docker compose build
+    == docker compose run claude-task --version
+         Container essaydown-claude-task-run-1c00608f894c Creating 
+         Container essaydown-claude-task-run-1c00608f894c Created 
+        2.1.261 (Claude Code)
+    PASS docker compose run claude-task --version
+    == docker compose run codex-review --version
+         Container essaydown-codex-review-run-f5b299673100 Creating 
+         Container essaydown-codex-review-run-f5b299673100 Created 
+        codex-cli 0.153.4
+    PASS docker compose run codex-review --version
+    == docker compose run grok-review --version
+         Container essaydown-grok-review-run-cd4dd0cd480e Creating 
+         Container essaydown-grok-review-run-cd4dd0cd480e Created 
+        grok 1.0.13 (5e9a58528b76)
+    PASS docker compose run grok-review --version
+    == credential boundary (boundary-check → BOUNDARY-OK; includes pdfimages -v)
+         Container essaydown-boundary-check-run-d6cf660de021 Creating 
+         Container essaydown-boundary-check-run-d6cf660de021 Created 
+        == versions
+        node --version         v22.22.1
+        pnpm --version         11.25.0
+        cargo --version        cargo 1.98.1 (797e8a9bc 2026-08-05)
+        rustc --version        rustc 1.98.1 (48a229cea 2026-09-01)
+        pandoc --version       pandoc 3.11
+        typst --version        typst 0.15.1 (9dfd3a08)
+        epubcheck --version    EPUBCheck v5.3.0
+        pdfimages -v           pdfimages version 22.12.0
+        pdftotext -v           pdftotext version 22.12.0
+        java -version          openjdk version "17.0.20.1" 2026-08-18
+        html-validate --version html-validate-11.13.0
+        claude --version       2.1.261 (Claude Code)
+        codex --version        codex-cli 0.153.4
+        grok --version         grok 1.0.13 (5e9a58528b76)
+        git --version          git version 2.39.5
+        tauri-driver           MISSING (USAGE: tauri-driver [FLAGS] [OPTIONS])
+        == poppler-utils (apt) 22.12.0-2+deb12u3
+        == environment
+        PASS no *_API_KEY / GH_TOKEN / GITHUB_TOKEN in env
+        PASS no SSH_AUTH_SOCK
+        == git credential helpers
+        PASS git config --show-origin --get-all credential.helper is empty
+        == mounts
+        PASS /home/agent/.ssh absent
+        PASS /home/agent/.config/gh absent
+        PASS /root/.ssh absent
+        PASS no ~/.ssh or ~/.config/gh in /proc/self/mounts
+        == private remote
+        remote: Repository not found.
+        fatal: Authentication failed for 'https://github.com/MLSavage/essaydown-private-authcheck/'
+        PASS git ls-remote of the private authcheck repo failed (rc=128)
+        == pdfimages
+        PASS pdfimages -v runs: pdfimages version 22.12.0
+        BOUNDARY-OK
+    PASS credential boundary (boundary-check → BOUNDARY-OK; includes pdfimages -v)
+    == node ralph/validate-tasks.mjs (EXPECTED_COUNT 122)
+        validate-tasks: OK 122 expanded tasks (EXPECTED_COUNT 122), phases 0,1,2,3,4,5,6, acyclic, byte-identical to PRD §8
+    PASS node ralph/validate-tasks.mjs (EXPECTED_COUNT 122)
+    == ralph/test/run.sh conformance suite (RUNNER-SPEC §12)
+          ...
+        # Subtest: validator rejects: phase without an initial verifier
+        ok 39 - validator rejects: phase without an initial verifier
+          ---
+          duration_ms: 0.082375
+          type: 'test'
+          ...
+        # Subtest: validator rejects: phase without a close
+        ok 40 - validator rejects: phase without a close
+          ---
+          duration_ms: 0.075333
+          type: 'test'
+          ...
+        # Subtest: validator rejects: unknown model
+        ok 41 - validator rejects: unknown model
+          ---
+          duration_ms: 0.076708
+          type: 'test'
+          ...
+        # Subtest: validator rejects: shell-unsafe id
+        ok 42 - validator rejects: shell-unsafe id
+          ---
+          duration_ms: 0.075083
+          type: 'test'
+          ...
+        # Subtest: review attempt chain must be linear and the close must depend on the newest d
+        ok 43 - review attempt chain must be linear and the close must depend on the newest d
+          ---
+          duration_ms: 0.157375
+          type: 'test'
+          ...
+        1..43
+        # tests 59
+        # suites 0
+        # pass 59
+        # fail 0
+        # cancelled 0
+        # skipped 0
+        # todo 0
+        # duration_ms 77399.785333
+    PASS ralph/test/run.sh conformance suite (RUNNER-SPEC §12)
+    == ralph/check-agent-rules.sh
+        check-agent-rules: OK (CLAUDE.md ≡ AGENTS.md below line 1)
+    PASS ralph/check-agent-rules.sh
+    == merge=union lessons.md merges two branches cleanly (fixture repo)
+        Auto-merging docs/lessons.md
+        merge=union: both lines present after merging a into b
+        # lessons
+        - [b] LESSON: line from b
+        - [a] LESSON: line from a
+    PASS merge=union lessons.md merges two branches cleanly (fixture repo)
+    == external clone .ext/build-defaults (clean, refs/heads/main present, validate-defaults.mjs passes)
+        validate-defaults: OK version 1.11.0, 12 sections, 12 retro entries
+        external build-defaults at 8573e0ecf117000c669a07a11fa3ab5140cdaa36 (refs/heads/main)
+    PASS external clone .ext/build-defaults (clean, refs/heads/main present, validate-defaults.mjs passes)
+    == journal entry + task(0.0) commit
+
