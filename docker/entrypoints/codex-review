@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# codex-review <phase> <attempt> — GPT Sol reviewer via Codex CLI (RUNNER-SPEC §5, PRD §9.5).
+# Same mounts as claude-review; scratch copy /scratch/sol; the container is the sandbox
+# (snapshot and logs are read-only mounts), so Codex's own sandbox is bypassed.
+source /usr/local/bin/essaydown-common.sh
+[ "${1:-}" = "--version" ] && exec codex --version
+phase="${1:?usage: codex-review <phase> <attempt>}"; attempt="${2:?attempt (r<k>)}"
+dir="/logs/reviews/$phase/$attempt"
+impl=$(cat "$dir/implementation_sha") || die "no implementation_sha in $dir"
+cold_clone sol "$impl"
+prompt="$(review_prompt sol "$phase" "$attempt") Your scratch copy for the cold build (pnpm install, pnpm lint, pnpm test, cargo test) is /scratch/sol; leave it clean."
+codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C /snapshot --add-dir /report --add-dir /scratch/sol \
+  -o /report/last-message.md "$prompt" 2>&1 | tee /report/transcript.log >/dev/null || true
+scratch_must_be_clean sol
+check_report /report sol

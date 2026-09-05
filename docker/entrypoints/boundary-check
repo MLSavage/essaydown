@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# boundary-check — proves the credential boundary of the container (task 0.0 acceptance):
+# tool versions; no *_API_KEY / GH_TOKEN / GITHUB_TOKEN; no credential.helper; no SSH_AUTH_SOCK;
+# no ~/.ssh or ~/.config/gh mount; `git ls-remote` of the private authcheck repo fails.
+# Exit 0 only when every check passes. Output is quoted in the 0.0 journal entry.
+source /usr/local/bin/essaydown-common.sh
+fail=0
+ok()  { printf 'PASS %s\n' "$*"; }
+bad() { printf 'FAIL %s\n' "$*"; fail=1; }
+
+echo "== versions"
+for c in "node --version" "pnpm --version" "cargo --version" "rustc --version" "tauri-driver --version" \
+         "pandoc --version" "typst --version" "epubcheck --version" "pdfimages -v" "pdftotext -v" \
+         "java -version" "html-validate --version" "claude --version" "codex --version" "grok --version" "git --version"; do
+  out=$($c 2>&1 | head -1) && printf '%-22s %s\n' "$c" "$out" || printf '%-22s MISSING\n' "$c"
+done
+echo "== poppler-utils (apt) $(dpkg-query -W -f='${Version}' poppler-utils 2>/dev/null)"
+
+echo "== environment"
+if env | grep -E '^[A-Za-z0-9_]*_API_KEY=|^GH_TOKEN=|^GITHUB_TOKEN=' ; then bad "credential-like environment variable present"; else ok "no *_API_KEY / GH_TOKEN / GITHUB_TOKEN in env"; fi
+if [ -n "${SSH_AUTH_SOCK:-}" ]; then bad "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"; else ok "no SSH_AUTH_SOCK"; fi
+
+echo "== git credential helpers"
+helpers=$(git config --show-origin --get-all credential.helper 2>/dev/null || true)
+if [ -n "$helpers" ]; then bad "credential.helper configured: $helpers"; else ok "git config --show-origin --get-all credential.helper is empty"; fi
+
+echo "== mounts"
+for p in "$HOME/.ssh" "$HOME/.config/gh" /root/.ssh; do
+  if mountpoint -q "$p" 2>/dev/null || [ -e "$p" ]; then bad "$p present"; else ok "$p absent"; fi
+done
+if grep -qE ' /home/agent/\.(ssh|config/gh) ' /proc/self/mounts; then bad "ssh or gh mount found"; else ok "no ~/.ssh or ~/.config/gh in /proc/self/mounts"; fi
+
+echo "== private remote"
+out=$(git ls-remote https://github.com/MLSavage/essaydown-private-authcheck 2>&1); rc=$?
+echo "$out" | head -3
+if [ $rc -ne 0 ] && echo "$out" | grep -qiE 'Authentication failed|could not read Username|terminal prompts disabled|Repository not found|403|401'; then
+  ok "git ls-remote of the private authcheck repo failed (rc=$rc)"
+else
+  bad "git ls-remote of the private authcheck repo did not fail as expected (rc=$rc)"
+fi
+
+echo "== pdfimages"
+if pdfimages -v >/dev/null 2>&1; then ok "pdfimages -v runs"; else bad "pdfimages missing"; fi
+
+if [ $fail -eq 0 ]; then echo "BOUNDARY-OK"; else echo "BOUNDARY-FAILED"; fi
+exit $fail

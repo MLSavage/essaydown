@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# claude-review <phase> <attempt> — Claude Opus reviewer (RUNNER-SPEC §5, PRD §9.5).
+# /snapshot (ro) = worktree at implementation_sha; /logs (ro); /report (rw) = the only persistent output.
+# Cold build in /scratch/claude (local clone at implementation_sha), must be clean at exit.
+source /usr/local/bin/essaydown-common.sh
+[ "${1:-}" = "--version" ] && exec claude --version
+phase="${1:?usage: claude-review <phase> <attempt>}"; attempt="${2:?attempt (r<k>)}"
+dir="/logs/reviews/$phase/$attempt"
+impl=$(cat "$dir/implementation_sha") || die "no implementation_sha in $dir"
+cold_clone claude "$impl"
+prompt="$(review_prompt claude "$phase" "$attempt") Your scratch copy for the cold build (pnpm install, pnpm lint, pnpm test, cargo test) is /scratch/claude; leave it clean."
+cd /snapshot
+mkdir -p "/logs/tasks/review-$phase-$attempt-claude" 2>/dev/null || true
+claude -p "$prompt" --dangerously-skip-permissions --model opus --max-turns "${RALPH_MAX_TURNS:-60}" \
+  --output-format stream-json --verbose 2>&1 | tee "/report/transcript.log" >/dev/null || true
+scratch_must_be_clean claude
+check_report /report claude

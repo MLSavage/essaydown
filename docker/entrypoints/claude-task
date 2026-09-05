@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# claude-task <id> — one Ralph iteration of task <id> inside its worktree (RUNNER-SPEC §4.2).
+# The runner (ralph.sh, host) created /work/.wt/<id> on branch task/<id> and sets
+# RALPH_ATTEMPT (log number), RALPH_MODEL (sonnet|opus), RALPH_MAX_TURNS.
+# Transcript: /logs/tasks/<id>/<attempt>.log (stream-json). The container never pushes.
+source /usr/local/bin/essaydown-common.sh
+id="${1:-}"
+[ -n "$id" ] || die "usage: claude-task <task-id> | --version"
+if [ "$id" = "--version" ]; then exec claude --version; fi
+
+wt="/work/.wt/$id"
+[ -d "$wt" ] || die "worktree $wt does not exist (ralph.sh creates it)"
+[ -f /work/ralph/PROMPT.md ] || die "/work/ralph/PROMPT.md missing"
+attempt="${RALPH_ATTEMPT:-1}"
+model="${RALPH_MODEL:-sonnet}"
+turns="${RALPH_MAX_TURNS:-50}"
+mkdir -p "/logs/tasks/$id"
+logfile="/logs/tasks/$id/$attempt.log"
+
+prompt=$(sed -e "s/{{TASK_ID}}/$id/g" -e "s/{{ATTEMPT}}/$attempt/g" /work/ralph/PROMPT.md)
+cd "$wt"
+log "claude-task $id attempt $attempt model $model max-turns $turns → $logfile"
+set +e
+claude -p "$prompt" \
+  --dangerously-skip-permissions \
+  --model "$model" \
+  --max-turns "$turns" \
+  --output-format stream-json --verbose \
+  2>&1 | tee "$logfile"
+rc=${PIPESTATUS[0]}
+set -e
+log "claude-task $id attempt $attempt exit $rc"
+exit "$rc"

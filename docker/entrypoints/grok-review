@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# grok-review <phase> <attempt> — Grok reviewer, read-only role (PRD §4 "Reviewers", RUNNER-SPEC §5).
+# `grok -p` single-turn with streaming-json output; Grok reads /snapshot and /logs only and cites
+# /logs/ci/<verifier_id>/accepted/ for the cold build. The entrypoint writes report.md from the
+# final assistant text if Grok did not write it itself; status.json likewise from a trailing JSON block.
+source /usr/local/bin/essaydown-common.sh
+[ "${1:-}" = "--version" ] && exec grok --version
+phase="${1:?usage: grok-review <phase> <attempt>}"; attempt="${2:?attempt (r<k>)}"
+dir="/logs/reviews/$phase/$attempt"
+impl=$(cat "$dir/implementation_sha") || die "no implementation_sha in $dir"
+prompt="$(review_prompt grok "$phase" "$attempt") You have no scratch copy: do not build or run tests; cite /logs/ci/$(cat "$dir/verifier_id" 2>/dev/null || echo "$phase.verify")/accepted/ for the cold build. Put the complete report.md content in your final answer, followed by a line containing only STATUS-JSON and then the status.json object on one line."
+cd /snapshot
+grok -p "$prompt" --output-format streaming-json --cwd /snapshot --no-subagents --disable-web-search \
+  --permission-mode bypassPermissions --max-turns "${RALPH_MAX_TURNS:-40}" 2>&1 | tee /report/transcript.log >/dev/null || true
+if [ ! -s /report/report.md ]; then
+  # Extract the final text from the NDJSON transcript (ACP session updates: agent_message_chunk text).
+  python3 - /report/transcript.log /report/report.md /report/status.json <<'PY'
+import json, sys
+src, rep, st = sys.argv[1:4]
+parts = []
+for line in open(src, encoding="utf-8", errors="replace"):
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        obj = json.loads(line)
+    except Exception:
+        continue
+    def walk(o):
+        if isinstance(o, dict):
+            if o.get("type") == "text" and isinstance(o.get("text"), str):
+                parts.append(o["text"])
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(obj)
+text = "".join(parts)
+if "STATUS-JSON" in text:
+    body, _, tail = text.rpartition("STATUS-JSON")
+    open(rep, "w").write(body.strip() + "\n")
+    tail = tail.strip()
+    start = tail.find("{")
+    if start >= 0:
+        try:
+            json.loads(tail[start:])
+            open(st, "w").write(tail[start:] + "\n")
+        except Exception:
+            pass
+else:
+    open(rep, "w").write(text)
+PY
+fi
+check_report /report grok
