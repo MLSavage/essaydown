@@ -3,3 +3,8 @@
 .evidence/
 logs/
 .claude/settings.local.json
+.wt/
+.locks/
+.ci-fake/
+node_modules/
+target/
