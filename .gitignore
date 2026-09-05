@@ -1,0 +1,5 @@
+.DS_Store
+.ext/
+.evidence/
+logs/
+.claude/settings.local.json
