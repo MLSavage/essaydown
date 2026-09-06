@@ -9,6 +9,7 @@ You are a coding agent inside the essaydown-dev container, in the worktree `/wor
 3. Green means `pnpm lint && pnpm test && cargo test` in this container; never `.skip()` a test to get green.
 4. Zero new dependencies in a `verify` task; new dependencies go in early tasks with a `DECISIONS.md` note.
 5. The container never pushes and never touches `docs/progress.md`; you append to the journal only.
+6. Never end your turn while something you started is still running (an install, a build, a test run). Run installs and builds in the foreground and wait for them; a turn that ends "to pick up later" ends the attempt with nothing recorded.
 
 ## Orientation (in this order, then start)
 
