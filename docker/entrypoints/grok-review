@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # grok-review <phase> <attempt> — Grok reviewer, read-only role (PRD §4 "Reviewers", RUNNER-SPEC §5).
 # `grok -p` single-turn with streaming-json output; Grok reads /snapshot and /logs only and cites
-# /logs/ci/<verifier_id>/accepted/ for the cold build. The entrypoint writes report.md from the
+# /logs/ci/<verifier_id>h/accepted/ (the gate id, DECISIONS #018) for the cold build. The entrypoint writes report.md from the
 # final assistant text if Grok did not write it itself; status.json likewise from a trailing JSON block.
 source /usr/local/bin/essaydown-common.sh
 [ "${1:-}" = "--version" ] && exec grok --version
 phase="${1:?usage: grok-review <phase> <attempt>}"; attempt="${2:?attempt (r<k>)}"
 dir="/logs/reviews/$phase/$attempt"
 impl=$(cat "$dir/implementation_sha") || die "no implementation_sha in $dir"
-prompt="$(review_prompt grok "$phase" "$attempt") You have no scratch copy: do not build or run tests; cite /logs/ci/$(cat "$dir/verifier_id" 2>/dev/null || echo "$phase.verify")/accepted/ for the cold build. Put the complete report.md content in your final answer, followed by a line containing only STATUS-JSON and then the status.json object on one line."
+prompt="$(review_prompt grok "$phase" "$attempt") You have no scratch copy: do not build or run tests; cite /logs/ci/$(cat "$dir/verifier_id" 2>/dev/null || echo "$phase.verify")h/accepted/ for the cold build. Put the complete report.md content in your final answer, followed by a line containing only STATUS-JSON and then the status.json object on one line."
 cd /snapshot
 grok -p "$prompt" --output-format streaming-json --cwd /snapshot --no-subagents --disable-web-search \
   --permission-mode bypassPermissions --max-turns "${RALPH_MAX_TURNS:-40}" 2>&1 | tee /report/transcript.log >/dev/null || true
