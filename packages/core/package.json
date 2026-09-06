@@ -20,7 +20,8 @@
     "remark-frontmatter": "^5.0.0",
     "remark-parse": "^11.0.0",
     "remark-stringify": "^11.0.0",
-    "unified": "^11.0.5"
+    "unified": "^11.0.5",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/mdast": "^4.0.4",
