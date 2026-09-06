@@ -46,9 +46,11 @@ export function createParser(): Processor<Root> {
 
 /**
  * Parse Markdown into the mdast root of PRD §6.1. Line endings are normalised to LF on the way
- * in; every other byte reaches the tree as written, and the opaque set (`html`, `yaml`) keeps
- * its source bytes verbatim in `node.value`.
+ * in — micromark itself only drops the CR between blocks, keeping it inside multi-line
+ * paragraphs and fenced code, so the rewrite runs over the whole document (opaque nodes
+ * included) before the parser ever sees it. Every other byte reaches the tree as written, and
+ * the opaque set (`html`, `yaml`) keeps its (now LF-only) source bytes verbatim in `node.value`.
  */
 export function parse(markdown: string): Root {
-  return createParser().parse(markdown);
+  return createParser().parse(markdown.replace(/\r\n?/g, "\n"));
 }
