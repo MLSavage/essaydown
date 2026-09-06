@@ -1013,9 +1013,12 @@ describe("front-matter edges", () => {
     );
   });
 
-  it("carries an unknown double-quote escape through unchanged and refuses a dangling one", () => {
+  // Rewritten by 0.15 (DECISIONS #review-0-r0 F2): the grammar of §6.1 has no "some other escape"
+  // rule, so `\z` is read-only rather than silently read as `z` and written back as a `z`.
+  it("refuses an unknown double-quote escape and an unterminated one", () => {
     expect(readFrontMatter(withFrontMatter('question: "a \\z b"')).question).toMatchObject({
-      value: "a z b",
+      writable: false,
+      reason: "malformed",
     });
     expect(readFrontMatter(withFrontMatter('question: "dangling \\')).question).toMatchObject({
       writable: false,
@@ -1048,10 +1051,19 @@ describe("front-matter edges", () => {
     );
   });
 
-  it("quotes a value that carries a newline", () => {
+  // Rewritten by 0.15 (DECISIONS #review-0-r0 F2): the old expectation wrote `"one\ntwo"` as two
+  // physical lines into a one-line block and reported success.
+  it("refuses a replacement value that carries a newline", () => {
     const root = withFrontMatter("question: plain");
-    expect(yamlOf(writeFrontMatter(root, { question: "one\ntwo" }).root)).toBe(
-      'question: "one\\ntwo"',
-    );
+    const before = yamlOf(root);
+    const write = writeFrontMatter(root, { question: "one\ntwo" });
+    expect(write).toMatchObject({
+      ok: false,
+      error: FRONT_MATTER_UNSUPPORTED,
+      key: "question",
+      reason: "multi-line",
+    });
+    expect(write.root).toBe(root);
+    expect(yamlOf(write.root)).toBe(before);
   });
 });

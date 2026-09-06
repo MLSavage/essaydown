@@ -658,6 +658,11 @@ export const FRONT_MATTER_UNSUPPORTED = "FrontMatterUnsupported";
  * Why an app-owned key is read-only. `block-scalar`, `flow`, `indicator`, `multi-line`,
  * `duplicate` and `malformed` are the §6.1 list; `no-front-matter` is the document having no yaml
  * block at all, which §6.1 does not ask the app to create.
+ *
+ * `multi-line` is also the reason a *replacement value* is refused when it carries a `\n` or a
+ * `\r`: this writer rewrites one physical line, so such a value has no representation here in any
+ * quoting style. `malformed` covers a scalar outside the grammar below — a plain scalar carrying
+ * `: ` or opening on an indicator, an unknown escape, a quoted scalar with junk after it.
  */
 export type FrontMatterUnsupportedReason =
   | "block-scalar"
@@ -771,6 +776,32 @@ function scanFrontMatter(value: string): { lines: string[]; keys: KeyLine[]; mal
 }
 
 /**
+ * The grammar of the two app-owned scalars (§6.1). A value the app cannot both read and re-emit
+ * without changing what YAML would parse from the line is not writable: `readFrontMatter` reports
+ * it read-only with a reason, and `writeFrontMatter` returns `FrontMatterUnsupported` before a
+ * byte is touched.
+ *
+ * - **plain** — one line, no `: ` sequence (nor a trailing `:`), no ` #` sequence, and no leading
+ *   YAML indicator character. `needsQuoting` is that same test on the way out, so a plain scalar
+ *   is readable exactly when the writer would have emitted it plain.
+ * - **double-quoted** — closes on its own line, and carries only the escapes `\\ \" \n \t \r \/
+ *   \b \f \0 \uXXXX \xXX`, decoded on the way in and re-encoded on the way out. Any other escape
+ *   (`\q`, `\'`, a `\u` without four hex digits) is unsupported, not carried through as its letter.
+ * - **single-quoted** — closes on its own line; `''` is one literal quote.
+ *
+ * A quoted scalar may be followed only by spaces or tabs and an optional `# comment`.
+ */
+
+/** Every YAML indicator character (`c-indicator`); none of them may open a plain scalar. */
+const YAML_INDICATORS = "-?:,[]{}#&*!|>'\"%@`";
+
+/** What may follow a closing quote on the line: spaces or tabs, then an optional `# comment`. */
+const SCALAR_TAIL = /^(?:[ \t]*|[ \t]+#.*)$/u;
+
+/** A replacement value this writer cannot put on one physical line, whatever the quoting. */
+const LINE_BREAK = /[\n\r]/u;
+
+/**
  * Split a plain scalar from the leading whitespace before it and the trailing ` # comment` after it
  * (YAML only reads a `#` as a comment when whitespace precedes it).
  */
@@ -788,8 +819,18 @@ function splitPlain(raw: string): { lead: number; value: string; comment: string
   return { lead, value: raw.slice(lead, end), comment: raw.slice(end) };
 }
 
-/** Read a single-quoted scalar (`''` is a literal quote), or null if it does not close on the line. */
-function readSingleQuoted(raw: string): { value: string; rest: string } | null {
+/** A scalar read off one line: its value and the rest of the line, or why it is not supported. */
+type ScalarRead =
+  | { readonly ok: true; readonly value: string; readonly rest: string }
+  | { readonly ok: false; readonly reason: FrontMatterUnsupportedReason };
+
+/** The scalar does not close on this line, so its value is not this line's to rewrite. */
+const UNTERMINATED: ScalarRead = { ok: false, reason: "multi-line" };
+/** The scalar closes but says something the grammar above does not cover. */
+const MALFORMED: ScalarRead = { ok: false, reason: "malformed" };
+
+/** Read a single-quoted scalar (`''` is a literal quote). */
+function readSingleQuoted(raw: string): ScalarRead {
   let value = "";
   for (let i = 1; i < raw.length; i += 1) {
     if (raw[i] !== "'") {
@@ -801,36 +842,105 @@ function readSingleQuoted(raw: string): { value: string; rest: string } | null {
       i += 1;
       continue;
     }
-    return { value, rest: raw.slice(i + 1) };
+    return { ok: true, value, rest: raw.slice(i + 1) };
   }
-  return null;
+  return UNTERMINATED;
 }
 
+/** The single-character escapes of the grammar, decoded. */
 const DOUBLE_ESCAPES: Record<string, string> = {
+  "\\": "\\",
+  '"': '"',
+  "/": "/",
   n: "\n",
   t: "\t",
   r: "\r",
+  b: "\b",
+  f: "\f",
   "0": "\0",
-  '"': '"',
-  "\\": "\\",
-  "/": "/",
 };
 
-/** Read a double-quoted scalar with backslash escapes, or null if it does not close on the line. */
-function readDoubleQuoted(raw: string): { value: string; rest: string } | null {
+/** The two numeric escapes of the grammar and how many hex digits each one takes. */
+const HEX_ESCAPES: Record<string, number> = { x: 2, u: 4 };
+
+/** Read a double-quoted scalar, decoding exactly the escapes the grammar lists. */
+function readDoubleQuoted(raw: string): ScalarRead {
   let value = "";
   for (let i = 1; i < raw.length; i += 1) {
-    if (raw[i] === "\\") {
-      const next = raw[i + 1];
-      if (next === undefined) return null;
-      value += DOUBLE_ESCAPES[next] ?? next;
-      i += 1;
+    if (raw[i] === '"') return { ok: true, value, rest: raw.slice(i + 1) };
+    if (raw[i] !== "\\") {
+      value += raw[i];
       continue;
     }
-    if (raw[i] === '"') return { value, rest: raw.slice(i + 1) };
-    value += raw[i];
+    const next = raw[i + 1];
+    if (next === undefined) return UNTERMINATED;
+    const digits = HEX_ESCAPES[next];
+    if (digits !== undefined) {
+      const hex = raw.slice(i + 2, i + 2 + digits);
+      // A short or non-hex run is malformed rather than "some other escape": `\u` has one meaning.
+      if (!new RegExp(`^[0-9a-fA-F]{${digits}}$`, "u").test(hex)) return MALFORMED;
+      value += String.fromCharCode(Number.parseInt(hex, 16));
+      i += 1 + digits;
+      continue;
+    }
+    const simple = DOUBLE_ESCAPES[next];
+    if (simple === undefined) return MALFORMED;
+    value += simple;
+    i += 1;
   }
-  return null;
+  return UNTERMINATED;
+}
+
+/** The single-character escapes of the grammar, encoded. */
+const DOUBLE_ENCODES: Record<string, string> = {
+  "\\": "\\\\",
+  '"': '\\"',
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+  "\b": "\\b",
+  "\f": "\\f",
+  "\0": "\\0",
+};
+
+/** Whether the code unit at `i` is one half of a surrogate pair rather than a lone surrogate. */
+function inSurrogatePair(value: string, i: number): boolean {
+  const code = value.charCodeAt(i);
+  if (code <= 0xdbff) {
+    const low = value.charCodeAt(i + 1);
+    return low >= 0xdc00 && low <= 0xdfff;
+  }
+  const high = value.charCodeAt(i - 1);
+  return high >= 0xd800 && high <= 0xdbff;
+}
+
+/**
+ * Re-encode a value as a double-quoted scalar using only the escapes the reader decodes, so
+ * `readDoubleQuoted(encodeDoubleQuoted(v)).value === v` for every value this writer accepts.
+ */
+function encodeDoubleQuoted(value: string): string {
+  let out = '"';
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    const escape = DOUBLE_ENCODES[char];
+    if (escape !== undefined) {
+      out += escape;
+      continue;
+    }
+    const code = char.charCodeAt(0);
+    // C0, DEL and C1 are not writable raw; `\xXX` covers all three ranges.
+    if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+      out += `\\x${code.toString(16).padStart(2, "0")}`;
+      continue;
+    }
+    // A lone surrogate has no UTF-8 encoding to write raw; a real pair passes through as itself.
+    if (code >= 0xd800 && code <= 0xdfff && !inSurrogatePair(value, i)) {
+      out += `\\u${code.toString(16).padStart(4, "0")}`;
+      continue;
+    }
+    out += char;
+  }
+  return `${out}"`;
 }
 
 /** Classify one app-owned key's line against the §6.1 supported boundary. */
@@ -847,7 +957,6 @@ function classify(key: FrontMatterKey, entry: KeyLine): FrontMatterEntry {
   if (head === "|" || head === ">") return unsupported("block-scalar", null);
   if (entry.continued) return unsupported("multi-line", null);
   if (head === "[" || head === "{") return unsupported("flow", raw.trim());
-  if (head !== undefined && "&*!%@`".includes(head)) return unsupported("indicator", raw.trim());
 
   const field = (
     value: string,
@@ -869,12 +978,18 @@ function classify(key: FrontMatterKey, entry: KeyLine): FrontMatterEntry {
   if (head === "'" || head === '"') {
     const lead = raw.length - raw.trimStart().length;
     const read = head === "'" ? readSingleQuoted(raw.slice(lead)) : readDoubleQuoted(raw.slice(lead));
-    if (read === null) return unsupported("multi-line", null);
-    if (!BLANK_OR_COMMENT.test(read.rest)) return unsupported("malformed", null);
+    if (!read.ok) return unsupported(read.reason, null);
+    if (!SCALAR_TAIL.test(read.rest)) return unsupported("malformed", null);
     return field(read.value, head, lead, read.rest);
+  }
+  // Every other indicator opens something this line-oriented writer does not speak.
+  if (head !== undefined && YAML_INDICATORS.includes(head)) {
+    return unsupported("indicator", raw.trim());
   }
 
   const plain = splitPlain(raw);
+  // The plain grammar is exactly what the writer can emit plain, so the two cannot disagree.
+  if (plain.value !== "" && needsQuoting(plain.value)) return unsupported("malformed", plain.value);
   return field(plain.value, "", plain.lead, plain.comment);
 }
 
@@ -918,14 +1033,14 @@ function needsQuoting(value: string): boolean {
   if (/[\n\r\t]/u.test(value)) return true;
   if (/(?:^|\s)#/u.test(value)) return true;
   if (/:(?:\s|$)/u.test(value)) return true;
-  return "-?:,[]{}#&*!|>'\"%@`".includes(value[0]);
+  return YAML_INDICATORS.includes(value[0]);
 }
 
 /** Serialize a value in the quoting style the line already used, promoting a plain scalar if it must. */
 function serializeScalar(value: string, quote: FrontMatterQuote): string {
   if (quote === "'") return `'${value.replace(/'/gu, "''")}'`;
-  if (quote === '"') return JSON.stringify(value);
-  return needsQuoting(value) ? JSON.stringify(value) : value;
+  if (quote === '"') return encodeDoubleQuoted(value);
+  return needsQuoting(value) ? encodeDoubleQuoted(value) : value;
 }
 
 export type FrontMatterWrite =
@@ -957,6 +1072,14 @@ export function writeFrontMatter(
 ): FrontMatterWrite {
   const requested = FRONT_MATTER_KEYS.filter((key) => values[key] !== undefined);
   if (requested.length === 0) return { ok: true, root, changed: [] };
+
+  // A value carrying a line break is refused for every quoting style, before anything is read or
+  // edited: writing it would put two physical lines where the block has one and report success.
+  for (const key of requested) {
+    if (LINE_BREAK.test(values[key] as string)) {
+      return { ok: false, error: FRONT_MATTER_UNSUPPORTED, key, reason: "multi-line", root };
+    }
+  }
 
   const yaml = yamlNodeOf(root);
   const current = readFrontMatter(root);
