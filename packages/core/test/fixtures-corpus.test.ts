@@ -55,14 +55,15 @@ const schema = JSON.parse(readFileSync(`${FIXTURES}/index.schema.json`, "utf8"))
   additionalProperties: { required: string[] };
 };
 
-describe("fixtures/markdown corpus (task 0.4)", () => {
-  it("has exactly 44 source files and 44 canonical siblings", () => {
-    expect(sourceNames).toHaveLength(44);
+describe("fixtures/markdown corpus (task 0.4, grown by later tasks)", () => {
+  it("has one canonical sibling and one index.json entry per source file", () => {
+    const canonicalNames = allFiles.filter((n) => n.endsWith(".canonical.md"));
     for (const name of sourceNames) {
       const stem = name.replace(/\.md$/, "");
       expect(allFiles).toContain(`${stem}.canonical.md`);
     }
-    expect(allFiles.filter((n) => n.endsWith(".canonical.md"))).toHaveLength(44);
+    expect(canonicalNames).toHaveLength(sourceNames.length);
+    expect(Object.keys(index)).toHaveLength(sourceNames.length);
   });
 
   it("index.json validates against index.schema.json", () => {
