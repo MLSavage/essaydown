@@ -976,7 +976,9 @@ describe("in-app operations orphan an anchor they cannot place", () => {
     );
     expect(next.sidecar.rewrites).toEqual([]);
     expect(next.sidecar.orphans).toHaveLength(1);
-    expect(next.sidecar.orphans[0].entry.variants[0].text).toBe("stranded");
+    const orphan = next.sidecar.orphans[0];
+    if (orphan.list !== "rewrites") throw new Error("expected a rewrites orphan");
+    expect(orphan.entry.variants[0].text).toBe("stranded");
   });
 
   it("orphans an anchor whose remembered block the move does not cover", () => {

@@ -14,13 +14,17 @@ export default defineConfig({
       include: ["packages/*/src/**/*.{ts,tsx}"],
       thresholds: {
         perFile: true,
-        statements: 0,
-        branches: 0,
-        functions: 0,
-        lines: 0,
+        // Task 0.16: set just below the worst per-file measurement at the time of writing
+        // (`pnpm coverage`: sentences.ts 97.76%/94.44% stmts/branches, sidecar.ts 99.4% lines),
+        // so every file in the glob below is held to it, not just the ones a task happened to
+        // reach 100% on.
+        statements: 97,
+        branches: 94,
+        functions: 100,
+        lines: 99,
         // Task 0.7 acceptance: the block/section algebra is fully branch-covered. Glob-keyed
         // thresholds replace the global ones for the files they match, so the other three
-        // metrics are pinned at 100 here too rather than falling back to 0.
+        // metrics are pinned at 100 here too rather than falling back to the global values.
         "packages/core/src/blocks.ts": {
           statements: 100,
           branches: 100,
