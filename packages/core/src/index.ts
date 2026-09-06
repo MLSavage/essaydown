@@ -107,6 +107,23 @@ export {
   type FrontMatterWrite,
 } from "./sidecar.js";
 
+export {
+  COALESCE_WINDOW_MS,
+  UNDO_CAP,
+  createUndoStack,
+  current,
+  canUndo,
+  canRedo,
+  endCoalescing,
+  push,
+  undo,
+  redo,
+  type UndoEntry,
+  type UndoStack,
+  type UndoStackOptions,
+  type PushOptions,
+} from "./undo.js";
+
 export function placeholder(): string {
   return "core";
 }
