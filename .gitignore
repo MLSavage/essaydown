@@ -8,3 +8,4 @@ logs/
 .ci-fake/
 node_modules/
 target/
+coverage/

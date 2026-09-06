@@ -1,0 +1,12 @@
+{
+  "name": "@essaydown/core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Pure TS mdast model, canonical formatter, hashing, block/sentence model (no DOM, no module-level config).",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

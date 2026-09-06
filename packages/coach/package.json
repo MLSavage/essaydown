@@ -1,0 +1,12 @@
+{
+  "name": "@essaydown/coach",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "OpenAI-compatible client, prompt templates, question filter.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

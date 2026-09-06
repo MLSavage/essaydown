@@ -1,0 +1,13 @@
+{
+  "name": "@essaydown/e2e-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Playwright e2e for pure-web dev routes (Phases 0-1 only; Tauri shell e2e is e2e/shell).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

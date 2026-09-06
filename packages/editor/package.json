@@ -1,0 +1,12 @@
+{
+  "name": "@essaydown/editor",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "ProseMirror schema + mdast<->PM converters, CodeMirror setup.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
