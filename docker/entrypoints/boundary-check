@@ -11,7 +11,7 @@ bad() { printf 'FAIL %s\n' "$*"; fail=1; }
 echo "== versions"
 for c in "node --version" "pnpm --version" "cargo --version" "rustc --version" \
          "pandoc --version" "typst --version" "epubcheck --version" "pdfimages -v" "pdftotext -v" \
-         "java -version" "html-validate --version" "claude --version" "codex --version" "grok --version" "git --version"; do
+         "java -version" "html-validate --version" "actionlint -version" "act --version" "claude --version" "codex --version" "grok --version" "git --version"; do
   out=$($c 2>&1 | head -1 || true); if [ -n "$out" ]; then printf '%-22s %s\n' "$c" "$out"; else printf '%-22s MISSING\n' "$c"; fi
 done
 printf '%-22s %s\n' "tauri-driver" "$(cargo install --list 2>/dev/null | grep -m1 '^tauri-driver' || echo MISSING) ($(tauri-driver --help 2>&1 | head -1))"

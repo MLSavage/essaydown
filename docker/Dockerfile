@@ -63,6 +63,15 @@ RUN . /etc/essaydown/versions.env \
     && ln -sf /opt/grok/bin/grok /usr/local/bin/grok \
     && HOME=/opt/grok-home grok --version
 
+# --- actionlint + act (workflow lint and dry-run for CI tasks; act -n plans jobs without Docker)
+RUN . /etc/essaydown/versions.env && set -eux \
+    && case "$TARGETARCH" in amd64) AARCH=amd64; ACTARCH=x86_64;; arm64) AARCH=arm64; ACTARCH=arm64;; esac \
+    && curl -fsSL -o /tmp/actionlint.tgz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${AARCH}.tar.gz" \
+    && tar -xzf /tmp/actionlint.tgz -C /usr/local/bin actionlint && rm /tmp/actionlint.tgz \
+    && curl -fsSL -o /tmp/act.tgz "https://github.com/nektos/act/releases/download/v${ACT_VERSION}/act_Linux_${ACTARCH}.tar.gz" \
+    && tar -xzf /tmp/act.tgz -C /usr/local/bin act && rm /tmp/act.tgz \
+    && actionlint -version && act --version
+
 # --- git identity + safety inside the container; no credential helper anywhere
 RUN git config --system user.name "essaydown-agent" \
     && git config --system user.email "agent@essaydown.invalid" \
