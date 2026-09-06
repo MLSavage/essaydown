@@ -36,6 +36,8 @@ You are one agent in a Ralph loop on Essay Down, a Tauri 2 + React Markdown essa
 - Workflows named in a task's `ci` object trigger on `push` to `ci/**` refs (the gate pushes `ci/<id>/a<n>` at the integrated SHA) and upload exactly the `artifactNames` listed; they read tool versions from `docker/versions.env`.
 - Record every compiler-forced behaviour decision in the commit body rather than silencing it. JSON schemas allow `_note` string fields.
 - Secrets: `.claude/settings.local.json` is gitignored; scan the whole working tree, not just tracked files; the repo is public (DECISIONS #011), so nothing personal enters the tree — the fixture essay is agent-written.
+- Every core operation of the shape f(root, …) → root has a corpus-wide identity test: the no-op argument (identity permutation, a sentence replaced by its own text, an unchanged front-matter value) re-serialises byte-identically for every fixture in fixtures/markdown/index.json.
+- Code that partitions a string or a node list into adjacent half-open slices states its ownership rule for zero-width items once, in the doc comment, and tests the first, middle and last positions.
 
 ## Runner facts you rely on (DECISIONS #009, #012)
 
