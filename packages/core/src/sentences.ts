@@ -1,5 +1,6 @@
 import type { Break, Html, Image, Nodes, Paragraph, PhrasingContent, Root } from "mdast";
 import { blocksOf, normalizedText } from "./blocks.js";
+import { format } from "./format.js";
 import { contentHash } from "./hash.js";
 import { parse } from "./parse.js";
 
@@ -149,11 +150,23 @@ function isAtomic(node: PhrasingContent): node is Break | Html | Image {
  * `text` and `inlineCode` are cut by offset; an atomic node goes whole to the slice containing its
  * start; a mark that straddles a boundary is copied into both slices with its own share of the
  * text, which is how a link spanning a sentence boundary survives on both sides (PRD §6.1).
+ *
+ * **Ownership of width-0 inline content** — an image with an empty alt (`![](x.png)`), and any
+ * mark whose whole content is such a node — is decided here, once, for every caller. A node that
+ * contributes no plain text sits at a single offset `p`, and belongs to the one slice with
+ * `from <= p < to`: the slices a caller cuts a paragraph into are contiguous and half-open, so
+ * exactly one of them qualifies, and the node is neither lost nor copied twice. The one offset no
+ * half-open slice contains is `p === plainText.length`; the caller whose slice ends the paragraph
+ * — and only that caller — passes `includeAtTo`, and takes it. Passing it from a slice that does
+ * not reach the end would duplicate the node; passing it from none would delete it (both were
+ * live bugs: DECISIONS #review-0-r0 F1). A mark is therefore descended into even when it
+ * contributes no text of its own, so a width-0 node wrapped in a link keeps its url.
  */
 function sliceInline(
   children: readonly PhrasingContent[],
   from: number,
   to: number,
+  includeAtTo = false,
   offset = 0,
 ): { nodes: PhrasingContent[]; end: number } {
   const nodes: PhrasingContent[] = [];
@@ -165,28 +178,28 @@ function sliceInline(
     cursor = end;
 
     if (isAtomic(child)) {
-      const zeroWidth = end === start;
-      if (start >= from && (start < to || (zeroWidth && start === from))) {
+      if (start >= from && (start < to || (includeAtTo && start === to))) {
         nodes.push(structuredClone(child));
       }
       continue;
     }
 
-    const lo = Math.max(start, from);
-    const hi = Math.min(end, to);
-
     if (child.type === "text" || child.type === "inlineCode") {
+      const lo = Math.max(start, from);
+      const hi = Math.min(end, to);
       if (hi > lo) {
         nodes.push({ ...structuredClone(child), value: child.value.slice(lo - start, hi - start) });
       }
       continue;
     }
 
-    if (hi <= lo) continue;
     // Everything left is a mark. (A childless node outside the §6.1 set, such as a
     // `footnoteReference`, cannot reach a parsed tree; it is skipped rather than trusted.)
+    // A mark is descended into unconditionally: whether it belongs to this slice is exactly
+    // whether any of its descendants does, which the same rule decides one level down. A width-0
+    // mark has no overlap of its own to test, so an overlap test here would drop it.
     if (!("children" in child)) continue;
-    const inner = sliceInline(child.children, from, to, start);
+    const inner = sliceInline(child.children, from, to, includeAtTo, start);
     if (inner.nodes.length > 0) {
       nodes.push({ ...structuredClone(child), children: inner.nodes } as PhrasingContent);
     }
@@ -195,20 +208,36 @@ function sliceInline(
   return { nodes, end: cursor };
 }
 
+/** Whether everything a node contributes is whitespace or a line break, and so carries no content. */
+function isBlank(node: PhrasingContent): boolean {
+  if (node.type === "text") return node.value.trim() === "";
+  if (node.type === "break") return true;
+  return "children" in node && node.children.every(isBlank);
+}
+
 /**
  * The content between two sentences: whitespace by construction (sentence ranges are trimmed),
  * plus any `break` that separates them, with every mark around it unwrapped. A gap left inside a
  * mark would be copied out as a mark wrapped around a space — `[ ](url)`, or an emphasis whose
  * trailing space the formatter has to escape as `&#x20;`.
+ *
+ * Only a blank mark is unwrapped. A mark that carries content of its own — a link around a
+ * width-0 image, whose url is that content — falls inside a gap whenever the image does
+ * ({@link sliceInline}), and unwrapping it there would drop the url.
  */
 function gapNodes(
   children: readonly PhrasingContent[],
   from: number,
   to: number,
+  includeAtTo = false,
 ): PhrasingContent[] {
   const unwrap = (nodes: readonly PhrasingContent[]): PhrasingContent[] =>
-    nodes.flatMap((node) => ("children" in node ? unwrap(node.children) : [node]));
-  return unwrap(sliceInline(children, from, to).nodes);
+    nodes.flatMap((node) => {
+      if (!("children" in node)) return [node];
+      if (isBlank(node)) return unwrap(node.children);
+      return [{ ...node, children: unwrap(node.children) } as PhrasingContent];
+    });
+  return unwrap(sliceInline(children, from, to, includeAtTo).nodes);
 }
 
 /** Adjacent `text` nodes created at a splice seam, joined back into one. */
@@ -340,7 +369,7 @@ export function replaceSentence(
     ...gapNodes(node.children, previousEnd, sentence.start),
     ...parseInline("replaceSentence", text),
     ...gapNodes(node.children, sentence.end, nextStart),
-    ...sliceInline(node.children, nextStart, plain.length).nodes,
+    ...sliceInline(node.children, nextStart, plain.length, true).nodes,
   ];
   return withParagraphChildren(root, at, node, children);
 }
@@ -384,13 +413,46 @@ export function reorderSentences(
     children.push(
       ...sliceInline(node.children, sentences[source].start, sentences[source].end).nodes,
     );
+    const isLast = position + 1 === sentences.length;
     children.push(
       ...gapNodes(
         node.children,
         sentences[position].end,
-        position + 1 < sentences.length ? sentences[position + 1].start : plain.length,
+        isLast ? plain.length : sentences[position + 1].start,
+        isLast,
       ),
     );
   });
   return withParagraphChildren(root, at, node, children);
+}
+
+/**
+ * The inline Markdown of sentence `index` of `paragraph`: the paragraph's own inline content over
+ * that sentence's range, serialized.
+ *
+ * This — not {@link Sentence.text}, which is the sentence's *plain* text and so drops every mark
+ * inside it — is the replacement that makes `replaceSentence(root, id, index, …)` the identity, so
+ * it is the argument the corpus-wide identity invariant asserts with.
+ *
+ * @throws RangeError if `index` is not a sentence of the paragraph.
+ */
+export function sentenceMarkdown(
+  paragraph: Paragraph,
+  index: number,
+  options: SegmentOptions = {},
+): string {
+  const sentences = segmentSentences(paragraphText(paragraph), options.segment);
+  if (!Number.isInteger(index) || index < 0 || index >= sentences.length) {
+    throw new RangeError(
+      `sentenceMarkdown: sentence ${index} is outside 0..${sentences.length - 1} of the paragraph`,
+    );
+  }
+  const { start, end } = sentences[index];
+  const nodes = stripPositions(
+    mergeAdjacentText(sliceInline(paragraph.children, start, end).nodes),
+  );
+  return format({ type: "root", children: [{ type: "paragraph", children: nodes }] }).replace(
+    /\n$/u,
+    "",
+  );
 }
