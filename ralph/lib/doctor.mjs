@@ -4,7 +4,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RalphError, withLock, git, gitOut, revParse, refOid, isAncestor, rmrf, now, readJson, ZERO } from "./util.mjs";
 import { emit, ciAttemptStatus } from "./gate.mjs";
-import { repoOf, targetRefOf, finishIntegration, setPlan, startTask } from "./integrate.mjs";
+import { repoOf, targetRefOf, finishIntegration, setPlan, startTask, cleanupDebris } from "./integrate.mjs";
 import { syncState } from "./state.mjs";
 import { writeSummary } from "./summary.mjs";
 import { refDrifted } from "./close.mjs";
@@ -12,6 +12,38 @@ import { refDrifted } from "./close.mjs";
 function expectedOldOf(repo, candidate) {
   const m = /^Expected-old: ([0-9a-f]{40})/m.exec(gitOut(repo, ["log", "-1", "--format=%B", candidate]));
   return m ? m[1] : null;
+}
+
+/** Commits the runner itself writes on a phase branch; anything else there is a principal (host-checkout) commit. */
+const RUNNER_COMMIT_SUBJECT = /^(task\(|plan\(|fix\(0\.)/;
+
+/**
+ * DECISIONS #017: a principal commit made from a stale host checkout deletes everything the runner integrated
+ * since that checkout was refreshed (`c8b234a` dropped 91 files of the already-passed 0.4). The `passed-not-on-target`
+ * check above cannot see it — `integrated_sha` stays an ancestor of the branch either way.
+ *
+ * The comparison implemented here, for every commit on a phase branch since that phase's `base_main_sha` whose
+ * subject is not a runner commit: take the paths that commit deleted relative to **its parent**, and report only
+ * those that are still absent from the **phase branch head** and that no later commit on the branch touched.
+ * So a restore commit later on the branch (#017's repair, `59d2d3e` after `c8b234a`) clears the finding, and a
+ * later task commit that deletes the same path again owns that deletion instead — while comparing against the
+ * parent alone would report the pair forever. Read-only; the repair is the manual #017 procedure, a restore commit.
+ */
+function checkPrincipalDeletions(ctx, add) {
+  for (const ph of Object.values(ctx.phases())) {
+    const head = ph.base_main_sha ? refOid(ctx.root, `refs/heads/${ph.branch}`) : null;
+    if (!head) continue;
+    let headFiles = null;
+    const atHead = (p) => (headFiles ??= new Set(gitOut(ctx.root, ["ls-tree", "-r", "--name-only", "-z", head]).split("\0").filter(Boolean))).has(p);
+    for (const line of gitOut(ctx.root, ["log", "--reverse", "--format=%H %s", `${ph.base_main_sha}..${head}`]).split("\n").filter(Boolean)) {
+      const sha = line.slice(0, 40), subject = line.slice(41);
+      if (RUNNER_COMMIT_SUBJECT.test(subject)) continue;
+      const deleted = gitOut(ctx.root, ["diff-tree", "-r", "--diff-filter=D", "--name-only", "--no-commit-id", "-z", sha]).split("\0").filter(Boolean);
+      // absent at the head and untouched since: nobody but this commit decided the path is gone
+      const gone = deleted.filter((p) => !atHead(p) && !gitOut(ctx.root, ["log", "--format=%H", `${sha}..${head}`, "--", p]));
+      if (gone.length) add(`principal-commit-deletes ${sha.slice(0, 7)} ${gone.length} paths (still absent from ${ph.branch}: ${gone.slice(0, 3).join(", ")}${gone.length > 3 ? ", …" : ""})`, `manual repair: restore commit, DECISIONS.md#017-host-checkout-commit`);
+    }
+  }
 }
 
 /** Returns [{line, admin}] — each line names the one admin command that fixes it. */
@@ -39,6 +71,14 @@ export function doctor(ctx) {
       const cur = refOid(repo, target);
       if (!cur || !isAncestor(repo, r.integrated_sha, cur)) add(`passed-not-on-target ${t.id} (${r.integrated_sha.slice(0, 7)} not an ancestor of ${target})`, `manual repair: DECISIONS.md#repair-${t.id}`);
     }
+    // a crash after `status: passed` but before the post-ref cleanup leaves the tag, worktree and branch behind (§4.4)
+    if (r.status === "passed" && commitTask) {
+      const debris = [];
+      if (cand) debris.push(`candidate/${t.id}`);
+      if (existsSync(ctx.worktree(t.id))) debris.push(`worktree ${ctx.worktree(t.id)}`);
+      if (refOid(repo, `refs/heads/task/${t.id}`)) debris.push(`task/${t.id}`);
+      if (debris.length) add(`passed-with-debris ${t.id} (${debris.join(", ")})`, `ralph.sh admin mark-integrated ${t.id}`);
+    }
     if (t.execution === "human" && t.gateKind === "ci") {
       for (const n of ctx.attempts(t.id)) {
         const st = ciAttemptStatus(ctx, t.id, n);
@@ -64,6 +104,7 @@ export function doctor(ctx) {
       add(`unfinished-integration ${p.id} (${cur === cand ? "target == candidate" : cur === old ? "target == expected-old" : "target == neither"})`, cur === cand ? `ralph.sh admin mark-integrated ${p.id}` : cur === old ? `ralph.sh admin retry ${p.id}` : `manual repair: DECISIONS.md#repair-${p.id}`);
     }
   }
+  checkPrincipalDeletions(ctx, add);
   // checkouts on runner-moved branches with staged changes (a stale index after update-ref looks exactly like this)
   for (const block of gitOut(ctx.root, ["worktree", "list", "--porcelain"]).split("\n\n")) {
     const path = /^worktree (.+)$/m.exec(block)?.[1];
@@ -100,6 +141,17 @@ export function adminMarkIntegrated(ctx, id) {
     const t = plan ? null : ctx.task(id);
     const repo = plan ? ctx.root : repoOf(ctx, t);
     const cand = refOid(repo, `refs/tags/candidate/${id}`);
+    const rec = plan ? null : (ctx.state()[id] ?? null);
+    // the task is already recorded integrated: this is the debris sweep of doctor's `passed-with-debris`, and it
+    // repeats without effect (the transaction itself must not run twice — the target ref moved long ago).
+    if (rec?.status === "passed") {
+      if (cand && rec.integrated_sha && cand !== rec.integrated_sha) throw new RalphError(`admin mark-integrated ${id} refused: candidate/${id} ${cand.slice(0, 7)} != recorded integrated_sha ${rec.integrated_sha.slice(0, 7)}`);
+      const debris = doctor(ctx).find((f) => f.line.startsWith(`passed-with-debris ${id} `));
+      ctx.audit(`admin mark-integrated ${id}`, debris ? debris.line : "(no doctor line)");
+      cleanupDebris(repo, id, { branch: `task/${id}`, wt: ctx.worktree(id) });
+      writeSummary(ctx);
+      return { id, sha: rec.integrated_sha };
+    }
     if (!cand) throw new RalphError(`admin mark-integrated ${id}: no candidate/${id} tag`);
     const target = plan ? `refs/heads/${plan.target_branch}` : targetRefOf(ctx, t);
     if (refOid(repo, target) !== cand) throw new RalphError(`admin mark-integrated ${id} refused: ${target} != candidate/${id} (use admin retry if it equals expected-old)`);

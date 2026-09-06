@@ -127,14 +127,23 @@ export function finishIntegration(ctx, id, { plan = null, candidate, branchHead 
   }
   const targetRef = plan ? `refs/heads/${plan.target_branch}` : targetRefOf(ctx, t);
   refreshCheckouts(repo, targetRef.replace(/^refs\/heads\//, ""), gitOut(repo, ["rev-parse", `${candidate}^`]), candidate);
+  cleanupDebris(repo, label, { branch, wt, branchHead });
+  writeSummary(ctx);
+  ctx.audit(`integrated ${label}`, candidate);
+}
+
+/**
+ * The post-ref cleanup of a finished task or plan request: wip tag at the branch head, candidate tag, worktree,
+ * branch. Every step is already a no-op when its subject is gone, so calling this on a `passed` task that crashed
+ * before cleanup (doctor's `passed-with-debris`) is idempotent.
+ */
+export function cleanupDebris(repo, label, { branch, wt, branchHead = null }) {
   if (branchHead) git(repo, ["tag", "-f", `wip/${label}`, branchHead], { check: false });
   git(repo, ["tag", "-d", `candidate/${label}`], { check: false });
   if (existsSync(wt)) git(repo, ["worktree", "remove", "--force", wt], { check: false });
   rmrf(wt);
   git(repo, ["worktree", "prune"], { check: false });
   git(repo, ["branch", "-D", branch], { check: false });
-  writeSummary(ctx);
-  ctx.audit(`integrated ${label}`, candidate);
 }
 
 /**

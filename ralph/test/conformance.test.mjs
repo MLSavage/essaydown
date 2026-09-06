@@ -634,3 +634,79 @@ test("ROTATE-PRINCIPAL at the whole verifier-gate grammar N.verify[.r<k>][.g<n>]
   assert.match(r.out, /ACCEPT 0\.verify\.r1h a1 run \S+\nROTATE-PRINCIPAL$/m, "gate.sh rotates after recording an .r<k> verifier attempt");
   cleanup(f.root);
 });
+
+test("#017 doctor check: a principal commit that deletes a passed task's files is reported until a restore commit puts them back (run refuses meanwhile); a task commit that deletes is clean", () => {
+  const f = makeFixture({ phases: onePhase() });
+  let r = ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+  assert.equal(state(f.root)["0.1"].status, "passed", r.out);
+  git(f.root, ["checkout", "-q", "phase/0"]); // the principal's host checkout, exactly where #017 happened
+  // (1) the #017 shape: a chore commit made from that checkout drops a passed task's file
+  rmSync(join(f.root, "work/0.1.txt"));
+  git(f.root, ["add", "-A"]);
+  git(f.root, ["commit", "-q", "-m", "chore(0.0): handoff 003 — written from a stale checkout"]);
+  const bad = revParse(f.root, "phase/0").slice(0, 7);
+  r = ralph(f.root, ["doctor"]);
+  assert.equal(r.status, 3, r.out);
+  assert.match(r.out, new RegExp(`^principal-commit-deletes ${bad} 1 paths \\(still absent from phase/0: work/0\\.1\\.txt\\) → manual repair: restore commit, DECISIONS\\.md#017-host-checkout-commit$`, "m"), r.out);
+  assert.doesNotMatch(r.out, /passed-not-on-target/, "the ancestry check cannot see it — that is the gap #017 recorded");
+  assert.match(r.out, /^DOCTOR 1 findings$/m, r.out);
+  r = ralph(f.root, ["run", "--phase", "0"]);
+  assert.match(r.out, /^DOCTOR 1 findings$/m, r.out);
+  assert.equal(state(f.root)["0.verify"].status, "pending", "run refused before selecting anything");
+  // (2) the restore commit clears it: the check compares the deleted paths against the branch head, not the parent alone
+  git(f.root, ["checkout", `${bad}^`, "--", "work/0.1.txt"]);
+  git(f.root, ["commit", "-q", "-m", "chore(0.0): restore the file the stale checkout deleted"]);
+  assert.equal(gitOut(f.root, ["log", "--format=%s", `${bad}^..phase/0`]).split("\n").length, 2, "the deleting commit is still on the branch");
+  r = ralph(f.root, ["doctor"]);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /^doctor: clean$/m);
+  // (3) a task commit may delete files: same deletion, integrated by the runner, stays clean
+  control(f.root, "0.verify", { rm: ["work/0.1.txt"] });
+  r = ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+  assert.equal(state(f.root)["0.verify"].status, "passed", r.out);
+  assert.match(gitOut(f.root, ["log", "-1", "--format=%s", "phase/0"]), /^task\(0\.verify\)/);
+  assert.ok(!existsSync(join(f.root, "work/0.1.txt")), "the task commit's deletion stands at the head");
+  r = ralph(f.root, ["doctor"]);
+  assert.equal(r.status, 0, r.out);
+  git(f.root, ["checkout", "-q", "main"]);
+  cleanup(f.root);
+});
+
+test("passed-with-debris: a passed task's leftover candidate tag, worktree and task branch are reported and swept by admin mark-integrated (idempotent)", () => {
+  const f = makeFixture({ phases: onePhase() });
+  let r = ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+  assert.equal(state(f.root)["0.1"].status, "passed", r.out);
+  const sha = state(f.root)["0.1"].integrated_sha;
+  ok(ralph(f.root, ["doctor"]), "doctor after a normal integration");
+  // the crash shape: `status: passed` written, the post-ref cleanup never ran
+  git(f.root, ["tag", "candidate/0.1", sha]);
+  git(f.root, ["branch", "task/0.1", sha]);
+  git(f.root, ["worktree", "add", "--quiet", join(f.root, ".wt/0.1"), "task/0.1"]);
+  r = ralph(f.root, ["doctor"]);
+  assert.equal(r.status, 3, r.out);
+  assert.match(r.out, /^passed-with-debris 0\.1 \(candidate\/0\.1, worktree \S*\.wt\/0\.1, task\/0\.1\) → ralph\.sh admin mark-integrated 0\.1$/m, r.out);
+  assert.doesNotMatch(r.out, /unfinished-integration/, "a passed task is not an unfinished integration");
+  assert.match(r.out, /^DOCTOR 1 findings$/m, r.out);
+  r = ralph(f.root, ["run", "--phase", "0"]);
+  assert.match(r.out, /^DOCTOR 1 findings$/m, r.out);
+  // a candidate tag that is not this task's recorded candidate is refused, never guessed
+  git(f.root, ["tag", "-f", "candidate/0.1", revParse(f.root, "main")]);
+  r = ralph(f.root, ["admin", "mark-integrated", "0.1"]);
+  assert.equal(r.status, 1, r.out);
+  assert.match(r.out, /!= recorded integrated_sha/, r.out);
+  git(f.root, ["tag", "-f", "candidate/0.1", sha]);
+  // the repair itself
+  ok(ralph(f.root, ["admin", "mark-integrated", "0.1"]));
+  assert.equal(refOid(f.root, "refs/tags/candidate/0.1"), null, "candidate tag gone");
+  assert.equal(refOid(f.root, "refs/heads/task/0.1"), null, "task branch gone");
+  assert.ok(!existsSync(join(f.root, ".wt/0.1")), "worktree gone");
+  assert.equal(state(f.root)["0.1"].status, "passed");
+  assert.equal(state(f.root)["0.1"].integrated_sha, sha, "the record is untouched");
+  assert.equal(revParse(f.root, "phase/0"), sha, "the branch did not move");
+  ok(ralph(f.root, ["doctor"]), "doctor clean after the sweep");
+  ok(ralph(f.root, ["admin", "mark-integrated", "0.1"]), "idempotent: a second sweep is a no-op");
+  ok(ralph(f.root, ["doctor"]), "still clean");
+  const done = runPhaseGreen(f.root, "0");
+  assert.ok(done.done, done.stopped ?? done.error);
+  cleanup(f.root);
+});
