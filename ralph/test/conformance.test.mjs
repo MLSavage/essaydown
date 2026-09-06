@@ -526,3 +526,22 @@ test("a checkout on the moved branch is refreshed when clean and reported when i
   git(f.root, ["checkout", "-q", "main"]);
   cleanup(f.root);
 });
+
+test("ROTATE-PRINCIPAL: after HUMAN_GATE N.verifyh and after every recorded N.verifyh attempt; never at another gate (DECISIONS #015)", () => {
+  const f = makeFixture({ phases: onePhase({ extra: [approval] }) });
+  let r = runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.5v" });
+  assert.equal(r.stopped, "HUMAN_GATE 0.5v", r.error);
+  assert.doesNotMatch(r.log.join("\n"), /ROTATE-PRINCIPAL/, "an approval gate is not the rotation point");
+  r = gate(f.root, ["0.5v", "--outcome", "ACCEPT", "--note", "fixture: accepted"]);
+  assert.doesNotMatch(r.out, /ROTATE-PRINCIPAL/);
+  ciScenario(f.root, "ci/0.verify/a1", { conclusion: "cancelled" });
+  r = runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });
+  assert.equal(r.stopped, "HUMAN_GATE 0.verifyh", r.error);
+  assert.match(r.log[r.log.length - 1], /^HUMAN_GATE 0\.verifyh\nROTATE-PRINCIPAL$/m, "runner prints the line right after the gate signal");
+  r = gate(f.root, ["0.verifyh"]);
+  assert.match(r.out, /GATE-FAILED 0\.verifyh a1/);
+  assert.match(r.out, /PLAN-GATE plan\.0\.verifyh\.r0\nROTATE-PRINCIPAL$/m, "gate.sh prints it after a failed attempt is recorded");
+  r = gate(f.root, ["rerun", "0.verifyh"]);
+  assert.match(r.out, /ACCEPT 0\.verifyh a2 run \S+\nROTATE-PRINCIPAL$/m, "and after an accepted one");
+  cleanup(f.root);
+});

@@ -4,7 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { spawn } from "node:child_process";
 import { RalphError, withLock, revParse, refOid, git, gitOut, rmrf, now, shell, writeAtomic, ensureDir, readJson, writeJsonAtomic } from "./util.mjs";
-import { emit } from "./gate.mjs";
+import { emit, isVerifyGate } from "./gate.mjs";
 import { startTask, integrate, journalCount, transcriptHasDone, branchHasDone, runSuite, repoOf, setPlan } from "./integrate.mjs";
 import { doctor } from "./doctor.mjs";
 import { closePhase } from "./close.mjs";
@@ -52,13 +52,19 @@ export function dryRun(ctx, phase = null) {
   return "complete";
 }
 
+/** HUMAN_GATE, plus ROTATE-PRINCIPAL at a phase's verify gate: the principal session rotates there (PRINCIPAL.md, DECISIONS #015). */
+function emitHumanGate(id) {
+  emit(`HUMAN_GATE ${id}`);
+  if (isVerifyGate(id)) emit("ROTATE-PRINCIPAL");
+}
+
 export function run(ctx, { phase = null } = {}) {
   const findings = doctor(ctx);
   if (findings.length) { for (const f of findings) console.log(f.line); emit(`DOCTOR ${findings.length} findings`); return { signal: "DOCTOR" }; }
   for (let i = 0; i < MAX_ITER; i++) {
     const sel = selectNext(ctx, phase);
     if (sel.kind === "complete") { emit("<promise>COMPLETE</promise>"); return { signal: "COMPLETE" }; }
-    if (sel.kind === "gate") { emit(`HUMAN_GATE ${sel.task.id}`); return { signal: "HUMAN_GATE", id: sel.task.id }; }
+    if (sel.kind === "gate") { emitHumanGate(sel.task.id); return { signal: "HUMAN_GATE", id: sel.task.id }; }
     if (sel.kind === "stuck") { const l = sel.tasks.map((t) => `${t.id}:${ctx.state()[t.id].status}`).join(", "); emit(`STUCK ${l}`); return { signal: "STUCK" }; }
     const res = sel.kind === "plan" ? stepPlan(ctx, sel.plan) : step(ctx, sel.task);
     if (res.signal) return res;
@@ -73,7 +79,7 @@ function step(ctx, t) {
     case "human":
       withLock(ctx.root, () => ctx.set(t.id, { status: "human-pending", started_at: now() }, "waiting for gate.sh"));
       writeSummary(ctx);
-      emit(`HUMAN_GATE ${t.id}`);
+      emitHumanGate(t.id);
       return { signal: "HUMAN_GATE", id: t.id };
     case "runner":
       return stepClose(ctx, t);

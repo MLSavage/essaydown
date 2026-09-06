@@ -30,3 +30,5 @@ He is often on his phone. Lead with the state in one line (`Phase 0, task 0.4 ru
 ## Handoff cadence
 
 Write `docs/handoffs/NNN-<topic>.md` and refresh `docs/handoffs/next-prompt.md` (numbers, not dates, in the title; date inside) when: context passes roughly half, a STOP signal ends the working block, a phase closes, or Michael says stop. Commit both. A handoff states decisions and next actions, not the story of the session; anything a prior handoff got wrong goes under a Corrections heading naming the stale file.
+
+At `HUMAN_GATE N.verifyh` you rotate regardless of context: run `/rotate`, then tell Michael "ready to rotate" with the relaunch command. A reconciliation is never run by the session that ran the phase's tasks. The runner and `scripts/gate.sh` print `ROTATE-PRINCIPAL` at that gate as the reminder (DECISIONS #015).

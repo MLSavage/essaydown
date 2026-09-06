@@ -7,6 +7,8 @@ import { RalphError, withLock, now, ensureDir, writeJsonAtomic, readJson, digest
 import { ciAdapter } from "./ci.mjs";
 
 export function emit(signal) { process.stdout.write(`${signal}\n`); }
+/** `N.verifyh` is the gate at which the principal session rotates (PRINCIPAL.md, DECISIONS #015). */
+export const isVerifyGate = (id) => /^\d+\.verifyh$/.test(id);
 
 /** Create the plan request for a gate outcome (step 4). Returns the request id. */
 export function raisePlanRequest(ctx, gateId, attempt, outcome, evidencePath, reason) {
@@ -44,7 +46,9 @@ export function runGate(ctx, id, opts) {
   ctx.requireInit();
   const t = ctx.task(id);
   if (t.execution !== "human") throw new RalphError(`${id} is not a human gate (execution ${t.execution})`);
-  return withLock(ctx.root, () => (t.gateKind === "ci" ? ciGate(ctx, t, opts) : humanGate(ctx, t, opts)));
+  const res = withLock(ctx.root, () => (t.gateKind === "ci" ? ciGate(ctx, t, opts) : humanGate(ctx, t, opts)));
+  if (isVerifyGate(t.id)) emit("ROTATE-PRINCIPAL"); // after the attempt is recorded, whatever its outcome
+  return res;
 }
 
 function requireEligible(ctx, t) {

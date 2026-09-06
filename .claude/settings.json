@@ -8,5 +8,18 @@
       "Bash(git tag -d*)",
       "Bash(gh release*)"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" 2>/dev/null || true; echo \"newest handoff: $(ls docs/handoffs/[0-9]*.md 2>/dev/null | sort | tail -1)\"; ralph/ralph.sh status 2>&1 | head -1"
+          }
+        ]
+      }
+    ]
   }
 }

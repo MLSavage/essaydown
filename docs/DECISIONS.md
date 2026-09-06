@@ -67,3 +67,11 @@ Append-only log of decisions. Planning-time entries are numbered `#000`; build-t
 
 - After `task(0.1)` integrated (`4f4ace9`) by `update-ref`, the host checkout on `phase/0` kept its pre-0.1 index. The principal's next three chore commits (`befc9b2`, `29c6df3`, `9bf9eca`) were built from that stale index and deleted all 78 files of 0.1 from `phase/0`. Nothing was pushed and no task integrated on top; 0.2's integration rebase exposed it as a journal conflict. Repair: `git reset --hard 4f4ace9` on the host checkout, the three commits re-created from the correct base (`30373f1`, `c666d52`, `f375169`; same intent, five files), then `fix(runner): refresh a clean checkout on a branch the runner moved`. Rule from now on: the runner refreshes clean checkouts after every ref move and `doctor` flags staged changes on `main`/`phase/*` checkouts; the principal commits on the host checkout only when `doctor` is clean.
 - Reversal: none; `phase/0` up to `4f4ace9` is untouched and the three dropped commits are reachable only from the reflog.
+
+## #015-principal-rotation (2026-09-06, task 0.3 in flight; recorded by the principal from Michael's stated rule)
+
+- **Rule.** At `HUMAN_GATE N.verifyh` the principal session rotates regardless of context: `/rotate` (handoff + `next-prompt.md`, committed under the runner lock), then "ready to rotate" with the relaunch command. A reconciliation (`N.12.r0d`) is never run by the session that ran the phase's tasks. Written into `docs/PRINCIPAL.md` (Handoff cadence).
+- **Reminder, not machinery.** `ralph.sh run` prints `ROTATE-PRINCIPAL` on the line after `HUMAN_GATE N.verifyh`; `scripts/gate.sh` prints the same line after recording any `N.verifyh` attempt (ACCEPT or GATE-FAILED). It is an advisory line, not a stop signal (RUNNER-SPEC §11); a conformance test covers both emitters and the absence at other gates.
+- **Session start.** `.claude/settings.json` gains a `SessionStart` hook printing the newest `docs/handoffs/*.md` path and `ralph.sh status`'s first line. `.claude/commands/rotate.md` is the procedure (numbering, headings, lock hold, watcher stop, the two relaunch lines).
+- Numbered #015 because #012 (container credentials) was already taken when Michael named this "#012-principal-rotation".
+- Reversal: `git revert` the `chore(0.0): principal rotation` commit.
