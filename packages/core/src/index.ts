@@ -26,6 +26,20 @@ export {
   type Section,
 } from "./blocks.js";
 
+export {
+  segmentSentences,
+  sentencesOf,
+  paragraphText,
+  replaceSentence,
+  reorderSentences,
+  ABBREVIATIONS,
+  type Sentence,
+  type SentenceRange,
+  type SentenceOptions,
+  type SegmentOptions,
+  type SegmentFn,
+} from "./sentences.js";
+
 export function placeholder(): string {
   return "core";
 }

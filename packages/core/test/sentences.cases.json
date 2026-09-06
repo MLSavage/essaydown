@@ -1,0 +1,185 @@
+{
+  "_note": "Sentence-segmentation conformance cases for PRD §6.1 (task 0.8). `sentences` is the exact list `segmentSentences(text)` must return, trimmed of the whitespace around each sentence; its length is the sentence count. Plain text only: no Markdown, so the same cases run against the rule-based fallback (task 0.9) and inside each real webview (task 6.2).",
+  "cases": [
+    {
+      "id": "plain-two",
+      "rule": "Two ordinary sentences split at the period.",
+      "text": "The pen was full. The page was empty.",
+      "sentences": ["The pen was full.", "The page was empty."]
+    },
+    {
+      "id": "plain-three",
+      "rule": "Three short sentences.",
+      "text": "First. Second. Third.",
+      "sentences": ["First.", "Second.", "Third."]
+    },
+    {
+      "id": "no-terminator",
+      "rule": "Text without terminal punctuation is one sentence.",
+      "text": "One sentence with no terminator",
+      "sentences": ["One sentence with no terminator"]
+    },
+    {
+      "id": "abbrev-dr",
+      "rule": "§6.1: `Dr.` does not split.",
+      "text": "Dr. Smith went home. He slept.",
+      "sentences": ["Dr. Smith went home.", "He slept."]
+    },
+    {
+      "id": "abbrev-eg",
+      "rule": "§6.1: `e.g.` does not split.",
+      "text": "See e.g. the chart. Next.",
+      "sentences": ["See e.g. the chart.", "Next."]
+    },
+    {
+      "id": "abbrev-ie",
+      "rule": "§6.1: `i.e.` does not split.",
+      "text": "He cited i.e. the second law. Then he stopped.",
+      "sentences": ["He cited i.e. the second law.", "Then he stopped."]
+    },
+    {
+      "id": "abbrev-mr-mrs",
+      "rule": "§6.1: `Mr.` and `Mrs.` do not split, twice in a row.",
+      "text": "Mr. and Mrs. Halloway arrived. They stayed.",
+      "sentences": ["Mr. and Mrs. Halloway arrived.", "They stayed."]
+    },
+    {
+      "id": "abbrev-ms",
+      "rule": "§6.1: `Ms.` does not split.",
+      "text": "Ms. Jones signed it. The deal closed.",
+      "sentences": ["Ms. Jones signed it.", "The deal closed."]
+    },
+    {
+      "id": "abbrev-vs",
+      "rule": "§6.1: `vs.` does not split.",
+      "text": "Cats vs. dogs is an old argument. Nobody wins.",
+      "sentences": ["Cats vs. dogs is an old argument.", "Nobody wins."]
+    },
+    {
+      "id": "abbrev-etc",
+      "rule": "§6.1: `etc.` does not split — so a sentence that really ends in `etc.` is joined to the next one. Stated limit, not a bug.",
+      "text": "Bring paper, ink, blotters, etc. Then start.",
+      "sentences": ["Bring paper, ink, blotters, etc. Then start."]
+    },
+    {
+      "id": "abbrev-mid-sentence",
+      "rule": "An abbreviation away from any boundary changes nothing.",
+      "text": "The e.g. in that line is wrong.",
+      "sentences": ["The e.g. in that line is wrong."]
+    },
+    {
+      "id": "initial-single",
+      "rule": "§6.1: a single capital letter followed by a period is an initial, not a boundary.",
+      "text": "A. Smith wrote it. B. Jones edited it.",
+      "sentences": ["A. Smith wrote it.", "B. Jones edited it."]
+    },
+    {
+      "id": "initials-run",
+      "rule": "Three initials in a row are all held together.",
+      "text": "J. R. R. Tolkien wrote it. He was a don.",
+      "sentences": ["J. R. R. Tolkien wrote it.", "He was a don."]
+    },
+    {
+      "id": "decimal-mid",
+      "rule": "§6.1: a decimal number does not split.",
+      "text": "It cost 3.50 dollars. Then more.",
+      "sentences": ["It cost 3.50 dollars.", "Then more."]
+    },
+    {
+      "id": "decimal-at-end",
+      "rule": "A decimal that ends the sentence still splits after it.",
+      "text": "The bill came to 3.50. Then we left.",
+      "sentences": ["The bill came to 3.50.", "Then we left."]
+    },
+    {
+      "id": "decimal-sub-one",
+      "rule": "A decimal below one (leading zero) does not split.",
+      "text": "Ink flows at 0.5 ml per hour. That is slow.",
+      "sentences": ["Ink flows at 0.5 ml per hour.", "That is slow."]
+    },
+    {
+      "id": "decimal-versions",
+      "rule": "Version numbers do not split.",
+      "text": "Version 2.0 shipped late. Version 3.0 did not.",
+      "sentences": ["Version 2.0 shipped late.", "Version 3.0 did not."]
+    },
+    {
+      "id": "integer-then-capital",
+      "rule": "An integer followed by a period and a capital is a boundary: only digit-period-digit is a decimal.",
+      "text": "Chapter 4. The Pen Arrives. It was late.",
+      "sentences": ["Chapter 4.", "The Pen Arrives.", "It was late."]
+    },
+    {
+      "id": "question-mark",
+      "rule": "A question mark ends a sentence.",
+      "text": "Where is the ink? It is on the desk.",
+      "sentences": ["Where is the ink?", "It is on the desk."]
+    },
+    {
+      "id": "exclamation-mark",
+      "rule": "An exclamation mark ends a sentence.",
+      "text": "Stop! The nib is dry.",
+      "sentences": ["Stop!", "The nib is dry."]
+    },
+    {
+      "id": "ellipsis",
+      "rule": "An ellipsis inside a sentence is not a boundary.",
+      "text": "He waited... then he wrote. The page filled.",
+      "sentences": ["He waited... then he wrote.", "The page filled."]
+    },
+    {
+      "id": "newline-separated",
+      "rule": "A soft line break between sentences is a boundary and is not part of either sentence.",
+      "text": "Line one.\nLine two.",
+      "sentences": ["Line one.", "Line two."]
+    },
+    {
+      "id": "double-space",
+      "rule": "Two spaces between sentences are trimmed off both.",
+      "text": "Two spaces follow.  The next begins.",
+      "sentences": ["Two spaces follow.", "The next begins."]
+    },
+    {
+      "id": "quote-inside",
+      "rule": "A quoted clause closed before the period keeps its sentence whole.",
+      "text": "\"The nib is dry,\" she said. Then she left.",
+      "sentences": ["\"The nib is dry,\" she said.", "Then she left."]
+    },
+    {
+      "id": "quote-terminal",
+      "rule": "A closing quote after the terminal period stays with the sentence it ends.",
+      "text": "He said \"stop.\" Then he left.",
+      "sentences": ["He said \"stop.\"", "Then he left."]
+    },
+    {
+      "id": "parenthetical",
+      "rule": "A parenthetical inside a sentence is not a boundary.",
+      "text": "The nib (a fine one) was dry. He replaced it.",
+      "sentences": ["The nib (a fine one) was dry.", "He replaced it."]
+    },
+    {
+      "id": "url",
+      "rule": "The periods inside a URL are not boundaries.",
+      "text": "Visit https://example.com/a.b today. Then leave.",
+      "sentences": ["Visit https://example.com/a.b today.", "Then leave."]
+    },
+    {
+      "id": "trailing-space",
+      "rule": "Trailing whitespace is not part of the last sentence.",
+      "text": "Done. ",
+      "sentences": ["Done."]
+    },
+    {
+      "id": "whitespace-only",
+      "rule": "Whitespace-only text has no sentences.",
+      "text": "   ",
+      "sentences": []
+    },
+    {
+      "id": "empty",
+      "rule": "Empty text has no sentences.",
+      "text": "",
+      "sentences": []
+    }
+  ]
+}
