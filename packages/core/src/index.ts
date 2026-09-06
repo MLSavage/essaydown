@@ -40,6 +40,15 @@ export {
   type SegmentFn,
 } from "./sentences.js";
 
+export {
+  fallbackSegment,
+  fallbackSentences,
+  segmenterSelfTest,
+  SEGMENTER_CANARIES,
+  type SegmenterCanary,
+  type SegmenterChoice,
+} from "./segment-fallback.js";
+
 export function placeholder(): string {
   return "core";
 }
