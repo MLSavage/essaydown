@@ -1,8 +1,8 @@
 // util.mjs — shell, git, atomic files, lock (RUNNER-SPEC §1 "write-temp-then-rename", one lock).
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync, renameSync, unlinkSync, writeSync, appendFileSync, readdirSync, statSync, symlinkSync, lstatSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, closeSync, fsyncSync, readFileSync, writeFileSync, renameSync, unlinkSync, writeSync, appendFileSync, readdirSync, statSync, symlinkSync, lstatSync, rmSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 export class RalphError extends Error {
   constructor(message, { signal = null, exit = 1 } = {}) { super(message); this.signal = signal; this.exit = exit; }
@@ -40,13 +40,25 @@ export function readJson(p, fallback = undefined) {
   try { return JSON.parse(readFileSync(p, "utf8")); } catch (e) { throw new RalphError(`${p} does not parse: ${e.message}`); }
 }
 
-/** write-temp-then-rename; fsync'd. */
-export function writeAtomic(p, content) {
-  ensureDir(dirname(p));
+/** The real syscalls writeAtomic issues; the conformance suite injects a recorder in their place. */
+const REAL_FS = { openSync, writeSync, fsyncSync, closeSync, renameSync };
+
+/**
+ * write-temp-then-rename, fsync'd (RUNNER-SPEC §1). The order is
+ * write → fsync(fd) → close → rename → fsync(dir): the bytes reach the disk before the rename
+ * publishes them, and the directory entry the rename created reaches the disk before we return,
+ * because §8.4 needs the close intent durable *before* the ref transaction it authorises.
+ */
+export function writeAtomic(p, content, { fs = REAL_FS } = {}) {
+  const dir = ensureDir(dirname(p));
   const tmp = `${p}.tmp.${process.pid}.${Date.now()}`;
-  const fd = openSync(tmp, "w");
-  try { writeSync(fd, content); } finally { closeSync(fd); }
-  renameSync(tmp, p);
+  const fd = fs.openSync(tmp, "w");
+  try { fs.writeSync(fd, content); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, p);
+  try {
+    const dfd = fs.openSync(dir, "r");
+    try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+  } catch { /* a platform that refuses to open a directory for reading; the file fsync above stands */ }
 }
 export const writeJsonAtomic = (p, obj) => writeAtomic(p, JSON.stringify(obj, null, 2) + "\n");
 
@@ -76,30 +88,64 @@ export function symlinkForce(target, link) {
 
 export const rmrf = (p) => rmSync(p, { recursive: true, force: true });
 
-/** The one lock (RUNNER-SPEC §1): <root>/.locks/ralph, O_EXCL create, stale-pid recovery. */
-export function withLock(root, fn, { timeoutMs = 30_000 } = {}) {
+const readLockFile = (lock) => { try { return readFileSync(lock, "utf8"); } catch { return null; } };
+
+/**
+ * Break a stale lock and take it away in one operation: rename it to a per-pid name, and count the
+ * break only if the rename succeeded *and* the bytes it carried away are the bytes we judged stale.
+ * A rename that fails means another process broke it first (retry the create); bytes that differ
+ * mean a live holder replaced the file between our check and our break, so we put it back and
+ * refuse rather than run beside it.
+ */
+function breakStaleLock(lock, holder) {
+  const stash = `${lock}.stale.${process.pid}.${Date.now()}`;
+  try { renameSync(lock, stash); } catch { return; }
+  const taken = readLockFile(stash);
+  if (taken === holder) { try { unlinkSync(stash); } catch { /* gone */ } return; }
+  let restored = false;
+  if (!existsSync(lock)) { try { renameSync(stash, lock); restored = true; } catch { /* the holder re-created it */ } }
+  if (!restored) { try { unlinkSync(stash); } catch { /* gone */ } }
+  throw new RalphError(`lock ${lock} was replaced between the staleness check and the break; refusing to break a live lock`);
+}
+
+/**
+ * The one lock (RUNNER-SPEC §1): <root>/.locks/ralph, O_EXCL create, stale-holder recovery by
+ * identity rather than by path. The file carries a random token; the token is re-read after
+ * acquisition (a breaker that took the lock from us in between aborts here instead of running a
+ * second critical section) and the release deletes the file only while it still carries our token.
+ * `hooks.beforeBreak` / `hooks.afterCreate` are the two interleaving points the conformance suite
+ * drives a concurrent breaker through; nothing in the runner passes them.
+ */
+export function withLock(root, fn, { timeoutMs = 30_000, hooks = {} } = {}) {
   const dir = ensureDir(resolve(root, ".locks"));
   const lock = resolve(dir, "ralph");
+  const mine = `${process.pid} ${now()} ${randomBytes(16).toString("hex")}\n`;
   const start = Date.now();
   for (;;) {
     try {
       const fd = openSync(lock, "wx");
-      writeSync(fd, `${process.pid} ${now()}\n`);
-      closeSync(fd);
-      break;
+      try { writeSync(fd, mine); } finally { closeSync(fd); }
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      let holder = "";
-      try { holder = readFileSync(lock, "utf8"); } catch { /* raced */ }
+      const holder = readLockFile(lock);
+      if (holder === null) continue; // released under us; try the create again
       const pid = Number(holder.split(" ")[0]);
       let alive = false;
       if (pid) { try { process.kill(pid, 0); alive = true; } catch (err) { alive = err.code === "EPERM"; } }
-      if (!alive) { try { unlinkSync(lock); } catch { /* raced */ } continue; }
-      if (Date.now() - start > timeoutMs) throw new RalphError(`lock ${lock} held by pid ${pid}`);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+      if (alive) {
+        if (Date.now() - start > timeoutMs) throw new RalphError(`lock ${lock} held by pid ${pid}`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+        continue;
+      }
+      hooks.beforeBreak?.({ lock, holder });
+      breakStaleLock(lock, holder);
+      continue;
     }
+    hooks.afterCreate?.({ lock, token: mine });
+    if (readLockFile(lock) !== mine) throw new RalphError(`lock ${lock} does not carry our token after acquisition (another process broke it); refusing to run`);
+    break;
   }
-  try { return fn(); } finally { try { unlinkSync(lock); } catch { /* gone */ } }
+  try { return fn(); } finally { if (readLockFile(lock) === mine) { try { unlinkSync(lock); } catch { /* gone */ } } }
 }
 
 export function firstLine(s, max = 72) {
