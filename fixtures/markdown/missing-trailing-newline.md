@@ -1,0 +1,1 @@
+A paragraph with no trailing newline at the end of the file.
