@@ -127,6 +127,11 @@ jobs:
         shell: bash
         run: cargo test 2>&1 | tee cargo-test.log
 
+      - name: Runner conformance suite (RUNNER-SPEC §12, ubuntu leg only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash ralph/test/run.sh 2>&1 | tee ralph-test.log
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -136,6 +141,8 @@ jobs:
             lint.log
             test.log
             cargo-test.log
+            ralph-test.log
+          if-no-files-found: ignore
 
   merge-logs:
     needs: test
@@ -147,4 +154,5 @@ jobs:
         with:
           name: test-logs
           pattern: test-logs-*
+          separate-directories: true
           delete-merged: true
