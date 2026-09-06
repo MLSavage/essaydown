@@ -1,4 +1,4 @@
-Read docs/PRINCIPAL.md, then continue from docs/handoffs/003-phase-0-0.3-running.md (it supersedes 002-phase-0-running.md; read 002 once for the gate evidence pattern and the deviations list). Phase 0 is running: 0.0–0.2 and gate 0.2h passed; task 0.3 (or a later one) is in flight or the runner has stopped on a signal. Do not re-audit the plan; do not rebuild the runner; fix it only with an atomic `fix(runner): …` commit plus a conformance test when it contradicts RUNNER-SPEC.
+Read docs/PRINCIPAL.md, then continue from docs/handoffs/003-phase-0-0.3-running.md (it supersedes 002-phase-0-running.md; read 002 once for the gate evidence pattern and the deviations list). Phase 0 is running: 0.0–0.3 and gate 0.2h passed; task 0.4 (or a later one) is in flight or the runner has stopped on a signal. Do not re-audit the plan; do not rebuild the runner; fix it only with an atomic `fix(runner): …` commit plus a conformance test when it contradicts RUNNER-SPEC.
 
 Your job this session, in order:
 

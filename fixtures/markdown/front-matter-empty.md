@@ -1,4 +1,0 @@
----
----
-
-A body paragraph.
