@@ -370,13 +370,236 @@
   "reviewSetDescription": "Review set for Phase 0. Phase checks: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from logs/ci), invariant table, five further fixtures hand-verified by each reviewer, golden expected/essay-fixture.moved.md hand-verified, fresh-clone cold build."
  },
  {
+  "id": "0.14",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F1, Claude findings 1–2 and Sol finding 2, blocker): packages/core/src/sentences.ts `sliceInline` gives a zero-width atomic inline node (an image with empty alt, `![](x.png)`, alone or inside a link) no owner at the end of a paragraph and two owners at offset 0, so `replaceSentence` and `reorderSentences` silently delete or duplicate it; the mark branch's `hi <= lo` test discards zero-width descendants the same way. Decide the ownership rule for width-0 inline nodes at slice endpoints once (an explicit `includeAtTo` argument, true only for the final slice that reaches `plain.length`; drop the `zeroWidth && start === from` special case), traverse wrappers (link, emphasis, strong) that contain them, write the rule in the doc comment, and add the invariant the corpus never had: for every top-level paragraph of every fixture listed in fixtures/markdown/index.json, `format(reorderSentences(root, id, identity))` and `format(replaceSentence(root, id, i, <the sentence's own text>))` equal `format(root)` byte-for-byte. No new dependencies; no edits outside packages/core/src/sentences.ts and packages/core/test/.",
+  "acceptance": "Probe cases from the reports pass as tests, each asserting node presence, count and URL, presence and absence: `One. Two. ![](i.png)` with replaceSentence(index 0, 'X.') → `X. Two. ![](i.png)` and reorderSentences(identity) unchanged; `![](i.png) One. Two.` with replaceSentence(index 0, 'X.') → exactly one image; `Hi. ![](x.png)` identity reorder unchanged; a linked empty-alt image `[![](x.png)](https://e.x)` at the end and at the start survives replace and reorder with its URL; an image adjacent to another image survives. The corpus-wide identity invariant passes for every paragraph of every fixture in index.json (count read from the index, not written as a literal). The 30 cases of sentences.cases.json and the existing sentences tests still pass; `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.12.r0d"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.15",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F2, Sol findings 3 and 5, blocker): packages/core/src/sidecar.ts's hand-written front-matter scalar scanner treats malformed scalars as writable (`title: bad: mapping`, `title: \"\\q\"`) and misdecodes valid double-quoted escapes (`\"\\u0041\"` mirrored as `u0041`, not `A`); a replacement value containing a newline is written literally inside single quotes as two physical lines and reported as success. Define the supported grammar for the two app-owned keys (PRD §6.1): plain scalar with no `: ` or ` #` sequence and no leading indicator character; double-quoted with the YAML escapes `\\\\ \\\" \\n \\t \\r \\/ \\b \\f \\0 \\uXXXX \\xXX` decoded and re-encoded; single-quoted with `''`. Everything else (unknown escapes, malformed plain scalars, block or flow indicators, a replacement value containing `\\n` or `\\r` for any quoting style) → `FrontMatterUnsupported` before any edit, root identity and every byte unchanged. No YAML library (PRD §4; zero new dependencies); edits only in packages/core/src/sidecar.ts and packages/core/test/.",
+  "acceptance": "Tests assert, for each case, both the outcome and the untouched bytes: `\"\\u0041\"` reads as `A` and re-encodes preserving the quoting; `\"\\q\"` and `bad: mapping` reads report FrontMatterUnsupported and a write leaves the block byte-identical; a multiline replacement (`Line one\\nLine two`, and with `\\r`) is refused for plain, single-quoted and double-quoted titles; the existing sidecar tests (73 at r0) still pass; `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.14"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.16",
+  "model": "sonnet",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F3, Claude findings 3 and 10, Sol finding 10, Grok findings 5–6, should-fix required): the green bar `pnpm lint && pnpm test && cargo test` (CLAUDE.md step 2, RUNNER-SPEC §4.3) covers neither `tsc` nor coverage, so packages/core ships red on `pnpm --filter @essaydown/core typecheck` (packages/core/test/sidecar.test.ts:979, TS2339: `variants` on an un-narrowed `orphans[0].entry` union) and 0.7's 100% blocks.ts threshold is never executed. Widen the bar's existing commands, not its command list: root `package.json` `lint` becomes `eslint . && pnpm -r --if-present typecheck` (every package with a `typecheck` script runs `tsc --noEmit`; add the script to packages that lack it), `test` becomes `vitest run --coverage` (thresholds fail the run) with `coverage` kept for the table. Fix the narrowing at sidecar.test.ts:979 with a discriminant check (`list === 'rewrites'`) rather than a cast. Set global per-file thresholds in vitest.config.ts at or just below the values the current `pnpm coverage` run prints (read them from the run; do not copy numbers from this text), keeping blocks.ts at 100. ci.yml needs no change (it already runs `pnpm lint` and `pnpm test`). No new dependencies.",
+  "acceptance": "`pnpm lint` fails on a deliberately introduced type error in a scratch file and passes once it is removed (both shown in the journal); `pnpm test` fails when blocks.ts's threshold is lowered below its measurement to a value that cannot be met and passes at the committed values (shown in the journal, then reverted); `pnpm --filter @essaydown/core typecheck` exits 0; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "0.15"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.17",
+  "model": "sonnet",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F4 and F5, Claude findings 4–5, Sol finding 8, Grok finding 1, should-fix required): (1) .github/workflows/ci.yml's `merge-logs` job merges the three per-OS `test-logs-<os>` artifacts with the default `separate-directories: false`, so `lint.log`/`test.log`/`cargo-test.log` collide and the accepted, digest-verified artifact holds one OS; set `separate-directories: true` (the merged artifact then holds `test-logs-{ubuntu,macos,windows}-latest/{lint,test,cargo-test}.log`); (2) the runner's conformance suite `ralph/test/run.sh` (RUNNER-SPEC §12) is run only by bootstrap: add a step to the ubuntu leg of the `test` job that runs `bash ralph/test/run.sh` after `cargo test`, its output captured as `ralph-test.log` inside that leg's upload. Do not change the artifact name `test-logs`. Tool versions still come from docker/versions.env. No new dependencies.",
+  "acceptance": "ci.yml lints under `actionlint` and `act --list` resolves the jobs; the diff touches only .github/workflows/ci.yml and the journal; the journal states plainly that the three-OS proof and the artifact layout are observed only by the `0.verify.r1h` gate (whose ciAcceptance names the three directories), never from this Linux container.",
+  "dependencies": [
+   "0.16"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.18",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F6 and F7, Sol finding 6 and Grok finding 2, should-fix required; runner code, conformance tests required): (1) review start (`ralph/lib/run.mjs`, the branch that records /logs/reviews/<phase>/r<k>/) trusts the runtime `integrated_sha` and never consumes the verifier gate's evidence; it must read `/logs/ci/<verifier_id>h/accepted.json` through the existing `readAcceptedCi` helper (digests of every named artifact verified), require its `sha` to equal both `verification_sha` and `implementation_sha`, and refuse to start the attempt (a RalphError naming the gate and the mismatch; `run` exits non-zero, no reviewer started, nothing recorded) when accepted.json is missing or any digest differs; (2) `ralph/lib/gate.mjs` `isVerifyGate` is `/^\\d+\\.verifyh$/`, so `0.verify.g1h` (and every `N.verify.r<k>[.g<n>]h`) never prints `ROTATE-PRINCIPAL` (DECISIONS #015): use the full verifier-gate grammar `/^\\d+\\.verify(?:\\.r\\d+)?(?:\\.g\\d+)?h$/` in the runner and in gate.sh's output path. Conformance tests in ralph/test/conformance.test.mjs through the real entry points (`ralph.sh run`, `gate.sh`): tampered artifact → review refused; intact → review starts; `0.verify.g1h` and `0.verify.r1h` ACCEPT lines followed by `ROTATE-PRINCIPAL`. No new dependencies; RUNNER-SPEC unchanged (both items implement sentences already in §5.1, §11 and §12).",
+  "acceptance": "`bash ralph/test/run.sh` green with the new tests present and failing before the fix (shown in the journal: run once with the fix stashed); the existing 61 tests still pass; `pnpm lint && pnpm test && cargo test` green; the diff touches only ralph/lib/run.mjs, ralph/lib/gate.mjs, ralph/test/ and the journal.",
+  "dependencies": [
+   "0.17"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.19",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F8, Grok finding 3 and Claude finding 11, the #017 doctor gap, should-fix required; runner code, conformance tests required): `ralph.sh doctor` checks a passed task by ancestry only, so a later commit on the phase branch that deletes a passed task's files (DECISIONS #017: `c8b234a` deleted 91 files of 0.4 while `6a9acdc` stayed an ancestor) is invisible; and a crash after `status: passed` but before the candidate tag, worktree and branch are removed leaves debris no check names. Add two read-only doctor checks, each naming its one repair: (1) `principal-commit-deletes <sha> <n> paths` for every commit on the phase branch since `phases.json` `base_main_sha` whose subject does not start with `task(`, `plan(` or `fix(0.` and which deletes any path present in its parent (task and plan commits may delete files; a principal commit that deletes is the #017 shape) — repair is the manual #017 procedure (restore commit); (2) `passed-with-debris <id>` when a `passed` task still has `candidate/<id>`, a worktree or `task/<id>` — repair `admin mark-integrated <id>` (already idempotent; make it so if it is not). Conformance tests: a fixture host commit deleting a passed task's file → doctor reports (1) and `run` refuses; the restore commit clears it; a task commit deleting a file → clean; a passed task with a leftover candidate tag → doctor reports (2) and the admin command clears it. No new dependencies.",
+  "acceptance": "`bash ralph/test/run.sh` green with the new tests failing before the fix (journal shows the red run); existing tests still pass; `ralph/ralph.sh doctor` on the real repo at HEAD is clean (the `c8b234a`/`59d2d3e` pair on phase/0 must not be reported: `59d2d3e` restored the paths, so the check compares against the branch head, not the parent alone — state exactly which comparison is implemented); `pnpm lint && pnpm test && cargo test` green; the diff touches only ralph/lib/doctor.mjs, ralph/lib/integrate.mjs if needed, ralph/test/ and the journal.",
+  "dependencies": [
+   "0.18"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.20",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F9 and F10, Claude finding 6 and Sol finding 11, should-fix required; runner code, conformance tests required): (1) `ralph/lib/util.mjs` `withLock` breaks a stale lock by path (read pid → `kill(pid, 0)` → `unlinkSync`), a TOCTOU in which two processes recovering from the same crash can both hold the lock, and the `finally` unlinks unconditionally; break and take the lock as one operation (rename the stale file to a per-pid name and continue only if the rename succeeded), write a random token into the lock, re-read it after acquisition and abort if it is not yours, and release only when the token read back is yours; (2) `writeAtomic` is documented as fsynced but never calls fsync: fsync the temporary file's descriptor before `rename` and the containing directory after it (RUNNER-SPEC §8.4 needs the close intent durable before the ref transaction). Conformance tests: a stale lock plus a simulated concurrent breaker (a second lock file appearing between check and break) → exactly one holder, the other aborts; release never deletes a lock it does not own; `writeAtomic` with an injected fs records the order write → fsync(fd) → close → rename → fsync(dir). No new dependencies.",
+  "acceptance": "`bash ralph/test/run.sh` green with the new tests failing before the fix (journal shows the red run); existing tests still pass; `pnpm lint && pnpm test && cargo test` green; the diff touches only ralph/lib/util.mjs, ralph/test/ and the journal.",
+  "dependencies": [
+   "0.19"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.21",
+  "model": "sonnet",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F11, Claude findings 7 and 12, should-fix required): the 0.1 scaffold left `tauri-plugin-opener` (apps/desktop/src-tauri/Cargo.toml) and `@tauri-apps/plugin-opener` (apps/desktop/package.json) — dependencies outside PRD §4 with no DECISIONS note (§9.4) — and the scaffold's `greet` command with its `invoke_handler` (apps/desktop/src-tauri/src/lib.rs), an IPC surface item outside §6.4's exhaustive list. Remove both packages, the `.plugin(tauri_plugin_opener::init())` registration, `greet` and the handler; set apps/desktop/src-tauri/Cargo.toml `description` to `Essay Down` and `authors` to `[\"Savage Systems\"]`, and apps/desktop/index.html's `<title>` to `Essay Down`. The lockfiles change by removal only (no addition). Leave App.tsx to Phase 1's shell task (backlog entry exists).",
+  "acceptance": "`git diff` shows no added dependency in any manifest or lockfile and the two opener packages gone from both lockfiles; `grep -rn opener apps/` is empty; `cargo test` compiles the workspace; `pnpm tauri dev` under xvfb still opens a window titled 'Essay Down' (0.1's check); `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.20"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.22",
+  "model": "sonnet",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r0 F12 and F13, Sol finding 4, Grok findings 9–10, should-fix required): packages/core/src/parse.ts's comment says line endings are normalised to LF on the way in, but `parse` never rewrites `\\r\\n`; micromark drops CR between blocks (which is all the corpus's CRLF fixture exercises) and keeps it inside multi-line paragraphs and fenced code, so `format` emits mixed endings. Normalise `\\r\\n?` → `\\n` before parsing (whole document, opaque nodes included: invariant C's rule is that output line endings are LF and the 0.6 acceptance says the CRLF fixture normalises on parse). Add unit tests with string literals (not new CRLF fixtures, which the corpus test reserves for the one CRLF source): a CRLF two-line paragraph, a CRLF fenced code block, a CRLF html block and a CRLF yaml block, asserting `\\r` present in the source, absent from every node value and from `format` output. Add two LF corpus fixtures with canonical siblings and index.json entries: `task-list-as-text.md` (`- [ ]`/`- [x]` items stay plain list text, PRD §4/§6.1) and `autolink-literal.md` (a bare URL becomes a link node); the corpus tests read counts from index.json, so no literal changes. No edits to 0.4's fixture files; no new dependencies.",
+  "acceptance": "The four CRLF unit tests pass with the presence (source) and absence (values, output) assertions; the two new fixtures satisfy invariants A/B/C (the roundtrip test picks them up from the directory) and their index.json entries validate against index.schema.json; `fixtures-corpus.test.ts` still asserts the three counts equal (read from the directory and the index); `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.21"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.verify.r1",
+  "model": "sonnet",
+  "description": "Phase 0 verification for review attempt r1 (RUNNER-SPEC §3, §5.5): freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. `promote-lessons` is a manual step carried by this task's text (DECISIONS #review-0-r0): append these two lines, verbatim, to the `## Code rules` list of both CLAUDE.md and AGENTS.md (identical below line 1; `ralph/check-agent-rules.sh` must stay green): `- Every core operation of the shape f(root, …) → root has a corpus-wide identity test: the no-op argument (identity permutation, a sentence replaced by its own text, an unchanged front-matter value) re-serialises byte-identically for every fixture in fixtures/markdown/index.json.` and `- Code that partitions a string or a node list into adjacent half-open slices states its ownership rule for zero-width items once, in the doc comment, and tests the first, middle and last positions.`",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change and touches only CLAUDE.md, AGENTS.md, docs/lessons.md and the journal; `ralph/check-agent-rules.sh` exits 0; `tests/agent-rules.test.ts` passes.",
+  "dependencies": [
+   "0.22"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full Phase 0 suite (pnpm lint with typecheck, pnpm test with coverage thresholds, cargo test, and ralph/test/run.sh on ubuntu) green on ubuntu, macos and windows at the implementation SHA; the accepted `test-logs` artifact under /logs/ci/0.verify.r1h/accepted/ (the gate id; DECISIONS #018) holds test-logs-ubuntu-latest/, test-logs-macos-latest/ and test-logs-windows-latest/ each with lint.log, test.log and cargo-test.log (ubuntu also ralph-test.log).",
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.verify.r1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "0.verify.r1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "description": "CI gate for 0.verify.r1: scripts/gate.sh 0.verify.r1h pushes integrated_sha of 0.verify.r1 to ci/0.verify.r1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\"] into /logs/ci/0.verify.r1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full Phase 0 suite (pnpm lint with typecheck, pnpm test with coverage thresholds, cargo test, and ralph/test/run.sh on ubuntu) green on ubuntu, macos and windows at the implementation SHA; the accepted `test-logs` artifact under /logs/ci/0.verify.r1h/accepted/ (the gate id; DECISIONS #018) holds test-logs-ubuntu-latest/, test-logs-macos-latest/ and test-logs-windows-latest/ each with lint.log, test.log and cargo-test.log (ubuntu also ralph-test.log).",
+  "dependencies": [
+   "0.verify.r1"
+  ]
+ },
+ {
+  "id": "0.12.r1a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, claude reviewer, for review set 0.12 (phase 0). Review set for Phase 0, attempt r1 (after the r0 FAIL, DECISIONS #review-0-r0). Phase checks as r0: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from /logs/ci/0.verify.r1h/accepted/, three OS directories); invariant table; five further fixtures hand-verified by each reviewer; golden expected/essay-fixture.moved.md hand-verified; fresh-clone cold build. r1-specific checks: each r0 finding's disposition in DECISIONS #review-0-r0 verified against the tree (fixed, deferred with a backlog line, or recorded), the identity invariant of 0.14 and the front-matter grammar of 0.15 probed independently, and the conformance tests of 0.18–0.20 read for what they actually exercise.",
+  "acceptance": "/logs/reviews/0/r1/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verify.r1h"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.12.r1b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, sol reviewer, for review set 0.12 (phase 0). Review set for Phase 0, attempt r1 (after the r0 FAIL, DECISIONS #review-0-r0). Phase checks as r0: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from /logs/ci/0.verify.r1h/accepted/, three OS directories); invariant table; five further fixtures hand-verified by each reviewer; golden expected/essay-fixture.moved.md hand-verified; fresh-clone cold build. r1-specific checks: each r0 finding's disposition in DECISIONS #review-0-r0 verified against the tree (fixed, deferred with a backlog line, or recorded), the identity invariant of 0.14 and the front-matter grammar of 0.15 probed independently, and the conformance tests of 0.18–0.20 read for what they actually exercise.",
+  "acceptance": "/logs/reviews/0/r1/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verify.r1h"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.12.r1c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, grok reviewer, for review set 0.12 (phase 0). Review set for Phase 0, attempt r1 (after the r0 FAIL, DECISIONS #review-0-r0). Phase checks as r0: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from /logs/ci/0.verify.r1h/accepted/, three OS directories); invariant table; five further fixtures hand-verified by each reviewer; golden expected/essay-fixture.moved.md hand-verified; fresh-clone cold build. r1-specific checks: each r0 finding's disposition in DECISIONS #review-0-r0 verified against the tree (fixed, deferred with a backlog line, or recorded), the identity invariant of 0.14 and the front-matter grammar of 0.15 probed independently, and the conformance tests of 0.18–0.20 read for what they actually exercise.",
+  "acceptance": "/logs/reviews/0/r1/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verify.r1h"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.12.r1d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r1",
+  "description": "Reconciliation of review attempt r1 for review set 0.12 (phase 0): copy the three reports to docs/reviews/phase-0-r1-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-0-r1 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 0.verify.r2 and 0.12.r2a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "0.12.r1a",
+   "0.12.r1b",
+   "0.12.r1c"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
   "id": "0.close",
   "model": "opus",
   "execution": "runner",
   "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/0 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/1; then finalise .evidence/closes and the next phase base record.",
   "acceptance": "main == reconciliation_sha of the newest Phase 0 review attempt (verdict PASS); suite green on that commit; branch phase/1 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
   "dependencies": [
-   "0.12.r0d"
+   "0.12.r1d"
   ],
   "nextPhase": "1",
   "nextBranch": "phase/1",
