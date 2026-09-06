@@ -103,6 +103,6 @@ export function withLock(root, fn, { timeoutMs = 30_000 } = {}) {
 }
 
 export function firstLine(s, max = 72) {
-  const l = (s ?? "").split(/[.\n]/)[0].trim();
+  const l = (s ?? "").split(/\.(?=\s|$)|\n/)[0].trim(); // first sentence: a period followed by whitespace, not one inside a path
   return l.length > max ? l.slice(0, max - 1) + "…" : l;
 }
