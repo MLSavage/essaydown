@@ -1,1 +1,4 @@
+* text=auto eol=lf
+fixtures/** -text
+packages/core/test/fixtures/** -text
 docs/lessons.md merge=union
