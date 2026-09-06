@@ -100,6 +100,11 @@ test("stop-check: STUCK after 3 attempts without DONE; retry resets; NO-JOURNAL 
   ok(ralph(f.root, ["retry", "0.1"]));
   control(f.root, "0.1", { done: true, journal: false });
   assert.match(ralph(f.root, ["run", "--phase", "0"]).out, /NO-JOURNAL 0\.1/);
+  assert.equal(state(f.root)["0.1"].status, "running");
+  ralph(f.root, ["run", "--phase", "0"]);
+  assert.match(ralph(f.root, ["run", "--phase", "0"]).out, /STUCK 0\.1 \(no journal entry\)/, "third journal-less attempt is STUCK");
+  assert.equal(state(f.root)["0.1"].status, "blocked");
+  ok(ralph(f.root, ["retry", "0.1"]));
   control(f.root, "0.1", { done: true });
   ralph(f.root, ["run", "--phase", "0"]);
   assert.equal(state(f.root)["0.1"].status, "passed");

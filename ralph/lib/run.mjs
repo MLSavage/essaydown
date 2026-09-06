@@ -13,7 +13,7 @@ import { writeSummary } from "./summary.mjs";
 
 const MAX_ITER = Number(process.env.RALPH_MAX_ITERATIONS ?? 15);
 const MAX_ATTEMPTS = 3;
-const SETUP_TASKS = (process.env.RALPH_SETUP_TASKS ?? "0.1 0.2").split(/\s+/);
+const SETUP_TASKS = (process.env.RALPH_SETUP_TASKS ?? "").split(/\s+/).filter(Boolean); // no Phase 0 task is "setup" (lessons 0.1)
 
 /** First eligible unit of work in spec order (RUNNER-SPEC design rule: strictly sequential). */
 export function selectNext(ctx, phase = null) {
@@ -111,17 +111,16 @@ function stepLoop(ctx, t, r) {
   const newCommit = head !== before.head || gitOut(repo, ["-C", wt, "status", "--porcelain"]) !== "";
   const done = transcriptHasDone(logPath, t.id);
   if (gitOut(repo, ["-C", wt, "status", "--porcelain"])) { git(repo, ["-C", wt, "add", "-A"]); git(repo, ["-C", wt, "commit", "-q", "-m", `wip(${t.id}): recovery of uncommitted changes`]); }
-  if (!journalOk) {
-    withLock(ctx.root, () => ctx.set(t.id, { attempts: attempt, notes: "iteration ended without a journal entry" }, "no journal entry"));
-    emit(`NO-JOURNAL ${t.id}`);
-    return { signal: "NO-JOURNAL", id: t.id };
-  }
+  // an attempt that ends without a journal entry or without a commit still counts toward the three attempts (§4.3)
+  const stuckOr = (signal, patch, why) => withLock(ctx.root, () => {
+    if (attempt >= MAX_ATTEMPTS) { ctx.set(t.id, { ...patch, status: "blocked", attempts: attempt, notes: `${why} after ${attempt} attempts` }, "STUCK"); emit(`STUCK ${t.id} (${why})`); return { signal: "STUCK", id: t.id }; }
+    ctx.set(t.id, { ...patch, attempts: attempt }, why);
+    emit(`${signal} ${t.id}`);
+    return { signal, id: t.id };
+  });
+  if (!journalOk) return stuckOr("NO-JOURNAL", { notes: "iteration ended without a journal entry" }, "no journal entry");
   const noCommitStreak = newCommit ? 0 : (Number(ctx.rec(t.id).no_commit_streak ?? 0) + 1);
-  if (noCommitStreak >= 2) {
-    withLock(ctx.root, () => ctx.set(t.id, { attempts: attempt, no_commit_streak: noCommitStreak, notes: "no wip commit in two iterations" }, "no commit"));
-    emit(`NO-COMMIT ${t.id}`);
-    return { signal: "NO-COMMIT", id: t.id };
-  }
+  if (noCommitStreak >= 2) return stuckOr("NO-COMMIT", { no_commit_streak: noCommitStreak, notes: "no wip commit in two iterations" }, "no commit");
   let green = false;
   if (done && commitOk) green = t.execution === "loop-external" ? runSuite(ctx, wt, { external: t.externalVerify }) : runSuite(ctx, wt);
   if (done && commitOk && green) {
