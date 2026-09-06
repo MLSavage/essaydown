@@ -507,3 +507,22 @@ test("replan task: after integration the replanTarget is principal-pending and R
   assert.ok(done.done, done.stopped ?? done.error);
   cleanup(f.root);
 });
+
+test("a checkout on the moved branch is refreshed when clean and reported when it has staged changes", () => {
+  const f = makeFixture({ phases: onePhase() });
+  git(f.root, ["checkout", "-q", "phase/0"]); // the host checkout sits on the phase branch, like the principal's
+  let r = ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+  assert.equal(state(f.root)["0.1"].status, "passed", r.out);
+  assert.ok(existsSync(join(f.root, "work/0.1.txt")), "checkout refreshed to the new tip");
+  assert.equal(gitOut(f.root, ["status", "--porcelain"]), "", "checkout clean after the move");
+  assert.doesNotMatch(r.out, /STALE-CHECKOUT/);
+  writeFileSync(join(f.root, "mine.txt"), "principal edit\n"); git(f.root, ["add", "mine.txt"]);
+  assert.match(ralph(f.root, ["doctor"]).out, /stale-checkout .* \(staged changes on phase\/0/);
+  git(f.root, ["commit", "-q", "-m", "principal chore"]);
+  r = ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+  assert.equal(state(f.root)["0.verify"].status, "passed", r.out);
+  assert.ok(existsSync(join(f.root, "work/0.verify.txt")) && existsSync(join(f.root, "mine.txt")));
+  assert.equal(gitOut(f.root, ["status", "--porcelain"]), "");
+  git(f.root, ["checkout", "-q", "main"]);
+  cleanup(f.root);
+});

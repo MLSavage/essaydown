@@ -125,6 +125,8 @@ export function finishIntegration(ctx, id, { plan = null, candidate, branchHead 
       writeJsonAtomic(p, { ...st, integrated: { ...(st.integrated ?? {}), [id]: candidate }, head_sha: candidate, updated_at: now() });
     }
   }
+  const targetRef = plan ? `refs/heads/${plan.target_branch}` : targetRefOf(ctx, t);
+  refreshCheckouts(repo, targetRef.replace(/^refs\/heads\//, ""), gitOut(repo, ["rev-parse", `${candidate}^`]), candidate);
   if (branchHead) git(repo, ["tag", "-f", `wip/${label}`, branchHead], { check: false });
   git(repo, ["tag", "-d", `candidate/${label}`], { check: false });
   if (existsSync(wt)) git(repo, ["worktree", "remove", "--force", wt], { check: false });
@@ -133,6 +135,27 @@ export function finishIntegration(ctx, id, { plan = null, candidate, branchHead 
   git(repo, ["branch", "-D", branch], { check: false });
   writeSummary(ctx);
   ctx.audit(`integrated ${label}`, candidate);
+}
+
+/**
+ * After a ref moved: every worktree checked out on that branch (the host checkout included) has a stale index and
+ * working tree. One whose index and tree still equal the old tip is refreshed to the new tip; any other is reported
+ * as STALE-CHECKOUT (and by doctor) so nobody commits from a stale index. Found on 0.1/0.2 (DECISIONS #repair-phase0-checkout).
+ */
+export function refreshCheckouts(repo, branch, oldSha, newSha) {
+  const stale = [];
+  const oldTree = oldSha ? gitOut(repo, ["rev-parse", `${oldSha}^{tree}`]) : null;
+  for (const block of gitOut(repo, ["worktree", "list", "--porcelain"]).split("\n\n")) {
+    const path = /^worktree (.+)$/m.exec(block)?.[1];
+    const br = /^branch (.+)$/m.exec(block)?.[1];
+    if (!path || br !== `refs/heads/${branch}` || !existsSync(path)) continue;
+    const idx = git(repo, ["-C", path, "write-tree"], { check: false });
+    const wtClean = git(repo, ["-C", path, "diff", "--quiet"], { check: false }).status === 0;
+    if (idx.status === 0 && idx.stdout.trim() === oldTree && wtClean) { git(repo, ["-C", path, "reset", "-q", "--hard", newSha]); continue; }
+    stale.push(path);
+    emit(`STALE-CHECKOUT ${path} (checked out on ${branch}, which moved to ${newSha.slice(0, 7)}; commit or stash, then git reset --hard ${branch})`);
+  }
+  return stale;
 }
 
 export function setPlan(ctx, id, patch, why) {

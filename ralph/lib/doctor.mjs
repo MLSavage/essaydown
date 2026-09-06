@@ -64,6 +64,13 @@ export function doctor(ctx) {
       add(`unfinished-integration ${p.id} (${cur === cand ? "target == candidate" : cur === old ? "target == expected-old" : "target == neither"})`, cur === cand ? `ralph.sh admin mark-integrated ${p.id}` : cur === old ? `ralph.sh admin retry ${p.id}` : `manual repair: DECISIONS.md#repair-${p.id}`);
     }
   }
+  // checkouts on runner-moved branches with staged changes (a stale index after update-ref looks exactly like this)
+  for (const block of gitOut(ctx.root, ["worktree", "list", "--porcelain"]).split("\n\n")) {
+    const path = /^worktree (.+)$/m.exec(block)?.[1];
+    const br = /^branch refs\/heads\/(.+)$/m.exec(block)?.[1];
+    if (!path || !br || !/^(main|phase\/\d+)$/.test(br) || !existsSync(path)) continue;
+    if (git(ctx.root, ["-C", path, "diff", "--cached", "--quiet"], { check: false }).status !== 0) add(`stale-checkout ${path} (staged changes on ${br}; if they are not yours the index is stale)`, `git -C ${path} stash && git -C ${path} reset --hard ${br} && git -C ${path} stash pop`);
+  }
   // external repos
   const ext = join(ctx.evidence, "external");
   if (existsSync(ext)) for (const id of readdirSync(ext)) {

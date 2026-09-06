@@ -3,7 +3,7 @@ import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { RalphError, withLock, git, gitOut, revParse, refOid, isAncestor, rmrf, now, writeJsonAtomic, readJson, ZERO, ensureDir } from "./util.mjs";
 import { emit, readAcceptedCi } from "./gate.mjs";
-import { runSuite } from "./integrate.mjs";
+import { runSuite, refreshCheckouts } from "./integrate.mjs";
 import { writeSummary } from "./summary.mjs";
 
 const ALLOWLIST = [/^docs\//, /^DECISIONS\.md$/, /^ralph\/tasks\.json$/, /^ralph\/EXPECTED_COUNT$/];
@@ -122,6 +122,7 @@ function finalise(ctx, phase, closeTask, rec, intentPath, finalPath) {
     const phases = ctx.phases();
     if (!phases[rec.next_phase]) { phases[rec.next_phase] = { phase: rec.next_phase, branch: rec.next_branch, base_main_sha: rec.main_sha, created_by: closeTask.id, created_at: now() }; ctx.savePhases(phases); }
   }
+  refreshCheckouts(ctx.root, "main", rec.base_main_sha, rec.main_sha);
   renameSync(intentPath, finalPath);
   ctx.set(closeTask.id, { status: "passed", integrated_sha: rec.main_sha, finished_at: now() }, `closed; main ${rec.main_sha.slice(0, 7)}`);
   ctx.audit(`close ${phase}`, `main=${rec.main_sha} refs=${rec.refs.map((r) => r.ref).join(",")}`);
