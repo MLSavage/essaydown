@@ -7,8 +7,10 @@ import { RalphError, withLock, now, ensureDir, writeJsonAtomic, readJson, digest
 import { ciAdapter } from "./ci.mjs";
 
 export function emit(signal) { process.stdout.write(`${signal}\n`); }
-/** `N.verifyh` is the gate at which the principal session rotates (PRINCIPAL.md, DECISIONS #015). */
-export const isVerifyGate = (id) => /^\d+\.verifyh$/.test(id);
+/** A verifier gate is the gate at which the principal session rotates (PRINCIPAL.md, DECISIONS #015).
+ * Verifier ids follow §5's grammar `N.verify[.r<k>][.g<n>]`, so every one of their gates rotates —
+ * not just the phase's initial `N.verifyh`. */
+export const isVerifyGate = (id) => /^\d+\.verify(?:\.r\d+)?(?:\.g\d+)?h$/.test(id);
 
 /** Create the plan request for a gate outcome (step 4). Returns the request id. */
 export function raisePlanRequest(ctx, gateId, attempt, outcome, evidencePath, reason) {

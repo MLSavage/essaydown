@@ -1,7 +1,7 @@
 // conformance.test.mjs — RUNNER-SPEC §12 scenarios against disposable fixture repositories.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { makeFixture, phaseTasks, prdFor, writeSpec, ralph, gate, control, ciScenario, fakeRuns, fakeRefs, state, plans, phasesJson, principalCommit, runPhaseGreen, cleanup } from "./harness.mjs";
 import { git, gitOut, revParse, refOid } from "../lib/util.mjs";
@@ -543,5 +543,94 @@ test("ROTATE-PRINCIPAL: after HUMAN_GATE N.verifyh and after every recorded N.ve
   assert.match(r.out, /PLAN-GATE plan\.0\.verifyh\.r0\nROTATE-PRINCIPAL$/m, "gate.sh prints it after a failed attempt is recorded");
   r = gate(f.root, ["rerun", "0.verifyh"]);
   assert.match(r.out, /ACCEPT 0\.verifyh a2 run \S+\nROTATE-PRINCIPAL$/m, "and after an accepted one");
+  cleanup(f.root);
+});
+
+test("review start consumes the verifier gate's evidence: missing accepted.json or a tampered artifact refuses the attempt; intact evidence starts it (§5.1, §1)", () => {
+  const f = makeFixture({ phases: onePhase() });
+  let r = runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });
+  assert.equal(r.stopped, "HUMAN_GATE 0.verifyh", r.error);
+  r = gate(f.root, ["0.verifyh"]);
+  assert.match(r.out, /ACCEPT 0\.verifyh a1/, r.out);
+  const accPath = join(f.root, ".evidence/ci/0.verifyh/accepted.json");
+  const artifact = join(f.root, ".evidence/ci/0.verifyh/a1/test-logs/test-logs.txt");
+  const accBytes = readFileSync(accPath, "utf8");
+  const artifactBytes = readFileSync(artifact, "utf8");
+  const reviewDir = join(f.root, ".evidence/reviews/0/r0");
+  const nothingRecorded = (why) => {
+    for (const n of ["phase_base_sha", "verifier_id", "verification_sha", "implementation_sha"]) assert.ok(!existsSync(join(reviewDir, n)), `${why}: ${n} was recorded`);
+    for (const who of ["claude", "sol", "grok"]) assert.ok(!existsSync(join(reviewDir, who)), `${why}: ${who}/ was created`);
+    for (const id of ["0.9.r0a", "0.9.r0b", "0.9.r0c"]) assert.equal(state(f.root)[id].status, "pending", `${why}: ${id} left pending`);
+  };
+  // (a) the gate's accepted.json is missing: the review does not start on the runtime record alone
+  rmSync(accPath);
+  r = ralph(f.root, ["run", "--phase", "0"]);
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /0\.verifyh/, r.out);
+  assert.match(r.out, /accepted\.json/, r.out);
+  nothingRecorded("missing accepted.json");
+  writeFileSync(accPath, accBytes);
+  // (b) an accepted artifact whose bytes on disk disagree with the accepted digest
+  writeFileSync(artifact, "tampered\n");
+  r = ralph(f.root, ["run", "--phase", "0"]);
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /0\.verifyh/, r.out);
+  assert.match(r.out, /digest mismatch/, r.out);
+  nothingRecorded("tampered artifact");
+  // (c) intact evidence: the attempt starts, records the gate's own sha, and the three reports land
+  writeFileSync(artifact, artifactBytes);
+  ralph(f.root, ["run", "--phase", "0"]);
+  const acc = JSON.parse(accBytes);
+  assert.equal(readFileSync(join(reviewDir, "verifier_id"), "utf8").trim(), "0.verify");
+  assert.equal(readFileSync(join(reviewDir, "verification_sha"), "utf8").trim(), acc.sha);
+  assert.equal(readFileSync(join(reviewDir, "implementation_sha"), "utf8").trim(), acc.sha);
+  for (const who of ["claude", "sol", "grok"]) assert.ok(existsSync(join(reviewDir, who, "report.md")), who);
+  cleanup(f.root);
+});
+
+test("ROTATE-PRINCIPAL at the whole verifier-gate grammar N.verify[.r<k>][.g<n>]h: 0.verify.g1h and 0.verify.r1h (DECISIONS #015)", () => {
+  const f = makeFixture({ phases: onePhase() });
+  const tasks = phaseTasks("0", { next: "1" });
+  const verify = tasks.find((x) => x.id === "0.verify");
+  // (1) the r0 verifier's CI fails (code) → planning commit appends the gate-repair verifier 0.verify.g1
+  ciScenario(f.root, "ci/0.verify/a1", { conclusion: "failure" });
+  let r = runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });
+  assert.equal(r.stopped, "HUMAN_GATE 0.verifyh", r.error);
+  r = gate(f.root, ["0.verifyh"]);
+  assert.match(r.out, /PLAN-GATE plan\.0\.verifyh\.r0\nROTATE-PRINCIPAL$/m, "the plain N.verifyh gate still rotates");
+  ok(ralph(f.root, ["plan", "plan.0.verifyh.r0"]));
+  tasks.splice(tasks.indexOf(verify) + 1, 0,
+    { id: "0.2", model: "sonnet", description: "fix the ci failure", acceptance: "x", dependencies: ["0.verify"] },
+    { ...verify, id: "0.verify.g1", dependencies: ["0.2"], ci: { ...verify.ci, refTemplate: "ci/0.verify.g1/a{n}" } });
+  tasks.find((x) => x.id === "0.9").dependencies = ["0.verify.g1"];
+  principalCommit(f.root, join(f.root, ".wt/plan.0.verifyh.r0"), "plan.0.verifyh.r0", { prdText: prdFor([{ n: "0", tasks }]) });
+  r = ralph(f.root, ["run", "--phase", "0"]);
+  assert.equal(plans(f.root)[0].status, "resolved", r.out);
+  r = runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verify.g1h" });
+  assert.equal(r.stopped, "HUMAN_GATE 0.verify.g1h", r.error);
+  assert.match(r.log[r.log.length - 1], /^HUMAN_GATE 0\.verify\.g1h\nROTATE-PRINCIPAL$/m, "the runner rotates at a .g<n> verifier gate");
+  r = gate(f.root, ["0.verify.g1h"]);
+  assert.match(r.out, /ACCEPT 0\.verify\.g1h a1 run \S+\nROTATE-PRINCIPAL$/m, "gate.sh rotates after recording a .g<n> verifier attempt");
+  // (2) review r0 fails → planning commit appends the r1 verifier 0.verify.r1 and the r1 review set
+  r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r0d" });
+  assert.equal(r.stopped, "PRINCIPAL 0.9.r0d", r.error);
+  const reviewSet = (k, deps) => [
+    ...["a", "b", "c"].map((s, i) => ({ id: `0.9.r${k}${s}`, model: ["claude-opus", "sol", "grok"][i], execution: "reviewer", reviewer: ["claude", "sol", "grok"][i], reviewSet: "0.9", reviewAttempt: `r${k}`, description: `review r${k}`, acceptance: "x", dependencies: deps })),
+    { id: `0.9.r${k}d`, model: "opus", execution: "interactive-principal", reviewSet: "0.9", reviewAttempt: `r${k}`, description: `reconcile r${k}`, acceptance: "x", dependencies: ["a", "b", "c"].map((s) => `0.9.r${k}${s}`) },
+  ];
+  const close = tasks.find((x) => x.id === "0.close");
+  tasks.splice(tasks.indexOf(close), 0,
+    { id: "0.3", model: "sonnet", description: "fix from review", acceptance: "x", dependencies: ["0.9.r0d"] },
+    { ...verify, id: "0.verify.r1", dependencies: ["0.3"], ci: { ...verify.ci, refTemplate: "ci/0.verify.r1/a{n}" } },
+    ...reviewSet(1, ["0.verify.r1"]));
+  close.dependencies = ["0.9.r1d"];
+  principalCommit(f.root, join(f.root, ".wt/0.9.r0d"), "0.9.r0d", { verdict: "FAIL", phase: "0", attempt: "r0", prdText: prdFor([{ n: "0", tasks }]) });
+  r = ralph(f.root, ["run", "--phase", "0"]);
+  assert.equal(state(f.root)["0.9.r0d"].status, "passed", r.out);
+  r = runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verify.r1h" });
+  assert.equal(r.stopped, "HUMAN_GATE 0.verify.r1h", r.error);
+  assert.match(r.log[r.log.length - 1], /^HUMAN_GATE 0\.verify\.r1h\nROTATE-PRINCIPAL$/m, "the runner rotates at an .r<k> verifier gate");
+  r = gate(f.root, ["0.verify.r1h"]);
+  assert.match(r.out, /ACCEPT 0\.verify\.r1h a1 run \S+\nROTATE-PRINCIPAL$/m, "gate.sh rotates after recording an .r<k> verifier attempt");
   cleanup(f.root);
 });

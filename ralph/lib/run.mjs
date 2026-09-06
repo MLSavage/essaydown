@@ -4,7 +4,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { spawn } from "node:child_process";
 import { RalphError, withLock, revParse, refOid, git, gitOut, rmrf, now, shell, writeAtomic, ensureDir, readJson, writeJsonAtomic } from "./util.mjs";
-import { emit, isVerifyGate } from "./gate.mjs";
+import { emit, isVerifyGate, readAcceptedCi } from "./gate.mjs";
 import { startTask, integrate, journalCount, transcriptHasDone, branchHasDone, runSuite, repoOf, setPlan } from "./integrate.mjs";
 import { doctor } from "./doctor.mjs";
 import { closePhase } from "./close.mjs";
@@ -236,6 +236,14 @@ function stepReview(ctx, t) {
   const verificationSha = ctx.rec(verifierId).integrated_sha;
   const implementationSha = ctx.targetHead(trio[0].id);
   if (verificationSha !== implementationSha) { emit(`REVIEW-SHA-MISMATCH ${set}.${attempt}: verification ${verificationSha?.slice(0, 7)} != implementation ${implementationSha.slice(0, 7)}`); return { signal: "REVIEW-SHA-MISMATCH" }; }
+  // The attempt starts from the gate's own evidence, never the runtime record alone (§1: consumers read
+  // through accepted.json and verify the digests they read). Missing evidence or a tampered artifact
+  // refuses the attempt before any reviewer starts and before anything is recorded.
+  const accPath = join(ctx.ciDir(gateId), "accepted.json");
+  if (!existsSync(accPath)) throw new RalphError(`${set}.${attempt}: verifier gate ${gateId} has no accepted.json at ${accPath}; the review does not start`);
+  const acc = readAcceptedCi(ctx, gateId); // throws, naming ${gateId}, on a missing artifact or a digest mismatch
+  if (acc.sha !== verificationSha) throw new RalphError(`${set}.${attempt}: verifier gate ${gateId} accepted sha ${acc.sha?.slice(0, 7)} != verification_sha ${verificationSha?.slice(0, 7)}`);
+  if (acc.sha !== implementationSha) throw new RalphError(`${set}.${attempt}: verifier gate ${gateId} accepted sha ${acc.sha?.slice(0, 7)} != implementation_sha ${implementationSha.slice(0, 7)}`);
   const baseSha = ctx.phases()[phase]?.base_main_sha ?? null;
   withLock(ctx.root, () => {
     writeAtomic(join(dir, "phase_base_sha"), `${baseSha}\n`);
