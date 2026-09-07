@@ -27,6 +27,14 @@ x-env: &env
   REVIEW_ATTEMPT: ${REVIEW_ATTEMPT:-r0}
   ESSAYDOWN_ROOT: ${ESSAYDOWN_ROOT:-${PWD}}
 
+# The three review services get their own turn budget (RALPH_REVIEW_MAX_TURNS, default 160): a
+# reviewer's turns scale with the number of dispositions it must verify, not with diff size, and
+# the shared RALPH_MAX_TURNS default (50) starved the r1 Claude reviewer twice (docs/lessons.md
+# [0.12.r1d]). claude-task and boundary-check stay on *env's RALPH_MAX_TURNS default of 50.
+x-review-env: &review-env
+  <<: *env
+  RALPH_MAX_TURNS: ${RALPH_REVIEW_MAX_TURNS:-160}
+
 services:
   claude-task:
     <<: *image
@@ -56,7 +64,7 @@ services:
   claude-review:
     <<: *image
     entrypoint: ["claude-review"]
-    environment: *env
+    environment: *review-env
     working_dir: /snapshot
     volumes:
       - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}:ro
@@ -70,7 +78,7 @@ services:
   codex-review:
     <<: *image
     entrypoint: ["codex-review"]
-    environment: *env
+    environment: *review-env
     working_dir: /snapshot
     volumes:
       - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}:ro
@@ -84,7 +92,7 @@ services:
   grok-review:
     <<: *image
     entrypoint: ["grok-review"]
-    environment: *env
+    environment: *review-env
     working_dir: /snapshot
     volumes:
       - ${ESSAYDOWN_ROOT:-${PWD}}:${ESSAYDOWN_ROOT:-${PWD}}:ro

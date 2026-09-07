@@ -578,7 +578,22 @@ test("review start consumes the verifier gate's evidence: missing accepted.json 
   assert.match(r.out, /0\.verifyh/, r.out);
   assert.match(r.out, /digest mismatch/, r.out);
   nothingRecorded("tampered artifact");
-  // (c) intact evidence: the attempt starts, records the gate's own sha, and the three reports land
+  // (c) an accepted.json whose recorded sha disagrees with the runtime record: the artifact digests
+  // are intact (readAcceptedCi accepts it), but the gate's own sha does not match verification_sha /
+  // implementation_sha, so the guards after readAcceptedCi (not the earlier digest check) must refuse.
+  writeFileSync(artifact, artifactBytes);
+  const origAcc = JSON.parse(accBytes);
+  const otherSha = (origAcc.sha[0] === "0" ? "1" : "0") + origAcc.sha.slice(1);
+  assert.notEqual(otherSha, origAcc.sha);
+  assert.match(otherSha, /^[0-9a-f]{40}$/);
+  writeFileSync(accPath, JSON.stringify({ ...origAcc, sha: otherSha }));
+  r = ralph(f.root, ["run", "--phase", "0"]);
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /0\.verifyh/, r.out);
+  assert.match(r.out, /accepted sha .* != (verification|implementation)_sha/, r.out);
+  nothingRecorded("sha mismatch");
+  writeFileSync(accPath, accBytes);
+  // (d) intact evidence: the attempt starts, records the gate's own sha, and the three reports land
   writeFileSync(artifact, artifactBytes);
   ralph(f.root, ["run", "--phase", "0"]);
   const acc = JSON.parse(accBytes);
