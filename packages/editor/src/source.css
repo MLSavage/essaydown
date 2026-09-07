@@ -1,0 +1,64 @@
+/*
+ * Colors for the 7 `essaydown-tok-*` classes `source.ts` assigns (task 1.5). Kept separate from
+ * `source.ts` because the split is what makes light/dark a `prefers-color-scheme` media query —
+ * a CSS mechanism with no JS equivalent in CodeMirror's own theme API — rather than a boolean
+ * CodeMirror has to be told at editor-creation time.
+ */
+
+.essaydown-tok-heading {
+  color: #8250df;
+}
+
+.essaydown-tok-emphasis {
+  color: #953800;
+}
+
+.essaydown-tok-link {
+  color: #0969da;
+}
+
+.essaydown-tok-code {
+  color: #cf222e;
+}
+
+.essaydown-tok-blockquote {
+  color: #57606a;
+}
+
+.essaydown-tok-list-marker {
+  color: #1a7f37;
+}
+
+.essaydown-tok-table-delimiter {
+  color: #9a6700;
+}
+
+@media (prefers-color-scheme: dark) {
+  .essaydown-tok-heading {
+    color: #d2a8ff;
+  }
+
+  .essaydown-tok-emphasis {
+    color: #ffa657;
+  }
+
+  .essaydown-tok-link {
+    color: #58a6ff;
+  }
+
+  .essaydown-tok-code {
+    color: #ff7b72;
+  }
+
+  .essaydown-tok-blockquote {
+    color: #8b949e;
+  }
+
+  .essaydown-tok-list-marker {
+    color: #56d364;
+  }
+
+  .essaydown-tok-table-delimiter {
+    color: #e3b341;
+  }
+}

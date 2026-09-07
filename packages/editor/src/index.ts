@@ -19,6 +19,13 @@ export {
 } from "./reveal.js";
 
 export {
+  TOKEN_CLASSES,
+  sourceExtensions,
+  sourceLanguage,
+  tokenHighlightStyle,
+} from "./source.js";
+
+export {
   MDAST_TYPES,
   RAW_CLASS,
   marks,

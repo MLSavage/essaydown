@@ -1,0 +1,25 @@
+/* Dev route only (task 1.5). Not the app's theme — Phase 2 brings that. */
+.dev-source {
+  padding: 1rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.dev-source-title {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #6b6b68;
+}
+
+.dev-source-host {
+  min-height: 80vh;
+  border: 1px solid #dcdcd9;
+  border-radius: 4px;
+  overflow: auto;
+}
+
+.dev-source-host .cm-editor {
+  height: 100%;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+}

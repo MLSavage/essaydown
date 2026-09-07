@@ -11,6 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@codemirror/state": "^6.7.4",
+    "@codemirror/view": "^6.43.11",
     "@essaydown/core": "workspace:*",
     "@essaydown/editor": "workspace:*",
     "@tauri-apps/api": "^2",
