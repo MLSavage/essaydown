@@ -2,7 +2,7 @@
 // recovery commands (§4.5), plan-request commands (§2), sync-state (§6).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { RalphError, withLock, git, gitOut, revParse, refOid, isAncestor, rmrf, now, readJson, ZERO } from "./util.mjs";
+import { RalphError, withLock, lockHolder, staleLockRepair, git, gitOut, revParse, refOid, isAncestor, rmrf, now, readJson, ZERO } from "./util.mjs";
 import { emit, ciAttemptStatus } from "./gate.mjs";
 import { repoOf, targetRefOf, finishIntegration, setPlan, startTask, cleanupDebris } from "./integrate.mjs";
 import { syncState } from "./state.mjs";
@@ -51,6 +51,10 @@ export function doctor(ctx) {
   ctx.requireInit();
   const out = [];
   const add = (line, admin) => out.push({ line: `${line} → ${admin}`, admin });
+  // a lock left behind by a crashed holder: the runner never breaks one, so it is drift like any
+  // other and its repair is the manual removal withLock names (DECISIONS #review-0-r1 G4).
+  const held = lockHolder(ctx.root);
+  if (held && !held.alive) add(`stale-lock ${held.pid ?? "unknown"} (${held.lock})`, staleLockRepair(held.lock));
   const s = ctx.state();
   for (const t of ctx.spec()) {
     const r = s[t.id];

@@ -1,7 +1,7 @@
 // state.mjs — immutable spec (ralph/tasks.json) and mutable runtime state (.evidence/state/*, RUNNER-SPEC §1).
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { RalphError, readJson, writeJsonAtomic, appendLine, now, ensureDir, git, gitOut, revParse } from "./util.mjs";
+import { RalphError, readJson, writeJsonAtomic, appendLine, setAuditLog, now, ensureDir, git, gitOut, revParse } from "./util.mjs";
 import { extractRawTasks, expand, serialize } from "../generate-tasks.mjs";
 
 export const STATUSES = ["pending", "running", "passed", "integration-failed", "blocked", "human-pending", "principal-pending", "superseded", "abandoned"];
@@ -21,6 +21,8 @@ export class Ctx {
       audit: resolve(this.stateDir, "audit.log"),
       summary: resolve(this.stateDir, "summary.md"),
     };
+    // writeAtomic lives below this layer but records its durability failures in the same log (G5).
+    setAuditLog(this.paths.audit);
     this._spec = null;
   }
   get initialised() { return existsSync(this.paths.tasks) && existsSync(this.paths.spec) && existsSync(this.paths.phases); }

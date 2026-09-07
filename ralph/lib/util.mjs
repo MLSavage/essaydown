@@ -44,12 +44,32 @@ export function readJson(p, fallback = undefined) {
 const REAL_FS = { openSync, writeSync, fsyncSync, closeSync, renameSync };
 
 /**
+ * The state layer's audit log (`state/audit.log`), named by the `Ctx` constructor. `writeAtomic`
+ * lives below the state layer but its durability failures belong in the same append-only record,
+ * so the path is handed down rather than re-derived here.
+ */
+let auditLog = null;
+export function setAuditLog(p) { auditLog = p; }
+
+/** Append one timestamped line to the state audit log; stderr while no audit log has been named. */
+export function auditNote(line) {
+  if (auditLog) { try { appendLine(auditLog, `${now()} ${line}`); return; } catch { /* fall through to stderr */ } }
+  process.stderr.write(`[ralph] ${line}\n`);
+}
+
+/**
  * write-temp-then-rename, fsync'd (RUNNER-SPEC §1). The order is
  * write → fsync(fd) → close → rename → fsync(dir): the bytes reach the disk before the rename
  * publishes them, and the directory entry the rename created reaches the disk before we return,
  * because §8.4 needs the close intent durable *before* the ref transaction it authorises.
+ *
+ * The directory sync is best effort — a platform may refuse to open a directory for reading, or a
+ * filesystem may refuse to sync one — but it is never silent (DECISIONS #review-0-r1 G5): on any
+ * failure the call records `writeAtomic: directory fsync failed <path> <code>` in the audit log and
+ * continues, so a close intent published without directory durability leaves a trace. `<path>` is
+ * the file this call published (the directory is its parent); the file fsync above still stands.
  */
-export function writeAtomic(p, content, { fs = REAL_FS } = {}) {
+export function writeAtomic(p, content, { fs = REAL_FS, audit = auditNote } = {}) {
   const dir = ensureDir(dirname(p));
   const tmp = `${p}.tmp.${process.pid}.${Date.now()}`;
   const fd = fs.openSync(tmp, "w");
@@ -58,7 +78,7 @@ export function writeAtomic(p, content, { fs = REAL_FS } = {}) {
   try {
     const dfd = fs.openSync(dir, "r");
     try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
-  } catch { /* a platform that refuses to open a directory for reading; the file fsync above stands */ }
+  } catch (e) { audit(`writeAtomic: directory fsync failed ${p} ${e.code ?? e.message}`); }
 }
 export const writeJsonAtomic = (p, obj) => writeAtomic(p, JSON.stringify(obj, null, 2) + "\n");
 
@@ -90,35 +110,57 @@ export const rmrf = (p) => rmSync(p, { recursive: true, force: true });
 
 const readLockFile = (lock) => { try { return readFileSync(lock, "utf8"); } catch { return null; } };
 
-/**
- * Break a stale lock and take it away in one operation: rename it to a per-pid name, and count the
- * break only if the rename succeeded *and* the bytes it carried away are the bytes we judged stale.
- * A rename that fails means another process broke it first (retry the create); bytes that differ
- * mean a live holder replaced the file between our check and our break, so we put it back and
- * refuse rather than run beside it.
- */
-function breakStaleLock(lock, holder) {
-  const stash = `${lock}.stale.${process.pid}.${Date.now()}`;
-  try { renameSync(lock, stash); } catch { return; }
-  const taken = readLockFile(stash);
-  if (taken === holder) { try { unlinkSync(stash); } catch { /* gone */ } return; }
-  let restored = false;
-  if (!existsSync(lock)) { try { renameSync(stash, lock); restored = true; } catch { /* the holder re-created it */ } }
-  if (!restored) { try { unlinkSync(stash); } catch { /* gone */ } }
-  throw new RalphError(`lock ${lock} was replaced between the staleness check and the break; refusing to break a live lock`);
+/** The one lock's path under a root (RUNNER-SPEC §1). */
+export const lockPath = (root) => resolve(root, ".locks", "ralph");
+
+/** A pid is alive when we can signal it, or when the OS says we may not (EPERM = it exists). */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
 }
 
 /**
- * The one lock (RUNNER-SPEC §1): <root>/.locks/ralph, O_EXCL create, stale-holder recovery by
- * identity rather than by path. The file carries a random token; the token is re-read after
- * acquisition (a breaker that took the lock from us in between aborts here instead of running a
- * second critical section) and the release deletes the file only while it still carries our token.
- * `hooks.beforeBreak` / `hooks.afterCreate` are the two interleaving points the conformance suite
- * drives a concurrent breaker through; nothing in the runner passes them.
+ * The lock's current holder: `{lock, pid, alive}`, or `null` while the path is free. `pid` is null
+ * when the file does not open with a pid, and such a lock counts as held by something we cannot
+ * identify — fail closed, because inventing a holder is how a live lock gets broken.
+ */
+export function lockHolder(root) {
+  const lock = lockPath(root);
+  const text = readLockFile(lock);
+  if (text === null) return null;
+  const pid = Number(text.split(" ")[0]);
+  const known = Number.isInteger(pid) && pid > 0;
+  return { lock, pid: known ? pid : null, alive: known && pidAlive(pid) };
+}
+
+/**
+ * The one repair for a lock whose holder is gone. `withLock` and `doctor` both quote this sentence,
+ * so the refusal and the drift report can never describe different procedures.
+ */
+export const staleLockRepair = (lock) => `manual repair: confirm with pgrep -fl 'ralph.sh|gate.sh' that no ralph.sh, gate.sh or admin process is running, then remove ${lock} by hand`;
+
+/**
+ * The one lock (RUNNER-SPEC §1): <root>/.locks/ralph, created with O_EXCL. The file carries
+ * `<pid> <iso> <16 random bytes as hex>`; the token is re-read after acquisition (a process that
+ * took the path from us in between aborts here instead of running a second critical section) and
+ * the release deletes the file only while it still carries our token. **The runner only ever
+ * removes a lock it created itself.**
+ *
+ * A lock is never broken automatically (DECISIONS #review-0-r1 G4). Automatic recovery needs a
+ * check ("this holder's pid is dead") and a destructive step (unlink, or rename-then-compare), and
+ * no ordering of those two preserves exclusion: the destructive step frees the path for an instant
+ * during which a live holder may already own it, and a third entrant creates it and runs beside
+ * that holder — Sol's probe in review r1 caught exactly that. There is no primitive here that
+ * closes the window, so the feature is cut to a manual procedure: a lock whose holder pid is not
+ * running makes this function throw, naming the file, the dead pid and the recovery, and
+ * `ralph.sh doctor` reports the same lock as `stale-lock <pid>` with the same repair.
+ *
+ * `hooks.afterCreate` is the one interleaving point the conformance suite drives a second actor
+ * through; nothing in the runner passes it.
  */
 export function withLock(root, fn, { timeoutMs = 30_000, hooks = {} } = {}) {
-  const dir = ensureDir(resolve(root, ".locks"));
-  const lock = resolve(dir, "ralph");
+  const lock = lockPath(root);
+  ensureDir(dirname(lock));
   const mine = `${process.pid} ${now()} ${randomBytes(16).toString("hex")}\n`;
   const start = Date.now();
   for (;;) {
@@ -127,22 +169,15 @@ export function withLock(root, fn, { timeoutMs = 30_000, hooks = {} } = {}) {
       try { writeSync(fd, mine); } finally { closeSync(fd); }
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      const holder = readLockFile(lock);
-      if (holder === null) continue; // released under us; try the create again
-      const pid = Number(holder.split(" ")[0]);
-      let alive = false;
-      if (pid) { try { process.kill(pid, 0); alive = true; } catch (err) { alive = err.code === "EPERM"; } }
-      if (alive) {
-        if (Date.now() - start > timeoutMs) throw new RalphError(`lock ${lock} held by pid ${pid}`);
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
-        continue;
-      }
-      hooks.beforeBreak?.({ lock, holder });
-      breakStaleLock(lock, holder);
+      const held = lockHolder(root);
+      if (held === null) continue; // released under us; try the create again
+      if (!held.alive) throw new RalphError(`lock ${lock} is held by pid ${held.pid ?? "unknown"}, which is not running; the runner never breaks a lock it did not create — ${staleLockRepair(lock)}`);
+      if (Date.now() - start > timeoutMs) throw new RalphError(`lock ${lock} held by pid ${held.pid}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
       continue;
     }
     hooks.afterCreate?.({ lock, token: mine });
-    if (readLockFile(lock) !== mine) throw new RalphError(`lock ${lock} does not carry our token after acquisition (another process broke it); refusing to run`);
+    if (readLockFile(lock) !== mine) throw new RalphError(`lock ${lock} does not carry our token after acquisition (another process took it); refusing to run`);
     break;
   }
   try { return fn(); } finally { if (readLockFile(lock) === mine) { try { unlinkSync(lock); } catch { /* gone */ } } }

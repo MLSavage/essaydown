@@ -2,9 +2,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { spawnSync } from "node:child_process";
 import { makeFixture, phaseTasks, prdFor, writeSpec, ralph, gate, control, ciScenario, fakeRuns, fakeRefs, state, plans, phasesJson, principalCommit, runPhaseGreen, cleanup } from "./harness.mjs";
-import { git, gitOut, revParse, refOid } from "../lib/util.mjs";
+import { git, gitOut, revParse, refOid, digestDir } from "../lib/util.mjs";
 import { Ctx } from "../lib/state.mjs";
 import { readAcceptedCi } from "../lib/gate.mjs";
 
@@ -708,5 +709,51 @@ test("passed-with-debris: a passed task's leftover candidate tag, worktree and t
   ok(ralph(f.root, ["doctor"]), "still clean");
   const done = runPhaseGreen(f.root, "0");
   assert.ok(done.done, done.stopped ?? done.error);
+  cleanup(f.root);
+});
+
+/** A pid that is certainly not running: spawn a process that exits, then reuse its (reaped) pid. */
+function deadPid() {
+  const r = spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" });
+  assert.equal(r.status, 0, "probe process failed");
+  return r.pid;
+}
+const re = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+test("stale lock (DECISIONS #review-0-r1 G4): a command that needs the lock refuses and changes nothing, doctor names the manual repair, and the runner is clean once the lock is removed by hand", () => {
+  const f = makeFixture({ phases: onePhase() });
+  const lock = join(f.root, ".locks", "ralph");
+  const dead = deadPid();
+  mkdirSync(dirname(lock), { recursive: true });
+  writeFileSync(lock, `${dead} ${new Date().toISOString()} ${"0".repeat(32)}\n`);
+  const bytes = readFileSync(lock, "utf8");
+  const stateDir = join(f.root, ".evidence/state");
+  const before = digestDir(stateDir);
+
+  // (1) a command that takes the lock refuses, naming the file, the dead pid and the recovery; state is untouched
+  const s = ralph(f.root, ["sync-state"]);
+  assert.equal(s.status, 1, s.out);
+  assert.match(s.out, new RegExp(`lock ${re(lock)} is held by pid ${dead}, which is not running`), s.out);
+  assert.match(s.out, /never breaks a lock it did not create/, s.out);
+  assert.match(s.out, /pgrep/, s.out);
+  assert.match(s.out, new RegExp(`remove ${re(lock)} by hand`), s.out);
+  assert.deepEqual(digestDir(stateDir), before, "a refused command changed state/");
+
+  // (2) doctor reports it read-only, with the same repair, and run refuses while it stands
+  const d = ralph(f.root, ["doctor"]);
+  assert.equal(d.status, 3, d.out);
+  assert.match(d.out, new RegExp(`^stale-lock ${dead} \\(${re(lock)}\\) → manual repair: .*pgrep.*remove ${re(lock)} by hand$`, "m"), d.out);
+  assert.match(d.out, /^DOCTOR 1 findings$/m, d.out);
+  assert.match(ralph(f.root, ["run", "--phase", "0"]).out, /^DOCTOR 1 findings$/m);
+  assert.equal(state(f.root)["0.1"].status, "pending", "run selected a task with a stale lock present");
+  assert.equal(readFileSync(lock, "utf8"), bytes, "the runner touched a lock it did not create");
+  assert.deepEqual(digestDir(stateDir), before, "state/ changed while the stale lock stood");
+
+  // (3) the manual repair — remove the lock by hand — and everything runs again
+  rmSync(lock);
+  assert.match(ralph(f.root, ["doctor"]).out, /^doctor: clean$/m);
+  const r = ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+  assert.equal(state(f.root)["0.1"].status, "passed", r.out);
+  assert.equal(existsSync(lock), false, "the runner left its own lock behind");
   cleanup(f.root);
 });

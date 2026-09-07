@@ -5,14 +5,16 @@
 // observable by interleaving a second actor at an exact point and by watching the calls themselves.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { withLock, writeAtomic } from "../lib/util.mjs";
+import { Ctx } from "../lib/state.mjs";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "ralph-util-"));
 const lockPath = (root) => join(root, ".locks", "ralph");
+const re = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** A pid that is certainly not running: spawn a process that exits, then reuse its (reaped) pid. */
 function deadPid() {
@@ -21,63 +23,121 @@ function deadPid() {
   return r.pid;
 }
 
-const staleLine = () => `${deadPid()} ${new Date().toISOString()} ${"0".repeat(32)}\n`;
+const staleLine = (pid) => `${pid} ${new Date().toISOString()} ${"0".repeat(32)}\n`;
 const foreignLine = (pid) => `${pid} ${new Date().toISOString()} ${"f".repeat(32)}\n`;
 
-test("withLock: a stale lock is broken and taken as one operation; a breaker that lands between the check and the break leaves exactly one holder and the other aborts", async (t) => {
-  await t.test("a stale lock is broken and taken, and released on the way out", () => {
+// The wait a third entrant is asked to spend on a live holder before it gives up. Long enough that
+// withLock's 200 ms poll is reached at least once, short enough to keep the suite quick.
+const WAIT_MS = 260;
+
+test("withLock: a lock whose holder pid is dead is refused with the manual recovery, never broken (DECISIONS #review-0-r1 G4)", async (t) => {
+  await t.test("the refusal names the file, the dead pid and the manual recovery, and the lock file is not touched", () => {
     const root = tmp();
     try {
       const lock = lockPath(root);
-      writeStale(lock);
+      const dead = deadPid();
+      writeStale(lock, dead);
+      const bytes = readFileSync(lock, "utf8");
+      const ino = statSync(lock).ino;
       let ran = 0;
-      const held = withLock(root, () => { ran++; return readFileSync(lock, "utf8"); });
-      assert.equal(ran, 1, "the stale lock was not broken");
-      assert.match(held, new RegExp(`^${process.pid} `), "the lock we took does not name this process");
-      assert.equal(existsSync(lock), false, "the lock survived the release");
-      assert.deepEqual(staleDebris(root), [], "the broken stale file was left behind");
+      assert.throws(() => withLock(root, () => { ran++; }), (e) => {
+        assert.match(e.message, new RegExp(`lock ${re(lock)} is held by pid ${dead}, which is not running`), e.message);
+        assert.match(e.message, /never breaks a lock it did not create/, e.message);
+        assert.match(e.message, /pgrep/, e.message);
+        assert.match(e.message, new RegExp(`remove ${re(lock)} by hand`), e.message);
+        return true;
+      });
+      assert.equal(ran, 0, "the critical section ran on a lock this process does not hold");
+      assert.equal(readFileSync(lock, "utf8"), bytes, "the lock file was rewritten");
+      assert.equal(statSync(lock).ino, ino, "the lock file was replaced (renamed away, unlinked or re-created)");
+      assert.deepEqual(staleDebris(root), [], "the lock was carried off to a stale name");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  await t.test("a concurrent breaker between the staleness check and the break: this process aborts, the other stays the sole holder", () => {
+  await t.test("every later entrant is refused the same way: the path is never free, so nobody can create it", () => {
     const root = tmp();
     try {
       const lock = lockPath(root);
-      writeStale(lock);
-      const foreign = foreignLine(process.pid); // a *live* holder: it must never be broken
+      writeStale(lock, deadPid());
+      const ino = statSync(lock).ino;
       let ran = 0;
-      let hookCalls = 0;
-      assert.throws(
-        () => withLock(root, () => { ran++; }, {
-          hooks: { beforeBreak: () => { hookCalls++; writeFileSync(lock, foreign); } },
-        }),
-        /replaced between the staleness check and the break/,
-        "breaking a lock that changed under us was not refused",
-      );
-      assert.equal(hookCalls, 1, "the break point was never reached");
-      assert.equal(ran, 0, "the aborting process ran the critical section anyway");
-      assert.equal(readFileSync(lock, "utf8"), foreign, "the concurrent breaker is no longer the holder");
-      assert.deepEqual(staleDebris(root), [], "a live holder's lock was carried off to a stale name");
+      for (const who of ["B", "C", "D"]) {
+        assert.throws(() => withLock(root, () => { ran++; }), /is not running/, `${who} was not refused`);
+        assert.equal(existsSync(lock), true, `the lock path was free after ${who}`);
+        assert.equal(statSync(lock).ino, ino, `${who} replaced the lock file`);
+      }
+      assert.equal(ran, 0);
+      // and the manual repair is the only way through
+      rmSync(lock);
+      let entered = 0;
+      withLock(root, () => { entered++; });
+      assert.equal(entered, 1, "the lock could not be taken after the manual removal");
+      assert.equal(existsSync(lock), false, "the lock we created survived the release");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+test("withLock: Sol's three-actor interleaving — a crashed holder, a breaker, a live holder and a third entrant: the live holder's path is never freed and the third entrant waits until timeout", async (t) => {
+  await t.test("the sequence from the probe: B refuses instead of breaking, A takes over the path, C waits and gives up", () => {
+    const root = tmp();
+    try {
+      const lock = lockPath(root);
+      writeStale(lock, deadPid()); // A0, the crashed holder whose lock is still on disk
+      let b = 0, c = 0;
+      assert.throws(() => withLock(root, () => { b++; }), /is not running/, "B broke the lock instead of refusing");
+      // A, a live holder, takes over the path exactly where the old code's rename window was
+      const live = foreignLine(process.pid);
+      writeFileSync(lock, live);
+      const ino = statSync(lock).ino;
+      const t0 = Date.now();
+      assert.throws(() => withLock(root, () => { c++; }, { timeoutMs: WAIT_MS }), new RegExp(`lock ${re(lock)} held by pid ${process.pid}$`), "C did not wait for the live holder");
+      assert.ok(Date.now() - t0 >= WAIT_MS, "C gave up before the timeout");
+      assert.equal(b + c, 0, "a critical section ran beside the live holder");
+      assert.equal(readFileSync(lock, "utf8"), live, "the live holder's lock was rewritten");
+      assert.equal(statSync(lock).ino, ino, "the live holder's path was freed");
+      assert.deepEqual(staleDebris(root), [], "the live holder's lock was carried off to a stale name");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  await t.test("a breaker that steals the lock after our create: the post-acquisition token re-read aborts and the thief's lock is left alone", () => {
+  await t.test("a third entrant driven through hooks.afterCreate, the one interleaving point left: it waits, and the holder's lock file is untouched", () => {
     const root = tmp();
     try {
       const lock = lockPath(root);
-      const foreign = foreignLine(process.pid);
-      let ran = 0;
-      assert.throws(
-        () => withLock(root, () => { ran++; }, {
-          hooks: { afterCreate: () => writeFileSync(lock, foreign) },
-        }),
-        /after acquisition/,
-        "a lock taken from us after acquisition was not detected",
-      );
-      assert.equal(ran, 0, "the critical section ran on a lock we no longer held");
-      assert.equal(readFileSync(lock, "utf8"), foreign, "the release deleted a lock this process did not own");
+      let entered = 0, third = 0, hooks = 0;
+      withLock(root, () => { entered++; }, {
+        hooks: {
+          afterCreate: ({ lock: l }) => {
+            hooks++;
+            const ino = statSync(l).ino;
+            const t0 = Date.now();
+            assert.throws(() => withLock(root, () => { third++; }, { timeoutMs: WAIT_MS }), new RegExp(`lock ${re(lock)} held by pid ${process.pid}$`), "the third entrant was not made to wait");
+            assert.ok(Date.now() - t0 >= WAIT_MS, "the third entrant gave up before the timeout");
+            assert.equal(statSync(l).ino, ino, "the third entrant replaced the holder's lock file");
+          },
+        },
+      });
+      assert.equal(hooks, 1, "the interleaving point was never reached");
+      assert.equal(entered, 1, "the holder did not run its critical section exactly once");
+      assert.equal(third, 0, "a third entrant ran beside the holder");
+      assert.equal(existsSync(lock), false, "the holder did not release");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+});
+
+test("withLock: a breaker that steals the lock after our create is caught by the post-acquisition token re-read, and the thief's lock is left alone", () => {
+  const root = tmp();
+  try {
+    const lock = lockPath(root);
+    const foreign = foreignLine(process.pid);
+    let ran = 0;
+    assert.throws(
+      () => withLock(root, () => { ran++; }, { hooks: { afterCreate: () => writeFileSync(lock, foreign) } }),
+      /after acquisition/,
+      "a lock taken from us after acquisition was not detected",
+    );
+    assert.equal(ran, 0, "the critical section ran on a lock we no longer held");
+    assert.equal(readFileSync(lock, "utf8"), foreign, "the release deleted a lock this process did not own");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("withLock: release deletes the lock only while it still carries our token", () => {
@@ -135,18 +195,66 @@ test("writeAtomic: write → fsync(fd) → close → rename → fsync(dir) (RUNN
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("writeAtomic: a directory fsync that fails leaves one line in the state audit log and the write still completes (DECISIONS #review-0-r1 G5)", async (t) => {
+  // The sink is the audit log the state layer already writes: writing through the default (what the
+  // runner uses) is the point — a swallowed failure is exactly a close intent with no trace.
+  const failing = (where, code) => {
+    const calls = [];
+    const fail = (msg, c) => { const e = new Error(msg); e.code = c; return e; };
+    let next = 10;
+    return {
+      calls,
+      fs: {
+        openSync: (path, flags) => { calls.push(`open ${path} ${flags}`); if (flags === "r" && where === "open") throw fail(`EACCES: permission denied, open '${path}'`, code); return next++; },
+        writeSync: (fd, content) => { calls.push(`write ${fd}`); return content.length; },
+        fsyncSync: (fd) => { calls.push(`fsync ${fd}`); if (where === "fsync" && fd > 10) throw fail("EINVAL: invalid argument, fsync", code); },
+        closeSync: (fd) => { calls.push(`close ${fd}`); },
+        renameSync: (from, to) => { calls.push(`rename ${from} -> ${to}`); },
+      },
+    };
+  };
+
+  for (const [where, code, label] of [["open", "EACCES", "the directory cannot be opened for reading"], ["fsync", "EINVAL", "the directory fsync itself throws"]]) {
+    await t.test(label, () => {
+      const root = tmp();
+      try {
+        const ctx = new Ctx(root); // the state layer names its audit log; writeAtomic writes to the same file
+        const p = join(root, ".evidence", "closes", "0.intent.json");
+        const { fs, calls } = failing(where, code);
+        writeAtomic(p, "payload", { fs });
+        assert.ok(calls.some((c) => c.startsWith("rename ")), "the write did not complete: no rename");
+        assert.equal(existsSync(ctx.paths.audit), true, "no audit log was written");
+        const lines = readFileSync(ctx.paths.audit, "utf8").trim().split("\n");
+        const hits = lines.filter((l) => l.includes("writeAtomic: directory fsync failed"));
+        assert.equal(hits.length, 1, `expected exactly one durability line, got ${JSON.stringify(lines)}`);
+        assert.match(hits[0], new RegExp(`writeAtomic: directory fsync failed ${re(p)} ${code}$`), hits[0]);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+
+  await t.test("a directory fsync that succeeds writes no line at all", () => {
+    const root = tmp();
+    try {
+      const ctx = new Ctx(root);
+      writeAtomic(join(root, ".evidence", "closes", "1.intent.json"), "payload");
+      const log = existsSync(ctx.paths.audit) ? readFileSync(ctx.paths.audit, "utf8") : "";
+      assert.doesNotMatch(log, /writeAtomic: directory fsync failed/, "a successful directory fsync was reported as a failure");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
 // -- helpers -------------------------------------------------------------------------------------
 
 /** Leave a lock file behind for a process that has already exited. */
-function writeStale(lock) {
+function writeStale(lock, pid) {
   mkdirSync(dirname(lock), { recursive: true });
-  writeFileSync(lock, staleLine());
+  writeFileSync(lock, staleLine(pid));
 }
 
 function staleDebris(root) {
   const d = join(root, ".locks");
   if (!existsSync(d)) return [];
-  return readdir(d).filter((n) => n.startsWith("ralph.stale."));
+  return readdir(d).filter((n) => n !== "ralph");
 }
 function leftovers(d) { return readdir(d); }
 function readdir(d) { return existsSync(d) ? readdirSync(d).sort() : []; }
