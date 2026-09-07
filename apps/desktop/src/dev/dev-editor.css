@@ -1,0 +1,38 @@
+/* Dev route only (task 1.3). Not the app's theme — Phase 2 brings that. */
+.dev-editor {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto 1fr;
+  gap: 0.75rem;
+  padding: 1rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.dev-editor-title {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #6b6b68;
+}
+
+.dev-editor-host,
+.dev-editor-markdown {
+  min-height: 60vh;
+  padding: 0.75rem;
+  border: 1px solid #dcdcd9;
+  border-radius: 4px;
+}
+
+.dev-editor-host .ProseMirror {
+  outline: none;
+}
+
+.dev-editor-markdown {
+  margin: 0;
+  overflow: auto;
+  background: #f7f7f6;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}

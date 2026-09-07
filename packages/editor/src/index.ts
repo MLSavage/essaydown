@@ -1,4 +1,13 @@
 export {
+  editorPlugins,
+  essaydownKeymap,
+  exitEmptyListItem,
+  markdownInputRules,
+  tableFromRow,
+  tableRowCells,
+} from "./input.js";
+
+export {
   MDAST_TYPES,
   RAW_CLASS,
   marks,

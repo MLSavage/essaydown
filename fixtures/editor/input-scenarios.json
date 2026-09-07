@@ -1,0 +1,278 @@
+{
+  "_note": "Task 1.3. The keystroke scenarios of the acceptance for e2e/web/editor-input.spec.ts, kept here rather than in the spec so that the Playwright run (a real browser and a real prosemirror-view) and the headless Vitest run (packages/editor/test/input.test.ts) type the same scripts and assert the same canonical Markdown. `keys` is a script: {\"type\": s} types s one character at a time, {\"press\": k} presses the Playwright key name k. `markdown` is format(pmToMdast(doc)) for the whole document afterwards.",
+  "scenarios": [
+    {
+      "name": "a heading and a paragraph with a strong span",
+      "keys": [
+        {
+          "type": "# Title"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "type": "Hello **world**"
+        }
+      ],
+      "markdown": "# Title\n\nHello **world**\n"
+    },
+    {
+      "name": "six hashes are the deepest heading",
+      "keys": [
+        {
+          "type": "###### Deep"
+        }
+      ],
+      "markdown": "###### Deep\n"
+    },
+    {
+      "name": "seven hashes stay text",
+      "keys": [
+        {
+          "type": "####### x"
+        }
+      ],
+      "markdown": "\\####### x\n"
+    },
+    {
+      "name": "a hash without a space stays text",
+      "keys": [
+        {
+          "type": "#Title"
+        }
+      ],
+      "markdown": "\\#Title\n"
+    },
+    {
+      "name": "a heading inside a blockquote",
+      "keys": [
+        {
+          "type": "> "
+        },
+        {
+          "type": "# In quote"
+        }
+      ],
+      "markdown": "> # In quote\n"
+    },
+    {
+      "name": "a bullet list continues on Enter",
+      "keys": [
+        {
+          "type": "- one"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "type": "two"
+        }
+      ],
+      "markdown": "- one\n- two\n"
+    },
+    {
+      "name": "an ordered list renumbers on Enter",
+      "keys": [
+        {
+          "type": "1. one"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "type": "two"
+        }
+      ],
+      "markdown": "1. one\n2. two\n"
+    },
+    {
+      "name": "an ordered list keeps the number it started at",
+      "keys": [
+        {
+          "type": "3. three"
+        }
+      ],
+      "markdown": "3. three\n"
+    },
+    {
+      "name": "three backticks open a code block",
+      "keys": [
+        {
+          "type": "```"
+        },
+        {
+          "type": "const x = 1;"
+        }
+      ],
+      "markdown": "```\nconst x = 1;\n```\n"
+    },
+    {
+      "name": "input rules are inert inside a code block",
+      "keys": [
+        {
+          "type": "```"
+        },
+        {
+          "type": "# not a heading"
+        }
+      ],
+      "markdown": "```\n# not a heading\n```\n"
+    },
+    {
+      "name": "strong converts on close",
+      "keys": [
+        {
+          "type": "**bold**"
+        }
+      ],
+      "markdown": "**bold**\n"
+    },
+    {
+      "name": "emphasis converts on close",
+      "keys": [
+        {
+          "type": "*em*"
+        }
+      ],
+      "markdown": "*em*\n"
+    },
+    {
+      "name": "inline code converts on close",
+      "keys": [
+        {
+          "type": "`code`"
+        }
+      ],
+      "markdown": "`code`\n"
+    },
+    {
+      "name": "emphasis converts inside a heading",
+      "keys": [
+        {
+          "type": "# A *b*"
+        }
+      ],
+      "markdown": "# A *b*\n"
+    },
+    {
+      "name": "a mark does not leak past its closing delimiter",
+      "keys": [
+        {
+          "type": "**bold** plain"
+        }
+      ],
+      "markdown": "**bold** plain\n"
+    },
+    {
+      "name": "stars around a spaced span stay text",
+      "keys": [
+        {
+          "type": "* x *"
+        }
+      ],
+      "markdown": "\\* x \\*\n"
+    },
+    {
+      "name": "three dashes become a thematic break with a paragraph after it",
+      "keys": [
+        {
+          "type": "---"
+        },
+        {
+          "type": "after"
+        }
+      ],
+      "markdown": "---\n\nafter\n"
+    },
+    {
+      "name": "a pipe row plus Enter makes a table",
+      "keys": [
+        {
+          "type": "|a|b|"
+        },
+        {
+          "press": "Enter"
+        }
+      ],
+      "markdown": "| a | b |\n| - | - |\n|   |   |\n"
+    },
+    {
+      "name": "the new table's first body cell takes the cursor",
+      "keys": [
+        {
+          "type": "|a|b|"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "type": "x"
+        }
+      ],
+      "markdown": "| a | b |\n| - | - |\n| x |   |\n"
+    },
+    {
+      "name": "Tab indents a list item",
+      "keys": [
+        {
+          "type": "- one"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "press": "Tab"
+        },
+        {
+          "type": "two"
+        }
+      ],
+      "markdown": "- one\n  - two\n"
+    },
+    {
+      "name": "Shift+Tab outdents a list item",
+      "keys": [
+        {
+          "type": "- one"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "press": "Tab"
+        },
+        {
+          "type": "two"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "press": "Shift+Tab"
+        },
+        {
+          "type": "three"
+        }
+      ],
+      "markdown": "- one\n  - two\n- three\n"
+    },
+    {
+      "name": "Backspace on an empty list item exits the list",
+      "keys": [
+        {
+          "type": "- one"
+        },
+        {
+          "press": "Enter"
+        },
+        {
+          "press": "Backspace"
+        },
+        {
+          "type": "plain"
+        }
+      ],
+      "markdown": "- one\n\nplain\n"
+    }
+  ]
+}
