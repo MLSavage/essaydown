@@ -6,6 +6,20 @@ export {
   fromMarkdownExtensions,
 } from "./parse.js";
 export {
+  formatWithMap,
+  nodeAt,
+  indentOffsetMap,
+  rangeContains,
+  pathDepth,
+  childPath,
+  ROOT_PATH,
+  type NodeRange,
+  type PositionEntry,
+  type PositionMap,
+  type FormatWithMapResult,
+  type OffsetMap,
+} from "./positions.js";
+export {
   fnv1a64,
   toBase36,
   contentHash,

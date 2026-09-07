@@ -1,0 +1,386 @@
+import type { Nodes, Root } from "mdast";
+import type { Options } from "remark-stringify";
+import type { Data, Processor } from "unified";
+import { createFormatter } from "./format.js";
+
+type ToMarkdownExtensions = NonNullable<Data["toMarkdownExtensions"]>;
+type StringifyHandlers = NonNullable<Options["handlers"]>;
+type Handle = NonNullable<StringifyHandlers[keyof StringifyHandlers]>;
+type ToMarkdownState = Parameters<Handle>[2];
+type IndentLines = ToMarkdownState["indentLines"];
+
+/** The path of the root node. Child `i` of the root is `"i"`, its child `j` is `"i.j"`. */
+export const ROOT_PATH = "";
+
+/** A half-open range in the canonical string: 1-based lines, 1-based columns, end exclusive. */
+export interface NodeRange {
+  startLine: number;
+  startCol: number;
+  endLine: number;
+  endCol: number;
+}
+
+/** One mdast node's place in the canonical string, keyed by its path from the root. */
+export interface PositionEntry extends NodeRange {
+  path: string;
+  node: Nodes;
+}
+
+/**
+ * The position map of one canonical string.
+ *
+ * `ranges` is the acceptance's map: every mdast node, by path, to its range. `entries` carries
+ * the same ranges in document (pre-)order with the node itself attached, and is what
+ * {@link nodeAt} searches. `unresolved` lists the paths of nodes that could not be placed —
+ * empty for every fixture in the corpus, and the check that keeps "every node" honest.
+ */
+export interface PositionMap {
+  ranges: Record<string, NodeRange>;
+  entries: PositionEntry[];
+  unresolved: string[];
+}
+
+/** {@link formatWithMap}'s result: the canonical string and its position map. */
+export interface FormatWithMapResult {
+  text: string;
+  map: PositionMap;
+}
+
+/** A half-open character span `[start, end)` of the canonical string. */
+interface Span {
+  start: number;
+  end: number;
+}
+
+/** The `state.indentLines` call one node made: what went in, and what came out. */
+interface Indent {
+  source: string;
+  result: string;
+}
+
+/** What one wrapped handler emitted, and what its own dispatched descendants emitted. */
+interface Emission {
+  node: Nodes;
+  value: string;
+  indent?: Indent;
+  children: Emission[];
+}
+
+/** Instrumentation shared by every wrapped handler of one `formatWithMap` call. */
+interface Instrumentation {
+  stack: Emission[];
+  patched: boolean;
+}
+
+/** Maps an offset in some intermediate string to its offset in a string built out of it. */
+export type OffsetMap = (offset: number) => number;
+
+/** One line of a string: its text without the line ending, and the offset it starts at. */
+interface Line {
+  text: string;
+  start: number;
+}
+
+/**
+ * Format `root` and record where every node landed.
+ *
+ * The map is built by instrumenting the serializer rather than by re-parsing its output: every
+ * `mdast-util-to-markdown` handler is wrapped so that each dispatched node's own output string
+ * is captured, and `state.indentLines` — the one funnel through which `blockquote` and
+ * `listItem` prefix their children's lines — is wrapped so that the prefixes it inserts are
+ * known exactly. Each node's string is then located inside its parent's, from a cursor that only
+ * moves forward, so a node's range is always inside its parent's and siblings never overlap.
+ *
+ * Ownership rule for zero-width items: a node whose output is the empty string owns no
+ * character. Its range is empty (`start === end`) and sits at the cursor, i.e. immediately after
+ * the end of the previous sibling that produced output — so it is never returned by
+ * {@link nodeAt}, and the character at that position belongs to whatever else covers it.
+ *
+ * Two nodes get their range from their children rather than from their own output. The root
+ * spans the whole string, trailing newline included. `tableRow` and `tableCell` are never
+ * dispatched by `mdast-util-gfm-table` (it serializes a table's cells into a matrix and lets
+ * `markdown-table` align them), so each takes the hull of the descendants that were dispatched;
+ * an empty cell, having none, is reported in `unresolved`.
+ *
+ * `formatWithMap(root).text` is `format(root)`, and the map is a pure function of `root`: the
+ * tree is never mutated and nothing is carried between calls.
+ */
+export function formatWithMap(root: Root): FormatWithMapResult {
+  const rootEmission: Emission = { node: root, value: "", children: [] };
+  const instrumentation: Instrumentation = { stack: [rootEmission], patched: false };
+  const handlers = wrapHandlers(configuredHandlers(), instrumentation);
+  const text = createFormatter()
+    .use(function instrument(this: Processor) {
+      const data = this.data();
+      const extensions: ToMarkdownExtensions = (data.toMarkdownExtensions ??= []);
+      extensions.push({ handlers });
+    })
+    .stringify(root);
+  rootEmission.value = text;
+
+  const spans = new Map<Nodes, Span>();
+  spans.set(root, { start: 0, end: text.length });
+  placeChildren(rootEmission, (offset) => offset, spans);
+  return { text, map: buildMap(root, text, spans) };
+}
+
+/**
+ * The innermost node whose range contains (`line`, `column`), or `null` when no node does — a
+ * blank line between two blocks belongs to neither of them. The root is never returned: it spans
+ * the whole string by construction, so it would answer every query.
+ */
+export function nodeAt(map: PositionMap, line: number, column: number): PositionEntry | null {
+  let best: PositionEntry | null = null;
+  let bestDepth = -1;
+  for (const entry of map.entries) {
+    if (entry.path === ROOT_PATH) continue;
+    if (!rangeContains(entry, line, column)) continue;
+    const depth = pathDepth(entry.path);
+    if (depth > bestDepth) {
+      best = entry;
+      bestDepth = depth;
+    }
+  }
+  return best;
+}
+
+/** Whether the half-open `range` covers (`line`, `column`). An empty range covers nothing. */
+export function rangeContains(range: NodeRange, line: number, column: number): boolean {
+  if (line < range.startLine || line > range.endLine) return false;
+  if (line === range.startLine && column < range.startCol) return false;
+  if (line === range.endLine && column >= range.endCol) return false;
+  return true;
+}
+
+/** The number of steps from the root to `path`: `ROOT_PATH` is 0, `"3.1"` is 2. */
+export function pathDepth(path: string): number {
+  return path === ROOT_PATH ? 0 : path.split(".").length;
+}
+
+/** The path of child `index` of the node at `path`. */
+export function childPath(path: string, index: number): string {
+  return path === ROOT_PATH ? String(index) : `${path}.${index}`;
+}
+
+/**
+ * The handler set the formatter of `format.ts` actually runs with: the `mdast-util-to-markdown`
+ * defaults, plus everything `remark-stringify` and the GFM and opaque extensions install on top.
+ * Read off a real `State` rather than re-composed here, so a change to `createFormatter` cannot
+ * leave a handler unwrapped. `root` is this probe's own handler and is dropped: the root is not
+ * instrumented, its range is the whole string.
+ */
+function configuredHandlers(): StringifyHandlers {
+  const captured: StringifyHandlers = {};
+  createFormatter()
+    .use(function capture(this: Processor) {
+      const data = this.data();
+      const extensions: ToMarkdownExtensions = (data.toMarkdownExtensions ??= []);
+      extensions.push({
+        handlers: {
+          root: (_node, _parent, state) => {
+            Object.assign(captured, state.handlers);
+            return "";
+          },
+        },
+      });
+    })
+    .stringify({ type: "root", children: [] });
+  delete captured.root;
+  return captured;
+}
+
+/** Wrap every configured handler so each dispatched node records what it emitted. */
+function wrapHandlers(
+  originals: StringifyHandlers,
+  instrumentation: Instrumentation,
+): StringifyHandlers {
+  const wrapped: StringifyHandlers = {};
+  // `configuredHandlers` reads a real `State.handlers`, which is a total record: every entry is
+  // a function, so the `Partial` of the options type never has a hole here.
+  for (const [type, original] of Object.entries(originals) as [keyof StringifyHandlers, Handle][]) {
+    wrapped[type] = wrapHandle(original, instrumentation);
+  }
+  return wrapped;
+}
+
+/**
+ * One handler, wrapped. The wrapper is transparent — it returns exactly what the original
+ * returned and carries the original's `peek` — because `containerPhrasing` reads `peek` off the
+ * installed handler and, for a handler that has none, calls the handler itself to look ahead at
+ * the next sibling. Those speculative calls record an emission that is thrown away again by
+ * {@link lastPerNode}.
+ */
+function wrapHandle(original: Handle, instrumentation: Instrumentation): Handle {
+  const handle: Handle = (node, parent, state, info) => {
+    patchIndentLines(state, instrumentation);
+    const emission: Emission = { node, value: "", children: [] };
+    const { stack } = instrumentation;
+    stack.push(emission);
+    let value: string;
+    try {
+      value = original(node, parent, state, info);
+    } finally {
+      stack.pop();
+    }
+    emission.value = value;
+    stack[stack.length - 1].children.push(emission);
+    return value;
+  };
+  const peek = (original as Handle & { peek?: Handle }).peek;
+  if (peek) (handle as Handle & { peek?: Handle }).peek = peek;
+  return handle;
+}
+
+/**
+ * Record the line prefixes `blockquote` and `listItem` add to their children. `state` is created
+ * per serialization, so this patches nothing that outlives the call; it is applied on the first
+ * dispatched node because that is the first moment a `State` is in reach.
+ */
+function patchIndentLines(state: ToMarkdownState, instrumentation: Instrumentation): void {
+  if (instrumentation.patched) return;
+  instrumentation.patched = true;
+  const original = state.indentLines;
+  const indentLines: IndentLines = (value, map) => {
+    const result = original(value, map);
+    const { stack } = instrumentation;
+    stack[stack.length - 1].indent = { source: value, result };
+    return result;
+  };
+  state.indentLines = indentLines;
+}
+
+/**
+ * Locate each of `emission`'s dispatched children inside the string `emission` produced, and
+ * recurse. `toAbsolute` maps an offset of that string to an offset of the canonical string; for
+ * a node that indented its children, the children live in the string that went *into*
+ * `indentLines`, and {@link indentOffsetMap} maps that string's offsets to the indented one's.
+ *
+ * A child whose output cannot be found from the cursor is skipped with its subtree; it surfaces
+ * as an `unresolved` path rather than as a wrong range.
+ */
+function placeChildren(emission: Emission, toAbsolute: OffsetMap, spans: Map<Nodes, Span>): void {
+  const indent = emission.indent;
+  const shift = indent ? indentOffsetMap(indent.source, emission.value) : undefined;
+  const container = indent && shift ? indent.source : emission.value;
+  const local: OffsetMap = shift ? (offset) => toAbsolute(shift(offset)) : toAbsolute;
+  let cursor = 0;
+  for (const child of lastPerNode(emission.children)) {
+    const at = container.indexOf(child.value, cursor);
+    if (at < 0) continue;
+    const length = child.value.length;
+    const start = local(at);
+    spans.set(child.node, { start, end: length === 0 ? start : local(at + length - 1) + 1 });
+    cursor = at + length;
+    placeChildren(child, (offset) => local(at + offset), spans);
+  }
+}
+
+/**
+ * Drop the speculative emissions `containerPhrasing` produces when it looks ahead at a sibling
+ * whose handler has no `peek`: the same node is emitted twice, and only the later emission is
+ * the one that reached the output. Keeping the last per node preserves document order.
+ */
+function lastPerNode(emissions: Emission[]): Emission[] {
+  const lastIndex = new Map<Nodes, number>();
+  emissions.forEach((emission, index) => lastIndex.set(emission.node, index));
+  return emissions.filter((emission, index) => lastIndex.get(emission.node) === index);
+}
+
+/**
+ * Map an offset of `source` to the corresponding offset of `result`, where `result` is `source`
+ * with a prefix added to the front of each of its lines — what `blockquote` and `listItem` do to
+ * their children through `state.indentLines`.
+ *
+ * Returns `undefined` when `result` is not of that shape (a different number of lines, or a line
+ * that is not the source line with something in front of it), so a serializer that pads its
+ * children some other way loses their positions instead of being given wrong ones.
+ */
+export function indentOffsetMap(source: string, result: string): OffsetMap | undefined {
+  const sourceLines = splitLines(source);
+  const resultLines = splitLines(result);
+  if (sourceLines.length !== resultLines.length) return undefined;
+  const prefixes: number[] = [];
+  for (let index = 0; index < sourceLines.length; index++) {
+    const source = sourceLines[index];
+    const result = resultLines[index];
+    if (!result.text.endsWith(source.text)) return undefined;
+    prefixes.push(result.text.length - source.text.length);
+  }
+  return (offset) => {
+    let index = sourceLines.length - 1;
+    while (index > 0 && sourceLines[index].start > offset) index--;
+    return resultLines[index].start + prefixes[index] + (offset - sourceLines[index].start);
+  };
+}
+
+/** Split on the line endings `indentLines` splits on, keeping each line's start offset. */
+function splitLines(value: string): Line[] {
+  const lines: Line[] = [];
+  const eol = /\r\n|\r|\n/g;
+  let start = 0;
+  let match: RegExpExecArray | null;
+  while ((match = eol.exec(value))) {
+    lines.push({ text: value.slice(start, match.index), start });
+    start = match.index + match[0].length;
+  }
+  lines.push({ text: value.slice(start), start });
+  return lines;
+}
+
+/** Walk the tree, filling in the nodes the serializer never dispatched, and key it by path. */
+function buildMap(root: Root, text: string, spans: Map<Nodes, Span>): PositionMap {
+  completeSpans(root, spans);
+  const starts = splitLines(text);
+  const ranges: Record<string, NodeRange> = {};
+  const entries: PositionEntry[] = [];
+  const unresolved: string[] = [];
+  const visit = (node: Nodes, path: string): void => {
+    const span = spans.get(node);
+    if (span) {
+      const range = toRange(span, starts);
+      ranges[path] = range;
+      entries.push({ path, node, ...range });
+    } else {
+      unresolved.push(path);
+    }
+    childrenOf(node).forEach((child, index) => visit(child, childPath(path, index)));
+  };
+  visit(root, ROOT_PATH);
+  return { ranges, entries, unresolved };
+}
+
+/** Give every node the serializer did not dispatch the hull of its descendants that it did. */
+function completeSpans(node: Nodes, spans: Map<Nodes, Span>): Span | undefined {
+  const own = spans.get(node);
+  let hull: Span | undefined;
+  for (const child of childrenOf(node)) {
+    const span = completeSpans(child, spans);
+    if (span) hull = hull ? union(hull, span) : span;
+  }
+  if (!own && hull) spans.set(node, hull);
+  return spans.get(node);
+}
+
+/** The smallest span covering both. */
+function union(left: Span, right: Span): Span {
+  return { start: Math.min(left.start, right.start), end: Math.max(left.end, right.end) };
+}
+
+/** A node's children, or none when it is a leaf. */
+function childrenOf(node: Nodes): Nodes[] {
+  return "children" in node ? (node.children as Nodes[]) : [];
+}
+
+/** Convert a character span to 1-based line/column coordinates. */
+function toRange(span: Span, lines: Line[]): NodeRange {
+  const start = toPoint(span.start, lines);
+  const end = toPoint(span.end, lines);
+  return { startLine: start.line, startCol: start.column, endLine: end.line, endCol: end.column };
+}
+
+/** Convert one offset to a 1-based line/column point. */
+function toPoint(offset: number, lines: Line[]): { line: number; column: number } {
+  let index = lines.length - 1;
+  while (index > 0 && lines[index].start > offset) index--;
+  return { line: index + 1, column: offset - lines[index].start + 1 };
+}
