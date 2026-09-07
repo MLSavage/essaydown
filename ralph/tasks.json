@@ -776,7 +776,7 @@
   "id": "1.1",
   "model": "opus",
   "description": "ProseMirror schema in packages/editor/src/schema.ts mapping 1:1 to §6.1, `mdastToPM(root)` and `pmToMdast(doc)`; html nodes become a non-editable `raw` node rendering a grey box; yaml is held outside the PM doc and re-attached on serialize.",
-  "acceptance": "For all 45 fixtures (count read from index.json): format(pmToMdast(mdastToPM(parse(x)))) === format(parse(x)) (one assertion per fixture, count read from index.json); the raw-html fixture's html node is byte-identical after the trip.",
+  "acceptance": "For every fixture listed in index.json (count read from index.json, never a literal): format(pmToMdast(mdastToPM(parse(x)))) === format(parse(x)) (one assertion per fixture, count read from index.json); the raw-html fixture's html node is byte-identical after the trip.",
   "dependencies": [
    "0.close"
   ],
@@ -788,7 +788,7 @@
   "id": "1.2",
   "model": "opus",
   "description": "Formatter position map in packages/core/src/positions.ts: `formatWithMap(root)` returns the canonical string plus a map from every mdast node (by path) to its `{startLine, startCol, endLine, endCol}` in that string, and `nodeAt(map, line, col)` for the reverse lookup; built by instrumenting remark-stringify's per-node output rather than re-parsing.",
-  "acceptance": "For all 45 fixtures (count read from index.json), every paragraph's mapped startLine equals index.json's recorded line; nodeAt(map, l, c) for 200 seeded random (l, c) positions returns a node whose range contains (l, c) or null only on blank lines; the map is a pure function of root (two calls deep-equal).",
+  "acceptance": "For every fixture listed in index.json (count read from index.json, never a literal), every paragraph's mapped startLine equals index.json's recorded line; nodeAt(map, l, c) for 200 seeded random (l, c) positions returns a node whose range contains (l, c) or null only on blank lines; the map is a pure function of root (two calls deep-equal).",
   "dependencies": [
    "0.close"
   ],

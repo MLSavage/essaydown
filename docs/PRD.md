@@ -161,7 +161,7 @@ The document store owns one undo stack of `{root, sidecar}` snapshots (structura
 
 | Phase | Name | Gate | Primary agent |
 |---|---|---|---|
-| 0 | Core model & round-trip | the corpus listed in fixtures/markdown/index.json (45 at 0.5, 47 at r1) passes invariants A/B/C; full suite green on 3 OSes at the Phase 0 implementation SHA (0.verify) | Opus |
+| 0 | Core model & round-trip | the corpus listed in fixtures/markdown/index.json (45 at 0.5, 47 at r1, 53 at r2) passes invariants A/B/C; full suite green on 3 OSes at the Phase 0 implementation SHA (0.verify) | Opus |
 | 1 | Rendered editor + source toggle + Outline prototype | On the Vite dev route with the dev-only "load fixture / copy Markdown" bar, Michael writes ~1,000 words in the rendered view, toggles to source, and the copied Markdown round-trips; **Michael tries the Outline prototype and records his verdict (DECISIONS #002)** | Opus (editor), Sonnet (prototype) |
 | 2 | Tauri shell, files, images, autosave | Automated: file tree, autosave, external-change and `.icloud`/`.stfolder` handling pass in WebdriverIO on Linux and Windows runners (macOS recorded, xfail allowed). Human (task 2.9): Michael opens his real synced folder on the MacBook Pro, edits a doc, edits the same doc in Typora, and both directions survive | Sonnet, Opus on watcher/conflict |
 | 3 | Modes: Outline, Produce, Rewrite, Reorder | `e2e/one-workflow` steps 1–6 pass in WebdriverIO on a fresh Untitled file on Linux and Windows runners (macOS recorded, xfail allowed until Phase 6) | Opus |
@@ -309,10 +309,10 @@ Conventions: `id` is `phase.n`. Each task is one agent iteration (~20–40 tool 
 ```json
 [
   {"id":"1.1","model":"opus","description":"ProseMirror schema in packages/editor/src/schema.ts mapping 1:1 to §6.1, `mdastToPM(root)` and `pmToMdast(doc)`; html nodes become a non-editable `raw` node rendering a grey box; yaml is held outside the PM doc and re-attached on serialize.",
-   "acceptance":"For all 45 fixtures (count read from index.json): format(pmToMdast(mdastToPM(parse(x)))) === format(parse(x)) (one assertion per fixture, count read from index.json); the raw-html fixture's html node is byte-identical after the trip.",
+   "acceptance":"For every fixture listed in index.json (count read from index.json, never a literal): format(pmToMdast(mdastToPM(parse(x)))) === format(parse(x)) (one assertion per fixture, count read from index.json); the raw-html fixture's html node is byte-identical after the trip.",
    "dependencies":["0.close"]},
   {"id":"1.2","model":"opus","description":"Formatter position map in packages/core/src/positions.ts: `formatWithMap(root)` returns the canonical string plus a map from every mdast node (by path) to its `{startLine, startCol, endLine, endCol}` in that string, and `nodeAt(map, line, col)` for the reverse lookup; built by instrumenting remark-stringify's per-node output rather than re-parsing.",
-   "acceptance":"For all 45 fixtures (count read from index.json), every paragraph's mapped startLine equals index.json's recorded line; nodeAt(map, l, c) for 200 seeded random (l, c) positions returns a node whose range contains (l, c) or null only on blank lines; the map is a pure function of root (two calls deep-equal).",
+   "acceptance":"For every fixture listed in index.json (count read from index.json, never a literal), every paragraph's mapped startLine equals index.json's recorded line; nodeAt(map, l, c) for 200 seeded random (l, c) positions returns a node whose range contains (l, c) or null only on blank lines; the map is a pure function of root (two calls deep-equal).",
    "dependencies":["0.close"]},
   {"id":"1.3","model":"opus","description":"Typora-style input rules and keymap: `# ` heading, `- `/`1. ` lists, `> ` blockquote, ``` opens a code block, `**x**`/`*x*`/`` `x` `` convert on close, `---` rule, `|a|b|`+Enter makes a 2-col table, Tab/Shift-Tab list indent, Backspace on an empty list item exits the list. No history plugin (undo comes from the store in 1.6).",
    "acceptance":"e2e/web/editor-input.spec.ts (Playwright, dev route /dev/editor) with 22 scenarios typing keystrokes into a blank doc and asserting the resulting canonical Markdown (e.g. '# Title⏎Hello **world**' → '# Title\\n\\nHello **world**\\n').",
