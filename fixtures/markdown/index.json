@@ -586,6 +586,84 @@
       5
     ]
   },
+  "spanning-mark-emphasis.md": {
+    "nodeTypes": [
+      "emphasis",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 1,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1
+    ]
+  },
+  "spanning-mark-first-boundary.md": {
+    "nodeTypes": [
+      "paragraph",
+      "root",
+      "strong",
+      "text"
+    ],
+    "blockCount": 1,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1
+    ]
+  },
+  "spanning-mark-last-boundary.md": {
+    "nodeTypes": [
+      "paragraph",
+      "root",
+      "strong",
+      "text"
+    ],
+    "blockCount": 1,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1
+    ]
+  },
+  "spanning-mark-link.md": {
+    "nodeTypes": [
+      "link",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 1,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1
+    ]
+  },
+  "spanning-mark-strikethrough.md": {
+    "nodeTypes": [
+      "delete",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 1,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1
+    ]
+  },
+  "spanning-mark-strong.md": {
+    "nodeTypes": [
+      "paragraph",
+      "root",
+      "strong",
+      "text"
+    ],
+    "blockCount": 1,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1
+    ]
+  },
   "strikethrough.md": {
     "nodeTypes": [
       "delete",

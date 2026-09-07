@@ -151,6 +151,19 @@ function isAtomic(node: PhrasingContent): node is Break | Html | Image {
  * start; a mark that straddles a boundary is copied into both slices with its own share of the
  * text, which is how a link spanning a sentence boundary survives on both sides (PRD §6.1).
  *
+ * **A mark spanning a sentence boundary, under a real edit** — the no-op cases short-circuit
+ * before they reach here ({@link replaceSentence}, {@link reorderSentences}). No one sentence
+ * keeps such a mark: every sentence the mark covers keeps its own copy of it, wrapping exactly
+ * that sentence's share of the mark's text, and the whitespace at the boundary is unwrapped from
+ * the mark and left where it was ({@link gapNodes}). So `**One. Two. Three.**` with the middle
+ * sentence replaced is `**One.** New. **Three.**`, and reordered by `[1, 0, 2]` it is
+ * `**Two.** **One.** **Three.**`. That is the rule under which the bytes of every untouched
+ * sentence are unchanged: an untouched sentence's own Markdown ({@link sentenceMarkdown}) is this
+ * same slice of this same mark before and after the edit, whichever position — first, middle or
+ * last — the edit was at. Keeping one whole mark around the edited span instead is not available
+ * in general, because a mark that covers only part of the sentences at its ends (`See [the pen. It
+ * is](url) here.`) has no span left to keep once those sentences move apart.
+ *
  * **Ownership of width-0 inline content** — an image with an empty alt (`![](x.png)`), and any
  * mark whose whole content is such a node — is decided here, once, for every caller. A node that
  * contributes no plain text sits at a single offset `p`, and belongs to the one slice with
@@ -342,6 +355,14 @@ function withParagraphChildren(
  * bold again. The whitespace separating the sentence from its neighbours is not part of the range:
  * it stays where it is, outside every mark ({@link gapNodes}).
  *
+ * **The no-op** — `text` equal to the sentence's own Markdown ({@link sentenceMarkdown}) — returns
+ * the argument root itself, after the same validation a real replacement gets and before any
+ * slicing. Rebuilding the paragraph for it would apply the spanning-mark rule of {@link sliceInline} to a document
+ * nobody asked to change, and a mark spanning the sentence's boundary would come back split
+ * (DECISIONS #review-0-r1 G3). The test is the validated argument, never a comparison of the
+ * rebuilt output's bytes: an output comparison would hide a real edit that happens to re-serialize
+ * to the same string behind the same code path, and would pay for the rebuild to learn nothing.
+ *
  * @throws Error if `blockId` is not a top-level paragraph or `text` is not inline Markdown.
  * @throws RangeError if `index` is not a sentence of that paragraph.
  */
@@ -359,6 +380,8 @@ export function replaceSentence(
       `replaceSentence: sentence ${index} is outside 0..${sentences.length - 1} of block ${blockId}`,
     );
   }
+
+  if (text === sentenceMarkdown(node, index, options)) return root;
 
   const plain = paragraphText(node);
   const sentence = sentences[index];
@@ -379,8 +402,15 @@ export function replaceSentence(
  * at position `i` of the result is the paragraph's sentence `order[i]`.
  *
  * The whitespace between sentences keeps its position — the sentences move through the gaps rather
- * than carrying them along — so a paragraph reordered by the identity permutation is unchanged.
- * Marks travel with the sentence they belong to, and a mark straddling a boundary is split at it.
+ * than carrying them along. Marks travel with the sentence they belong to, under
+ * the spanning-mark rule of {@link sliceInline}.
+ *
+ * **The no-op** — the identity permutation — returns the argument root itself, after the same
+ * validation a real reorder gets and before any slicing, for the reason given on
+ * {@link replaceSentence}: a paragraph nobody asked to change must come back with its bytes, and
+ * that is not the same thing as rebuilding it and hoping the bytes agree (DECISIONS #review-0-r1
+ * G3). The identity permutation is the only permutation of the empty sentence list, so a paragraph
+ * with no sentences leaves through here too.
  *
  * @throws Error if `blockId` is not a top-level paragraph.
  * @throws RangeError if `order` is not a permutation of the paragraph's sentence indices.
@@ -405,9 +435,9 @@ export function reorderSentences(
     );
   }
 
-  const plain = paragraphText(node);
-  if (sentences.length === 0) return withParagraphChildren(root, at, node, [...node.children]);
+  if (order.every((source, position) => source === position)) return root;
 
+  const plain = paragraphText(node);
   const children = [...gapNodes(node.children, 0, sentences[0].start)];
   order.forEach((source, position) => {
     children.push(
