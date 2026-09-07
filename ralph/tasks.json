@@ -593,13 +593,176 @@
   "targetBranch": "phase/0"
  },
  {
+  "id": "0.23",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r1 G1, G2, G7 and G8; Sol finding 2 and Claude finding 1, blocker; Grok finding 1 and Claude finding 3, should-fix required): packages/core/src/sidecar.ts's front-matter writer still disagrees with its reader about what is representable. (a) Key identity: `KEY_LINE` compares literal key spellings, so a double- or single-quoted spelling of an app-owned key is neither a duplicate of the plain spelling nor found on its own; `writeFrontMatter` then rewrites the plain line beside the quoted duplicate (ok:true, the duplicate stays), or appends a second spelling. Rule: any quoted spelling of `title` or `question` in the block makes that key unsupported (FrontMatterUnsupported, root identity, every byte unchanged) whether it appears alone or beside the plain spelling; the block's other keys stay readable. (b) One quoting predicate: `needsQuoting` tests only tab, newline, `#`, `:` and the leading indicator, and the single-quoted branch of `serializeScalar` escapes only the apostrophe, so a replacement value containing U+0000, another C0 or C1 control, DEL, U+2028, U+2029 or a lone surrogate is written raw with ok:true; invariant A then fails on the written document, and `KEY_LINE` (a dot under the u flag without the s flag) classifies the block as malformed on the next read. Derive every quoting decision from one predicate that owns `encodeDoubleQuoted`'s escape table (plus U+2028, U+2029 and lone surrogates), route the single-quoted branch through it (promote to double-quoted rather than emit raw), and match key lines with an explicit character class instead of a dot. (c) The unchanged-value skip runs after the newline refusal, so a no-op write of a double-quoted value whose decoded form contains a newline (which the reader accepted and classified writable) is refused: run the `entry.value === value` skip first and refuse only a value that would actually be rewritten. (d) The rule promoted into CLAUDE.md names an unchanged front-matter value as a corpus-wide identity case and no test carries it. No YAML library, no new dependencies; edits only in packages/core/src/sidecar.ts and packages/core/test/.",
+  "acceptance": "Tests assert both the outcome and the untouched bytes for: a quoted duplicate of `question` beside the plain spelling returns FrontMatterUnsupported with `write.root === root` and the block byte-identical (double-quoted, single-quoted and escaped spellings, alone and paired with the plain one); values containing U+0000, U+0007, U+007F, U+0085, U+2028, U+2029 and a lone surrogate either round-trip through a double-quoted scalar with invariant A holding on the written document or are refused before any edit, never written raw; the inverse property readable(v) === !needsQuoting(v) holds over a value table that includes those code points and the four printable strings the existing test uses; a no-op write of a double-quoted value with a decoded newline returns ok:true with `changed` empty and `write.root === root`; a corpus-wide test over every fixture in fixtures/markdown/index.json that carries a yaml node writes each writable app-owned key back with the value just read and asserts `format` output is byte-identical, and asserts a non-writable key returns FrontMatterUnsupported with root identity (fixture names read from the index, never a literal count); the existing sidecar and front-matter-grammar tests still pass; `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.12.r1d"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.24",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r1 G3, Sol finding 3, should-fix required): packages/core/src/sentences.ts rebuilds slices for an identity permutation and for a sentence replaced by its own Markdown, so an inline mark spanning a sentence boundary is split: `**First sentence. Second sentence.**` reordered by [0, 1] becomes `**First sentence.** **Second sentence.**`, and a link spanning two sentences becomes two links with the intervening space moved out of the link. The corpus-wide identity invariant of 0.14 did not catch it because no indexed fixture carries a strong, emphasis, link or delete mark across a sentence boundary. Do three things: (1) after input validation, an identity permutation and a replacement whose Markdown equals the sentence's own (`sentenceMarkdown`) return a tree that formats byte-identically (short-circuit on the validated no-op, not on a string comparison of the output); (2) add LF fixtures under fixtures/markdown with canonical siblings and index.json entries, at least one paragraph each with strong, emphasis, a link and strikethrough spanning a sentence boundary, plus one with a mark spanning the first boundary and one the last, so invariants A/B/C and the 0.14 identity invariant cover them (counts are read from the index and the directory; tests that read the directory keep working); (3) state in the doc comment the rule for a real replacement or reorder under a spanning mark (which sentence keeps the mark and what happens at the boundary) and test it at the first, middle and last position, choosing the rule that leaves the bytes of every untouched sentence unchanged. No new dependencies; edits only in packages/core/src/sentences.ts, packages/core/test/ and fixtures/markdown/.",
+  "acceptance": "Sol's two probes pass as tests: the identity reorder of `**First sentence. Second sentence.**` and the self-replacement of the first sentence of `[First sentence. Second sentence.](https://example.com)` both format byte-identically to the input; the new fixtures appear in fixtures/markdown/index.json with canonical siblings and pass invariants A/B/C and the corpus-wide identity invariant (the roundtrip matrix grows by three per fixture, count read from the index, not a literal); the spanning-mark rule for real edits is tested at the first, middle and last positions with the untouched sentence's bytes asserted unchanged; the 30 cases of sentences.cases.json and the existing sentences and zero-width tests still pass; `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.23"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.25",
+  "model": "opus",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r1 G4 and G5, Sol finding 1 and Claude finding 6, should-fix required; runner code, conformance tests required): (1) `ralph/lib/util.mjs` `breakStaleLock` renames a lock it judged stale before it compares bytes, so between the rename and the compare the lock path is free: with A holding a live lock, a breaker B that read the crashed holder's bytes earlier renames A's lock away, a third entrant C creates the path and runs its critical section beside A, and B's compare fails too late (Sol's probe, `/logs/reviews/0/r1/sol/lock-probe.mjs` and `lock-probe.log`: third entrant inside the critical section while the live holder is active). Cut automatic stale-lock breaking to a manual procedure, as CLAUDE.md prefers: `withLock` never renames or unlinks a lock it did not create; a lock whose pid is dead makes `withLock` throw a `RalphError` naming the file, the dead pid and the manual recovery (confirm with `pgrep` that no `ralph.sh`, `gate.sh` or admin process exists, then remove `.locks/ralph` by hand), and `ralph.sh doctor` reports `stale-lock <pid>` with that same repair (a read-only check in 0.19's pattern). Delete `breakStaleLock` and the `hooks.beforeBreak` interleaving point; keep the token re-read after acquisition and the token-scoped release; rewrite the doc comment. (2) `writeAtomic` swallows a failed directory fsync in a bare catch, so a close intent written without directory durability leaves no trace: on that failure append one line (`writeAtomic: directory fsync failed <path> <code>`) to the audit log the state layer already writes, before continuing. Conformance tests: a stale lock (dead pid) makes `withLock` refuse with the recovery message and nothing under state/ changes; Sol's three-actor interleaving, reproduced with the fs hooks the suite already owns, shows the live holder's path is never freed and the third entrant waits until timeout; `doctor` lists `stale-lock` and is clean after the manual removal; the injected-fs `writeAtomic` test records the audit line when the directory open or fsync throws. docs/RUNNER-SPEC.md §1 already says stale locks are manual (this reconciliation); do not edit it. No new dependencies; the diff touches only ralph/lib/util.mjs, ralph/lib/doctor.mjs, ralph/test/ and the journal.",
+  "acceptance": "`bash ralph/test/run.sh` green with the new tests failing before the fix (the journal shows the red run); the identifier `breakStaleLock` no longer appears under ralph/lib/; the existing lock and writeAtomic tests still pass or are rewritten to the new contract with the reason in the journal; `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.24"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.26",
+  "model": "sonnet",
+  "description": "Phase 0 review fix (DECISIONS #review-0-r1 G6 and deviation 30, Claude finding 2 and Grok finding 2, should-fix required; runner tests and compose only): (1) `ralph/lib/run.mjs` refuses a review start when `accepted.json`'s `sha` differs from `verification_sha` or from `implementation_sha` (the two guards after `readAcceptedCi`), and the review-start block of `ralph/test/conformance.test.mjs` never reaches them: its legs are a missing `accepted.json` and a tampered artifact, both of which throw earlier inside `readAcceptedCi`. Add a third leg: copy a valid accepted tree, rewrite `accepted.json`'s `sha` to another 40-hex value leaving the artifact digests intact, and assert `ralph.sh run --phase 0` exits non-zero, names the gate and the mismatch, and passes `nothingRecorded()` (nothing under `/logs/reviews/`). (2) `docker/compose.yml` gives every service `RALPH_MAX_TURNS` with default 50; the r1 Claude reviewer needed 96 turns for the r1 task text (two attempts ended on max_turns at 50 and 80) and the runner passes no reviewer budget. Give the three review services (`claude-review`, `codex-review`, `grok-review`) their own variable `RALPH_REVIEW_MAX_TURNS` with default 160, mapped onto the `RALPH_MAX_TURNS` the entrypoints read, leaving the task services at 50. Zero new dependencies; the diff touches only ralph/test/conformance.test.mjs, docker/compose.yml and the journal.",
+  "acceptance": "`bash ralph/test/run.sh` green, with the journal showing the new leg red while the two guards are temporarily disabled and green with them restored; `docker compose config` with neither variable set renders `RALPH_MAX_TURNS: 160` for the three review services and `50` for claude-task; existing tests still pass; `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "0.25"
+  ],
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.verify.r2",
+  "model": "sonnet",
+  "description": "Phase 0 verification for review attempt r2 (RUNNER-SPEC §3, §5.5): freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. `promote-lessons` is a manual step carried by this task's text (DECISIONS #review-0-r1): append this line, verbatim, to the `## Code rules` list of both CLAUDE.md and AGENTS.md (identical below line 1; `ralph/check-agent-rules.sh` must stay green): `- A fix that adds several guards has one test per guard, enumerated from the diff rather than from the acceptance sentences, and the journal names the test that discharges each guard; a rule promoted into this file names, in the promoting task's journal entry, the test that discharges each of its clauses.`",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change and touches only CLAUDE.md, AGENTS.md, docs/lessons.md and the journal; `ralph/check-agent-rules.sh` exits 0; `tests/agent-rules.test.ts` passes.",
+  "dependencies": [
+   "0.26"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.verify.r2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full Phase 0 suite (pnpm lint with typecheck, pnpm test with coverage thresholds, cargo test, and ralph/test/run.sh on ubuntu) green on ubuntu, macos and windows at the implementation SHA; the accepted `test-logs` artifact under /logs/ci/0.verify.r2h/accepted/ (the gate id; DECISIONS #018) holds test-logs-ubuntu-latest/, test-logs-macos-latest/ and test-logs-windows-latest/ each with lint.log, test.log and cargo-test.log (ubuntu also ralph-test.log).",
+  "phase": "0",
+  "execution": "loop",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.verify.r2h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "0.verify.r2",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/0.verify.r2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "0",
+  "targetBranch": "phase/0",
+  "description": "CI gate for 0.verify.r2: scripts/gate.sh 0.verify.r2h pushes integrated_sha of 0.verify.r2 to ci/0.verify.r2/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\"] into /logs/ci/0.verify.r2/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full Phase 0 suite (pnpm lint with typecheck, pnpm test with coverage thresholds, cargo test, and ralph/test/run.sh on ubuntu) green on ubuntu, macos and windows at the implementation SHA; the accepted `test-logs` artifact under /logs/ci/0.verify.r2h/accepted/ (the gate id; DECISIONS #018) holds test-logs-ubuntu-latest/, test-logs-macos-latest/ and test-logs-windows-latest/ each with lint.log, test.log and cargo-test.log (ubuntu also ralph-test.log).",
+  "dependencies": [
+   "0.verify.r2"
+  ]
+ },
+ {
+  "id": "0.12.r2a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r2",
+  "description": "Review attempt r2, claude reviewer, for review set 0.12 (phase 0). Review set for Phase 0, attempt r2 (after the r1 FAIL, DECISIONS #review-0-r1). Phase checks as r0 and r1: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from /logs/ci/0.verify.r2h/accepted/, three OS directories); invariant table; five further fixtures hand-verified by each reviewer; golden expected/essay-fixture.moved.md hand-verified; fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-0-r1 (G1 to G13) verified against the tree (fixed, deferred with a backlog line, or recorded); the front-matter writer of 0.23 probed independently with control characters, line terminators and quoted key spellings; the spanning-mark rule of 0.24 probed independently; the stale-lock refusal of 0.25 driven through `withLock` and `doctor`; the conformance legs of 0.25 and 0.26 read for what they actually exercise. Budget: the reviewer has 160 turns; the report and status.json must be written by turn 130.",
+  "acceptance": "/logs/reviews/0/r2/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verify.r2h"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.12.r2b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r2",
+  "description": "Review attempt r2, sol reviewer, for review set 0.12 (phase 0). Review set for Phase 0, attempt r2 (after the r1 FAIL, DECISIONS #review-0-r1). Phase checks as r0 and r1: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from /logs/ci/0.verify.r2h/accepted/, three OS directories); invariant table; five further fixtures hand-verified by each reviewer; golden expected/essay-fixture.moved.md hand-verified; fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-0-r1 (G1 to G13) verified against the tree (fixed, deferred with a backlog line, or recorded); the front-matter writer of 0.23 probed independently with control characters, line terminators and quoted key spellings; the spanning-mark rule of 0.24 probed independently; the stale-lock refusal of 0.25 driven through `withLock` and `doctor`; the conformance legs of 0.25 and 0.26 read for what they actually exercise. Budget: the reviewer has 160 turns; the report and status.json must be written by turn 130.",
+  "acceptance": "/logs/reviews/0/r2/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verify.r2h"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.12.r2c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r2",
+  "description": "Review attempt r2, grok reviewer, for review set 0.12 (phase 0). Review set for Phase 0, attempt r2 (after the r1 FAIL, DECISIONS #review-0-r1). Phase checks as r0 and r1: the ralph/ runner (integration mutex, CI-gate expansion, phase-close, evidence mount) reviewed as hard as packages/core; all tests green on 3 OSes (from /logs/ci/0.verify.r2h/accepted/, three OS directories); invariant table; five further fixtures hand-verified by each reviewer; golden expected/essay-fixture.moved.md hand-verified; fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-0-r1 (G1 to G13) verified against the tree (fixed, deferred with a backlog line, or recorded); the front-matter writer of 0.23 probed independently with control characters, line terminators and quoted key spellings; the spanning-mark rule of 0.24 probed independently; the stale-lock refusal of 0.25 driven through `withLock` and `doctor`; the conformance legs of 0.25 and 0.26 read for what they actually exercise. Budget: the reviewer has 160 turns; the report and status.json must be written by turn 130.",
+  "acceptance": "/logs/reviews/0/r2/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "0.verify.r2h"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
+  "id": "0.12.r2d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "reviewSet": "0.12",
+  "reviewAttempt": "r2",
+  "description": "Reconciliation of review attempt r2 for review set 0.12 (phase 0): copy the three reports to docs/reviews/phase-0-r2-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-0-r2 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 0.verify.r3 and 0.12.r3a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "0.12.r2a",
+   "0.12.r2b",
+   "0.12.r2c"
+  ],
+  "phase": "0",
+  "targetBranch": "phase/0"
+ },
+ {
   "id": "0.close",
   "model": "opus",
   "execution": "runner",
   "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/0 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/1; then finalise .evidence/closes and the next phase base record.",
   "acceptance": "main == reconciliation_sha of the newest Phase 0 review attempt (verdict PASS); suite green on that commit; branch phase/1 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
   "dependencies": [
-   "0.12.r1d"
+   "0.12.r2d"
   ],
   "nextPhase": "1",
   "nextBranch": "phase/1",
