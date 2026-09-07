@@ -662,7 +662,9 @@ export const FRONT_MATTER_UNSUPPORTED = "FrontMatterUnsupported";
  * `multi-line` is also the reason a *replacement value* is refused when it carries a `\n` or a
  * `\r`: this writer rewrites one physical line, so such a value has no representation here in any
  * quoting style. `malformed` covers a scalar outside the grammar below — a plain scalar carrying
- * `: ` or opening on an indicator, an unknown escape, a quoted scalar with junk after it.
+ * `: ` or opening on an indicator, an unknown escape, a quoted scalar with junk after it — and a
+ * *key* spelled with quotes (`"question":`), which this line-oriented writer cannot address;
+ * `duplicate` is that same key when the block also carries the plain spelling.
  */
 export type FrontMatterUnsupportedReason =
   | "block-scalar"
@@ -717,13 +719,24 @@ function yamlNodeOf(root: Root): { node: Yaml; index: number } | null {
   return index === -1 ? null : { node: root.children[index] as Yaml, index };
 }
 
-/** `key:` or `key: rest` at column 0. A key containing `:` cannot match, and does not have to. */
-const KEY_LINE = /^([^\s#][^:]*):(?:[ \t](.*))?$/u;
-const BLANK_OR_COMMENT = /^\s*(?:#.*)?$/u;
+/**
+ * `key:` or `key: rest` at column 0. A key containing `:` cannot match, and does not have to.
+ *
+ * The tail is `[^\n]*`, not `.`: `scanFrontMatter` has already split the block on `\n`, so every
+ * other character belongs to the line, but a dot under the `u` flag without the `s` flag excludes
+ * `\r`, U+2028 and U+2029 as well, and a line carrying one of those read as "not a mapping line"
+ * and made the whole block malformed (DECISIONS #review-0-r1 G2). The same class is used wherever
+ * this scanner matches to the end of a line.
+ */
+const KEY_LINE = /^([^\s#][^:]*):(?:[ \t]([^\n]*))?$/u;
+const BLANK_OR_COMMENT = /^\s*(?:#[^\n]*)?$/u;
 const INDENTED = /^[ \t]+\S/u;
 
 interface KeyLine {
+  /** The key's *identity*: a quoted spelling is decoded, so `"question"` and `question` collide. */
   readonly key: string;
+  /** Whether the block spelled the key with quotes, which this writer cannot rewrite in place. */
+  readonly quotedKey: boolean;
   /** Everything after `key:` and the one space or tab that follows it (`""` for a bare `key:`). */
   readonly raw: string;
   /** `line.length - raw.length`, i.e. where `raw` starts — `""` raw means the line ends at `key:`. */
@@ -732,6 +745,25 @@ interface KeyLine {
   readonly text: string;
   readonly line: number;
   readonly continued: boolean;
+}
+
+/**
+ * The key a line addresses, and whether the block spelled it with quotes. A quoted key decodes
+ * through the same two scalar readers a value does, so `"question"`, `'question'` and
+ * `"questio\u006e"` are all recognised as spellings of `question` (DECISIONS #review-0-r1 G1):
+ * this writer rewrites one physical line and cannot address a quoted key, but it must *see* one,
+ * or it rewrites the plain line beside a quoted duplicate, or appends a second spelling of a key
+ * the block already carries, and reports success either way.
+ *
+ * `null` is a key that opens on a quote and does not close it on its own line, which is not a flat
+ * mapping at all; the caller marks the block malformed rather than inventing a key name for it.
+ */
+function keyIdentity(text: string): { name: string; quoted: boolean } | null {
+  const head = text[0];
+  if (head !== "'" && head !== '"') return { name: text, quoted: false };
+  const read = head === "'" ? readSingleQuoted(text) : readDoubleQuoted(text);
+  if (!read.ok || read.rest.trim() !== "") return null;
+  return { name: read.value, quoted: true };
 }
 
 /** Scan the yaml block as the flat mapping §6.1's supported boundary describes. */
@@ -752,9 +784,15 @@ function scanFrontMatter(value: string): { lines: string[]; keys: KeyLine[]; mal
       malformed = true;
       return;
     }
+    const identity = keyIdentity(match[1].trimEnd());
+    if (identity === null) {
+      malformed = true;
+      return;
+    }
     const raw = match[2] ?? "";
     keys.push({
-      key: match[1].trimEnd(),
+      key: identity.name,
+      quotedKey: identity.quoted,
       raw,
       rawStart: line.length - raw.length,
       text: line,
@@ -790,13 +828,18 @@ function scanFrontMatter(value: string): { lines: string[]; keys: KeyLine[]; mal
  * - **single-quoted** — closes on its own line; `''` is one literal quote.
  *
  * A quoted scalar may be followed only by spaces or tabs and an optional `# comment`.
+ *
+ * Which characters a style can carry *raw* is one predicate, `isUnwritableRaw`, and every quoting
+ * decision below is derived from it, so "what the reader accepts" and "what the writer can emit"
+ * are the same boundary: `readable(v) === !needsQuoting(v)` for a plain scalar, and a value that
+ * fails it is promoted to the double-quoted form rather than emitted raw in any style.
  */
 
 /** Every YAML indicator character (`c-indicator`); none of them may open a plain scalar. */
 const YAML_INDICATORS = "-?:,[]{}#&*!|>'\"%@`";
 
 /** What may follow a closing quote on the line: spaces or tabs, then an optional `# comment`. */
-const SCALAR_TAIL = /^(?:[ \t]*|[ \t]+#.*)$/u;
+const SCALAR_TAIL = /^(?:[ \t]*|[ \t]+#[^\n]*)$/u;
 
 /** A replacement value this writer cannot put on one physical line, whatever the quoting. */
 const LINE_BREAK = /[\n\r]/u;
@@ -903,6 +946,32 @@ const DOUBLE_ENCODES: Record<string, string> = {
   "\0": "\\0",
 };
 
+/**
+ * The one predicate every quoting decision is derived from: whether the code unit at `i` has no
+ * raw representation in any scalar style this writer emits, so only a double-quoted scalar (the
+ * one style with escapes) can carry it.
+ *
+ * This is `encodeDoubleQuoted`'s escape table read as a question — C0 including the six characters
+ * `DOUBLE_ENCODES` spells out, DEL, C1 — plus the two code points YAML would re-read as a line
+ * break (U+2028, U+2029) and lone surrogates, which have no UTF-8 encoding to write raw at all.
+ * `needsQuoting`, `serializeScalar` and `encodeDoubleQuoted` all ask this one function, so the
+ * reader's boundary and the writer's cannot drift apart again (DECISIONS #review-0-r1 G2).
+ */
+function isUnwritableRaw(value: string, i: number): boolean {
+  const code = value.charCodeAt(i);
+  if (code < 0x20 || code === 0x7f) return true;
+  if (code >= 0x80 && code <= 0x9f) return true;
+  if (code === 0x2028 || code === 0x2029) return true;
+  if (code >= 0xd800 && code <= 0xdfff) return !inSurrogatePair(value, i);
+  return false;
+}
+
+/** Whether any code unit of `value` is one `isUnwritableRaw` refuses. */
+function hasUnwritableRaw(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) if (isUnwritableRaw(value, i)) return true;
+  return false;
+}
+
 /** Whether the code unit at `i` is one half of a surrogate pair rather than a lone surrogate. */
 function inSurrogatePair(value: string, i: number): boolean {
   const code = value.charCodeAt(i);
@@ -927,18 +996,16 @@ function encodeDoubleQuoted(value: string): string {
       out += escape;
       continue;
     }
+    if (!isUnwritableRaw(value, i)) {
+      out += char;
+      continue;
+    }
+    // `\xXX` covers C0, DEL and C1; `\uXXXX` the two line separators and a lone surrogate.
     const code = char.charCodeAt(0);
-    // C0, DEL and C1 are not writable raw; `\xXX` covers all three ranges.
-    if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
-      out += `\\x${code.toString(16).padStart(2, "0")}`;
-      continue;
-    }
-    // A lone surrogate has no UTF-8 encoding to write raw; a real pair passes through as itself.
-    if (code >= 0xd800 && code <= 0xdfff && !inSurrogatePair(value, i)) {
-      out += `\\u${code.toString(16).padStart(4, "0")}`;
-      continue;
-    }
-    out += char;
+    out +=
+      code <= 0xff
+        ? `\\x${code.toString(16).padStart(2, "0")}`
+        : `\\u${code.toString(16).padStart(4, "0")}`;
   }
   return `${out}"`;
 }
@@ -1014,6 +1081,13 @@ export function readFrontMatter(root: Root): FrontMatter {
     if (matches.length > 1) {
       return { key, writable: false, reason: "duplicate", value: matches[0].raw.trim() };
     }
+    // A quoted spelling standing alone is not a duplicate of anything, but it is still a line this
+    // writer cannot address: rewriting it would have to re-quote the key, and appending the plain
+    // spelling beside it would make the block carry the key twice (#review-0-r1 G1). `malformed`
+    // is the reason for the lone case, `duplicate` above for the paired one.
+    if (matches[0].quotedKey) {
+      return { key, writable: false, reason: "malformed", value: matches[0].raw.trim() };
+    }
     return classify(key, matches[0]);
   };
 
@@ -1030,17 +1104,26 @@ export function readFrontMatter(root: Root): FrontMatter {
 function needsQuoting(value: string): boolean {
   if (value === "") return true;
   if (value !== value.trim()) return true;
-  if (/[\n\r\t]/u.test(value)) return true;
+  // Every character with no raw representation, including the tab and the two line breaks the
+  // older spelling of this test listed by hand.
+  if (hasUnwritableRaw(value)) return true;
   if (/(?:^|\s)#/u.test(value)) return true;
   if (/:(?:\s|$)/u.test(value)) return true;
   return YAML_INDICATORS.includes(value[0]);
 }
 
-/** Serialize a value in the quoting style the line already used, promoting a plain scalar if it must. */
+/**
+ * Serialize a value in the quoting style the line already used, promoting it when that style
+ * cannot carry the value. A single-quoted scalar has no escapes at all, so a value carrying a
+ * character `isUnwritableRaw` refuses is promoted to double-quoted rather than written raw
+ * (#review-0-r1 G2); a plain scalar is promoted whenever `needsQuoting` says so, and that test
+ * asks the same predicate.
+ */
 function serializeScalar(value: string, quote: FrontMatterQuote): string {
-  if (quote === "'") return `'${value.replace(/'/gu, "''")}'`;
   if (quote === '"') return encodeDoubleQuoted(value);
-  return needsQuoting(value) ? encodeDoubleQuoted(value) : value;
+  if (quote === "'" && !hasUnwritableRaw(value)) return `'${value.replace(/'/gu, "''")}'`;
+  if (quote === "" && !needsQuoting(value)) return value;
+  return encodeDoubleQuoted(value);
 }
 
 export type FrontMatterWrite =
@@ -1059,6 +1142,9 @@ export type FrontMatterWrite =
  *
  * A key whose value is already what is asked for is not rewritten at all, so a save with an
  * unchanged topic question leaves the yaml block byte-identical and invariant C still holds on it.
+ * That skip is decided *first*, for every requested key, so a value the reader accepted and
+ * classified writable is never refused for something the write would not do (#review-0-r1 G7); the
+ * boundary below then judges only the keys this call would actually rewrite.
  * A key the supported boundary excludes returns `FrontMatterUnsupported` and **nothing** is
  * rewritten — the returned `root` is the one that came in, so the caller saves the block unchanged.
  * A key the block does not carry yet is appended as one new line; creating a front-matter block
@@ -1073,26 +1159,37 @@ export function writeFrontMatter(
   const requested = FRONT_MATTER_KEYS.filter((key) => values[key] !== undefined);
   if (requested.length === 0) return { ok: true, root, changed: [] };
 
-  // A value carrying a line break is refused for every quoting style, before anything is read or
-  // edited: writing it would put two physical lines where the block has one and report success.
-  for (const key of requested) {
+  const current = readFrontMatter(root);
+
+  // The unchanged-value skip is decided first, for every key, because a key this call would not
+  // rewrite has nothing to refuse: the block already holds a representation of that exact value,
+  // and the reader accepted it (#review-0-r1 G7). Only what is left — a key that would actually be
+  // written — is put through the boundary below.
+  const pending = requested.filter((key) => {
+    const entry = current[key];
+    return entry === null || !entry.writable || entry.value !== values[key];
+  });
+  if (pending.length === 0) return { ok: true, root, changed: [] };
+
+  // A value carrying a line break is refused for every quoting style, before anything is edited:
+  // writing it would put two physical lines where the block has one and report success.
+  for (const key of pending) {
     if (LINE_BREAK.test(values[key] as string)) {
       return { ok: false, error: FRONT_MATTER_UNSUPPORTED, key, reason: "multi-line", root };
     }
   }
 
   const yaml = yamlNodeOf(root);
-  const current = readFrontMatter(root);
   if (yaml === null) {
     return {
       ok: false,
       error: FRONT_MATTER_UNSUPPORTED,
-      key: requested[0],
+      key: pending[0],
       reason: "no-front-matter",
       root,
     };
   }
-  for (const key of requested) {
+  for (const key of pending) {
     const entry = current[key];
     if (entry !== null && !entry.writable) {
       return { ok: false, error: FRONT_MATTER_UNSUPPORTED, key, reason: entry.reason, root };
@@ -1104,7 +1201,7 @@ export function writeFrontMatter(
 
   const lines = yaml.node.value === "" ? [] : yaml.node.value.split("\n");
   const changed: FrontMatterKey[] = [];
-  for (const key of requested) {
+  for (const key of pending) {
     const value = values[key] as string;
     const entry = current[key] as FrontMatterField | null;
     if (entry === null) {
@@ -1112,11 +1209,9 @@ export function writeFrontMatter(
       changed.push(key);
       continue;
     }
-    if (entry.value === value) continue;
     lines[entry.line] = `${entry.prefix}${serializeScalar(value, entry.quote)}${entry.comment}`;
     changed.push(key);
   }
-  if (changed.length === 0) return { ok: true, root, changed: [] };
 
   const children = [...root.children];
   children[yaml.index] = { ...yaml.node, value: lines.join("\n") };
