@@ -55,9 +55,12 @@ describe("no history", () => {
     expect(Object.keys(manifest.dependencies)).not.toContain("prosemirror-history");
   });
 
-  it("installs three plugins: the input rules and the two keymaps", () => {
+  // Task 1.4 added a fourth plugin (the reveal decorations) to `editorPlugins`, so this test's
+  // count moved with it; the claim it exists to make — that none of them keeps a history — is
+  // unchanged, and `reveal.test.ts` asserts which of the four contributes the decorations.
+  it("installs four plugins: the input rules, the two keymaps and the reveal decorations", () => {
     const plugins = editorPlugins();
-    expect(plugins).toHaveLength(3);
+    expect(plugins).toHaveLength(4);
     expect(plugins.filter((plugin) => plugin.spec.isInputRules === true)).toHaveLength(1);
     // A history plugin is the only ProseMirror core plugin with a `historyKey`-shaped state that
     // survives `undo`; the honest check available from outside is that no plugin here defines

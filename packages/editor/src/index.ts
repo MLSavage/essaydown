@@ -8,6 +8,17 @@ export {
 } from "./input.js";
 
 export {
+  DELIMITER_CLASS,
+  activeBlock,
+  delimiterDOM,
+  markDelimiters,
+  revealDecorations,
+  revealDelimiters,
+  revealPlugin,
+  type Delimiter,
+} from "./reveal.js";
+
+export {
   MDAST_TYPES,
   RAW_CLASS,
   marks,

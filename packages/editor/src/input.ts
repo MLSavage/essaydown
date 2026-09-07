@@ -9,6 +9,7 @@ import { keymap } from "prosemirror-keymap";
 import type { MarkType, Node as PMNode } from "prosemirror-model";
 import { liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
 import { TextSelection, type Command, type Plugin } from "prosemirror-state";
+import { revealPlugin } from "./reveal.js";
 import { schema } from "./schema.js";
 
 /**
@@ -224,11 +225,15 @@ export function essaydownKeymap(): Record<string, Command> {
 /**
  * The plugins a rendered editor over {@link schema} runs, in order. Nothing here keeps a history:
  * see the module comment.
+ *
+ * The reveal plugin of task 1.4 is last because it only reads: it contributes decorations and no
+ * key binding, no input rule and no state, so nothing above it can be shadowed by it.
  */
 export function editorPlugins(): Plugin[] {
   return [
     inputRules({ rules: markdownInputRules() }),
     keymap(essaydownKeymap()),
     keymap(baseKeymap),
+    revealPlugin(),
   ];
 }
