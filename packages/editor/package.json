@@ -8,5 +8,13 @@
   "types": "src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@essaydown/core": "workspace:*",
+    "prosemirror-model": "^1.25.11"
+  },
+  "devDependencies": {
+    "@types/mdast": "^4.0.4",
+    "@types/node": "^22.18.0"
   }
 }
