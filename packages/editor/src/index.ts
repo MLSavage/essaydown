@@ -33,6 +33,28 @@ export {
   type DocumentStoreState,
 } from "./store.js";
 
+export {
+  SOURCE_KEY,
+  TOGGLE_KEY,
+  bindCodeMirror,
+  otherMode,
+  cursorMap,
+  renderedSelection,
+  sourceCursor,
+  sourceOffset,
+  sourceToggleKeymap,
+  toggleKeyBindings,
+  toggleKeymap,
+  toggleMode,
+  togglePlugins,
+  type BoundSourceView,
+  type CursorMap,
+  type EditorMode,
+  type SourceBindOptions,
+  type SourceBinding,
+  type SourcePosition,
+} from "./toggle.js";
+
 export { TOKEN_CLASSES, sourceExtensions, sourceLanguage, tokenHighlightStyle } from "./source.js";
 
 export {

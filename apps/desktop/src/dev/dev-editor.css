@@ -16,6 +16,41 @@
   color: #6b6b68;
 }
 
+/* Task 1.7's dev-only top bar: the Phase 1 human gate loads an essay and copies the Markdown. */
+.dev-editor-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+/* The chooser is opened by the "Load fixture…" button, so the input itself never shows. */
+.dev-editor-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.dev-editor-mode {
+  color: #6b6b68;
+  font-variant: small-caps;
+}
+
+.dev-editor-status {
+  color: #6b6b68;
+}
+
+.dev-editor-host .cm-editor {
+  height: 100%;
+}
+
+.dev-editor-host .cm-focused {
+  outline: none;
+}
+
 .dev-editor-host,
 .dev-editor-markdown {
   min-height: 60vh;
