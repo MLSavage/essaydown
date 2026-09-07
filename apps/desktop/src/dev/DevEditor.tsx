@@ -1,6 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { format } from "@essaydown/core";
-import { editorPlugins, pmToMdast, schema } from "@essaydown/editor";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { emptySidecar, format, parse } from "@essaydown/core";
+import {
+  bindProseMirror,
+  createDocumentStore,
+  editorPlugins,
+  schema,
+  storePlugins,
+} from "@essaydown/editor";
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
@@ -13,28 +19,36 @@ import "./dev-editor.css";
  * types keystrokes and reads the Markdown back — and it is the same string task 1.7's dev-only
  * "Copy Markdown" button will copy.
  *
+ * Since task 1.6 the document is the store's, not the view's: the pane serialises the store's
+ * current snapshot, so it shows what an undo left behind and not merely what was typed, and the
+ * view is bound to the store in both directions by `bindProseMirror`.
+ *
  * Dev-only, and pure web: nothing here calls Tauri, so Playwright can drive it (PRD §4).
  */
 export default function DevEditor() {
   const host = useRef<HTMLDivElement>(null);
-  const [markdown, setMarkdown] = useState("");
+  const store = useMemo(() => createDocumentStore(parse(""), emptySidecar()), []);
+  const markdown = useSyncExternalStore(store.subscribe, () =>
+    format(store.getState().document.root),
+  );
 
   useEffect(() => {
     const element = host.current;
     if (element === null) return;
-    const view: EditorView = new EditorView(element, {
-      state: EditorState.create({ schema, plugins: editorPlugins() }),
-      dispatchTransaction(transaction) {
-        view.updateState(view.state.apply(transaction));
-        setMarkdown(format(pmToMdast({ doc: view.state.doc, frontMatter: null })));
-      },
+    const view = new EditorView(element, {
+      state: EditorState.create({ schema, plugins: [...storePlugins(store), ...editorPlugins()] }),
     });
-    setMarkdown(format(pmToMdast({ doc: view.state.doc, frontMatter: null })));
+    // The binding needs the view, and the view's `dispatchTransaction` needs the binding, so the
+    // prop is installed on the second line rather than passed to the constructor. Nothing
+    // dispatches in between: `bindProseMirror`'s initial pull goes through `updateState`.
+    const binding = bindProseMirror(store, view);
+    view.setProps({ dispatchTransaction: (transaction) => binding.dispatch(transaction) });
     view.focus();
     return () => {
+      binding.destroy();
       view.destroy();
     };
-  }, []);
+  }, [store]);
 
   return (
     <main className="dev-editor">

@@ -19,11 +19,21 @@ export {
 } from "./reveal.js";
 
 export {
-  TOKEN_CLASSES,
-  sourceExtensions,
-  sourceLanguage,
-  tokenHighlightStyle,
-} from "./source.js";
+  TYPING_KEY,
+  bindProseMirror,
+  createDocumentStore,
+  sourceUndoKeymap,
+  storePlugins,
+  undoKeyBindings,
+  undoKeymap,
+  type BindOptions,
+  type BoundView,
+  type DocumentBinding,
+  type DocumentStore,
+  type DocumentStoreState,
+} from "./store.js";
+
+export { TOKEN_CLASSES, sourceExtensions, sourceLanguage, tokenHighlightStyle } from "./source.js";
 
 export {
   MDAST_TYPES,
