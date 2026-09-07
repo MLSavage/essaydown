@@ -38,6 +38,7 @@ You are one agent in a Ralph loop on Essay Down, a Tauri 2 + React Markdown essa
 - Secrets: `.claude/settings.local.json` is gitignored; scan the whole working tree, not just tracked files; the repo is public (DECISIONS #011), so nothing personal enters the tree — the fixture essay is agent-written.
 - Every core operation of the shape f(root, …) → root has a corpus-wide identity test: the no-op argument (identity permutation, a sentence replaced by its own text, an unchanged front-matter value) re-serialises byte-identically for every fixture in fixtures/markdown/index.json.
 - Code that partitions a string or a node list into adjacent half-open slices states its ownership rule for zero-width items once, in the doc comment, and tests the first, middle and last positions.
+- A fix that adds several guards has one test per guard, enumerated from the diff rather than from the acceptance sentences, and the journal names the test that discharges each guard; a rule promoted into this file names, in the promoting task's journal entry, the test that discharges each of its clauses.
 
 ## Runner facts you rely on (DECISIONS #009, #012)
 
