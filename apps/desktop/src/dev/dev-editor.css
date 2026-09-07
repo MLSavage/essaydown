@@ -63,6 +63,13 @@
   outline: none;
 }
 
+/* Task 1.8: the question that produced a heading, hovering faintly above it (PRD §3 step 3). */
+.question-hint {
+  color: #a9a9a4;
+  font-size: 0.8em;
+  font-style: italic;
+}
+
 .dev-editor-markdown {
   margin: 0;
   overflow: auto;

@@ -27,6 +27,8 @@ import { EditorView as SourceEditorView } from "@codemirror/view";
 import "prosemirror-view/style/prosemirror.css";
 import "@essaydown/editor/src/source.css";
 import "./dev-editor.css";
+import { clearOutlineHandoff, readOutlineHandoff } from "./outline-handoff.js";
+import { questionHintPlugin } from "./outline-hints.js";
 
 /**
  * The `/dev/editor` route of PRD §8 (Phases 0–1): one document store, and beside it the canonical
@@ -45,12 +47,28 @@ import "./dev-editor.css";
  * file chooser and commits whatever Markdown it is given, and "Copy Markdown" puts the store's
  * canonical serialisation on the clipboard.
  *
+ * Since task 1.8, the route also opens with `/dev/outline`'s produced document when it was
+ * reached via that route's "Produce" button: {@link readOutlineHandoff} is read once, before the
+ * store is created, and its `hints` (one per heading, in document order) are drawn as muted
+ * `.question-hint` lines by {@link questionHintPlugin}. The handoff is otherwise absent (a direct
+ * visit, or "Load fixture…"), which is the `hints.length === 0` case the plugin already treats as
+ * "draw nothing".
+ *
  * Dev-only, and pure web: nothing here calls Tauri, so Playwright can drive it (PRD §4).
  */
 export default function DevEditor() {
   const host = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const store = useMemo(() => createDocumentStore(parse(""), emptySidecar()), []);
+  // Read once, purely (see outline-handoff.ts): a StrictMode double-render must not lose it.
+  const handoff = useMemo(() => readOutlineHandoff(), []);
+  const hints = useRef<readonly string[]>(handoff?.hints ?? []);
+  const store = useMemo(
+    () => createDocumentStore(parse(handoff?.markdown ?? ""), emptySidecar()),
+    [handoff],
+  );
+  useEffect(() => {
+    clearOutlineHandoff();
+  }, []);
   const markdown = useSyncExternalStore(store.subscribe, () =>
     format(store.getState().document.root),
   );
@@ -86,7 +104,12 @@ export default function DevEditor() {
       const view = new EditorView(element, {
         state: EditorState.create({
           schema,
-          plugins: [...storePlugins(store), ...togglePlugins(toggle), ...editorPlugins()],
+          plugins: [
+            ...storePlugins(store),
+            ...togglePlugins(toggle),
+            ...editorPlugins(),
+            ...(hints.current.length > 0 ? [questionHintPlugin(hints.current)] : []),
+          ],
         }),
       });
       // The binding needs the view, and the view's `dispatchTransaction` needs the binding, so the
@@ -173,11 +196,7 @@ export default function DevEditor() {
     <main className="dev-editor">
       <h1 className="dev-editor-title">/dev/editor</h1>
       <div className="dev-editor-bar">
-        <button
-          type="button"
-          data-testid="load-fixture"
-          onClick={() => fileInput.current?.click()}
-        >
+        <button type="button" data-testid="load-fixture" onClick={() => fileInput.current?.click()}>
           Load fixture…
         </button>
         <input

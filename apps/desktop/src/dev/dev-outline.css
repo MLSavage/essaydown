@@ -1,0 +1,58 @@
+/* Dev route only (task 1.8). Not the app's theme — Phase 2 brings that. */
+.dev-outline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  max-width: 40rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.dev-outline-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #6b6b68;
+}
+
+.dev-outline-topic {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.dev-outline-add {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.dev-outline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dev-outline-question {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #dcdcd9;
+  border-radius: 4px;
+}
+
+.dev-outline-question[data-depth="1"] {
+  margin-left: 1.5rem;
+}
+
+.dev-outline-question-text {
+  flex: 1;
+}
+
+.dev-outline-handle {
+  cursor: grab;
+}
