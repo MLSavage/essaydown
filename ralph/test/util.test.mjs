@@ -6,10 +6,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { withLock, writeAtomic } from "../lib/util.mjs";
+import { withLock, writeAtomic, lockHolder } from "../lib/util.mjs";
 import { Ctx } from "../lib/state.mjs";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "ralph-util-"));
@@ -246,6 +246,52 @@ test("writeAtomic: a directory fsync that fails leaves one line in the state aud
 // -- helpers -------------------------------------------------------------------------------------
 
 /** Leave a lock file behind for a process that has already exited. */
+test("withLock: a lock file that carries no pid is an unidentifiable holder — waited on to the timeout, never declared dead (DECISIONS #review-0-r2 H1)", async (t) => {
+  for (const [what, content] of [["empty", ""], ["garbled", "not-a-pid 2026-01-01T00:00:00.000Z deadbeef\n"]]) {
+    await t.test(`a ${what} lock file: lockHolder reports pid null and alive null; withLock waits and then refuses without "is not running"; the file is untouched`, () => {
+      const root = tmp();
+      try {
+        const lock = lockPath(root);
+        mkdirSync(dirname(lock), { recursive: true });
+        writeFileSync(lock, content);
+        const ino = statSync(lock).ino;
+        assert.deepEqual(lockHolder(root), { lock, pid: null, alive: null });
+        let ran = 0;
+        const t0 = Date.now();
+        assert.throws(() => withLock(root, () => { ran++; }, { timeoutMs: WAIT_MS }), (e) => {
+          assert.doesNotMatch(e.message, /is not running/, e.message);
+          assert.match(e.message, new RegExp(`lock ${re(lock)} carries no pid and was not released within ${WAIT_MS} ms`), e.message);
+          assert.match(e.message, /pgrep/, e.message);
+          return true;
+        });
+        assert.ok(Date.now() - t0 >= WAIT_MS, "the entrant did not wait for the timeout before refusing");
+        assert.equal(ran, 0, "the critical section ran on a lock this process does not hold");
+        assert.equal(readFileSync(lock, "utf8"), content, "the lock file was rewritten");
+        assert.equal(statSync(lock).ino, ino, "the lock file was replaced");
+        assert.deepEqual(staleDebris(root), [], "the lock was carried off to a stale name");
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+
+  await t.test("the wait re-reads the file: a holder that finishes writing a dead pid inside the wait is then refused as dead, one that writes a live pid keeps the entrant waiting", () => {
+    for (const [who, pidOf] of [["dead", () => deadPid()], ["live", () => process.pid]]) {
+      const root = tmp();
+      try {
+        const lock = lockPath(root);
+        mkdirSync(dirname(lock), { recursive: true });
+        writeFileSync(lock, "");
+        // a second actor completes the holder's write 100 ms in, while this process blocks in withLock's poll
+        const writer = spawn(process.execPath, ["-e", `setTimeout(() => require("fs").writeFileSync(process.argv[1], process.argv[2]), 100)`, lock, staleLine(pidOf())], { stdio: "ignore" });
+        let ran = 0;
+        assert.throws(() => withLock(root, () => { ran++; }, { timeoutMs: 600 }), who === "dead" ? /is not running/ : /held by pid \d+$/);
+        assert.equal(ran, 0);
+        assert.equal(existsSync(lock), true, "the lock file was removed");
+        writer.kill();
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  });
+});
+
 function writeStale(lock, pid) {
   mkdirSync(dirname(lock), { recursive: true });
   writeFileSync(lock, staleLine(pid));

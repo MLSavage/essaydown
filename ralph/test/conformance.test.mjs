@@ -764,6 +764,15 @@ test("stale lock (DECISIONS #review-0-r1 G4): a command that needs the lock refu
   assert.equal(readFileSync(lock, "utf8"), bytes, "the runner touched a lock it did not create");
   assert.deepEqual(digestDir(stateDir), before, "state/ changed while the stale lock stood");
 
+  // (3) H1 (DECISIONS #review-0-r2): a lock file with no pid is an unidentifiable holder — doctor asks for a second look, never calls it dead
+  writeFileSync(lock, "");
+  const u = ralph(f.root, ["doctor"]);
+  assert.equal(u.status, 3, u.out);
+  assert.match(u.out, new RegExp(`^unreadable-lock \\(${re(lock)}\\) → the lock file carries no pid; wait 30 s and run doctor again, and only if it persists: manual repair: .*pgrep.*remove ${re(lock)} by hand$`, "m"), u.out);
+  assert.doesNotMatch(u.out, /stale-lock/, u.out);
+  assert.match(u.out, /^DOCTOR 1 findings$/m, u.out);
+  writeFileSync(lock, bytes);
+
   // (3) the manual repair — remove the lock by hand — and everything runs again
   rmSync(lock);
   assert.match(ralph(f.root, ["doctor"]).out, /^doctor: clean$/m);

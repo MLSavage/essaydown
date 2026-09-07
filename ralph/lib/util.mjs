@@ -120,9 +120,12 @@ function pidAlive(pid) {
 }
 
 /**
- * The lock's current holder: `{lock, pid, alive}`, or `null` while the path is free. `pid` is null
- * when the file does not open with a pid, and such a lock counts as held by something we cannot
- * identify — fail closed, because inventing a holder is how a live lock gets broken.
+ * The lock's current holder: `{lock, pid, alive}`, or `null` while the path is free. When the file
+ * does not open with a positive integer pid (empty — reachable inside `withLock` between
+ * `openSync(wx)` and `writeSync` — or garbled) `pid` is null and `alive` is null, never false:
+ * such a lock counts as held by something we cannot identify, and callers wait on it as on a live
+ * holder — fail closed, because inventing a dead holder is how a live lock gets broken
+ * (DECISIONS #review-0-r2 H1). `alive === false` means a pid we read and could not signal.
  */
 export function lockHolder(root) {
   const lock = lockPath(root);
@@ -130,7 +133,7 @@ export function lockHolder(root) {
   if (text === null) return null;
   const pid = Number(text.split(" ")[0]);
   const known = Number.isInteger(pid) && pid > 0;
-  return { lock, pid: known ? pid : null, alive: known && pidAlive(pid) };
+  return { lock, pid: known ? pid : null, alive: known ? pidAlive(pid) : null };
 }
 
 /**
@@ -171,8 +174,8 @@ export function withLock(root, fn, { timeoutMs = 30_000, hooks = {} } = {}) {
       if (e.code !== "EEXIST") throw e;
       const held = lockHolder(root);
       if (held === null) continue; // released under us; try the create again
-      if (!held.alive) throw new RalphError(`lock ${lock} is held by pid ${held.pid ?? "unknown"}, which is not running; the runner never breaks a lock it did not create — ${staleLockRepair(lock)}`);
-      if (Date.now() - start > timeoutMs) throw new RalphError(`lock ${lock} held by pid ${held.pid}`);
+      if (held.alive === false) throw new RalphError(`lock ${lock} is held by pid ${held.pid}, which is not running; the runner never breaks a lock it did not create — ${staleLockRepair(lock)}`);
+      if (Date.now() - start > timeoutMs) throw new RalphError(held.pid === null ? `lock ${lock} carries no pid and was not released within ${timeoutMs} ms; the runner never breaks a lock it did not create — ${staleLockRepair(lock)}` : `lock ${lock} held by pid ${held.pid}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
       continue;
     }

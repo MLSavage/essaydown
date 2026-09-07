@@ -53,8 +53,11 @@ export function doctor(ctx) {
   const add = (line, admin) => out.push({ line: `${line} → ${admin}`, admin });
   // a lock left behind by a crashed holder: the runner never breaks one, so it is drift like any
   // other and its repair is the manual removal withLock names (DECISIONS #review-0-r1 G4).
+  // a lock file that carries no pid is an unidentifiable holder (a live one may be mid-write, H1):
+  // reported as drift that asks for a second look, never as a dead holder.
   const held = lockHolder(ctx.root);
-  if (held && !held.alive) add(`stale-lock ${held.pid ?? "unknown"} (${held.lock})`, staleLockRepair(held.lock));
+  if (held && held.alive === false) add(`stale-lock ${held.pid} (${held.lock})`, staleLockRepair(held.lock));
+  else if (held && held.alive === null) add(`unreadable-lock (${held.lock})`, `the lock file carries no pid; wait 30 s and run doctor again, and only if it persists: ${staleLockRepair(held.lock)}`);
   const s = ctx.state();
   for (const t of ctx.spec()) {
     const r = s[t.id];
