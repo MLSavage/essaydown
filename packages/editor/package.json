@@ -17,7 +17,6 @@
     "@essaydown/core": "workspace:*",
     "@lezer/highlight": "^1.2.3",
     "@lezer/markdown": "^1.7.2",
-    "codemirror": "^6.0.2",
     "prosemirror-commands": "^1.7.2",
     "prosemirror-inputrules": "^1.5.1",
     "prosemirror-keymap": "^1.2.3",

@@ -38,9 +38,12 @@ import { mdastToPM, pmToMdast } from "./schema.js";
  * store change whose root is that same object is the binding's own commit coming back and is
  * ignored. Nothing here compares serialised bytes to decide whether to re-render.
  *
- * **No built-in histories.** `prosemirror-history` and `@codemirror/commands` are not
- * dependencies of this package (PRD §4: "ProseMirror's and CodeMirror's built-in histories are
- * disabled"), so the keymaps below are the only undo bindings either editor has.
+ * **No built-in histories.** `prosemirror-history` and `@codemirror/commands` are not installed
+ * anywhere in this workspace (PRD §4: "ProseMirror's and CodeMirror's built-in histories are
+ * disabled"), so the keymaps below are the only undo bindings either editor has. Task 1.19
+ * removed the `codemirror` kitchen-sink package, the one thing that had put `@codemirror/commands`
+ * into `pnpm-lock.yaml` though nothing imported it; `test/no-codemirror-history.test.ts` reads the
+ * manifest and the lockfile's `packages/editor` importer so the claim stays a test, not a comment.
  */
 
 /** §6.5's typing burst: every doc-changing ProseMirror transaction carries this coalescing key. */

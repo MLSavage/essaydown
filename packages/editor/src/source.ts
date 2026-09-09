@@ -27,9 +27,12 @@ import { Autolink, Table } from "@lezer/markdown";
  * happens to start with `[ ] x` — consistent with task lists staying plain text elsewhere in the
  * app (CLAUDE.md).
  *
- * **No history.** `@codemirror/commands` is not a dependency of this package: the task text
- * requires CodeMirror's `history` extension to stay uninstalled, and the surest way to keep it
- * that way is to never import the package it lives in.
+ * **No history.** `@codemirror/commands` (CodeMirror's `history`) is not installed anywhere in
+ * this workspace: `package.json` declares only the four `@codemirror/*` modules this file and
+ * `store.ts` import by name, not the `codemirror` kitchen-sink package, which is how `history`
+ * reached `pnpm-lock.yaml` before task 1.19 removed it despite nothing importing it. That keeps
+ * this claim true rather than merely stated — `packages/editor/test/no-codemirror-history.test.ts`
+ * reads both the manifest and the lockfile's `packages/editor` importer for it.
  */
 
 const headingTag = Tag.define();
