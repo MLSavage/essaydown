@@ -343,12 +343,15 @@ function blockToMdast(node: PMNode): RootContent {
   const n = schema.nodes;
   switch (node.type) {
     case n.paragraph:
-      return { type: "paragraph", children: inlineToMdast(childrenOf(node)) } satisfies Paragraph;
+      return {
+        type: "paragraph",
+        children: inlineToMdast(trimBlockEnds(childrenOf(node))),
+      } satisfies Paragraph;
     case n.heading:
       return {
         type: "heading",
         depth: node.attrs.depth as Heading["depth"],
-        children: inlineToMdast(childrenOf(node)),
+        children: inlineToMdast(trimBlockEnds(childrenOf(node))),
       } satisfies Heading;
     case n.blockquote:
       return {
@@ -391,12 +394,69 @@ function blockToMdast(node: PMNode): RootContent {
         children: childrenOf(node).map(blockToMdast) as TableCell[],
       } satisfies TableRow;
     case n.table_cell:
-      return { type: "tableCell", children: inlineToMdast(childrenOf(node)) } satisfies TableCell;
+      return {
+        type: "tableCell",
+        children: inlineToMdast(trimBlockEnds(childrenOf(node))),
+      } satisfies TableCell;
     case n.raw:
       return { type: "html", value: node.attrs.value as string } satisfies Html;
     default:
       return unsupported(node.type.name);
   }
+}
+
+/**
+ * The ASCII whitespace of CommonMark §2.1 — space, tab, line feed, line tabulation, form feed and
+ * carriage return — which is the set micromark strips at the two ends of a paragraph, heading or
+ * table cell. Written as the character class rather than as `\s` on purpose: `\s` also matches
+ * the Unicode spaces (U+00A0 and the U+2000 block) that a Markdown file *does* keep, so trimming
+ * with it would delete bytes `parse` preserves.
+ */
+const ASCII_WHITESPACE = /[\t\n\v\f\r ]+/;
+const LEADING_WHITESPACE = new RegExp(`^${ASCII_WHITESPACE.source}`);
+const TRAILING_WHITESPACE = new RegExp(`${ASCII_WHITESPACE.source}$`);
+
+/**
+ * Strip the whitespace `parse` never keeps, so that the tree leaving the editor is one some
+ * Markdown file parses to (DECISIONS #review-1-r0 F1, PRD §6 portability).
+ *
+ * micromark drops the leading and trailing ASCII whitespace of a paragraph, heading or table cell,
+ * but ProseMirror keeps every character typed into it, so a trailing space typed before Enter
+ * survives into `format`, whose `unsafe` table encodes a space before a line ending as `&#x20;` —
+ * bytes no Markdown file contains and no round trip is a fixed point of. The strip therefore
+ * belongs here, on the way out of the editor's tree, where the serializer, the copy button and the
+ * store all read the same document; not in the serializer's `unsafe` table, which is right about
+ * the trees it is given.
+ *
+ * Ownership rule for zero-width items: this trims the block's own two ends and nothing else — the
+ * leading whitespace of the block's **first** inline node and the trailing whitespace of its
+ * **last**, each only when that node is a text node outside `inline_code`. An atom (`image`,
+ * `hard_break`, `raw_inline`) or an inline-code run sitting at an end owns that end and stops the
+ * strip there, which is why a text run beside a `hard_break` keeps its spaces (a hard break
+ * already serialises to bytes that parse back) and inline code keeps its literal value. A node
+ * that is both first and last is trimmed at both ends. A run trimmed to nothing is dropped rather
+ * than kept as a zero-length text node, which ProseMirror rejects; dropping it does not promote
+ * its neighbour to the boundary, because both ends are chosen before either is trimmed. Blocks
+ * whose content is not inline — `code_block`, `raw`, and the opaque `html`/`yaml` bytes — never
+ * reach this function.
+ */
+function trimBlockEnds(nodes: readonly PMNode[]): PMNode[] {
+  if (nodes.length === 0) return [];
+  const last = nodes.length - 1;
+  const out: PMNode[] = [];
+  for (let i = 0; i < nodes.length; i += 1) {
+    const node = nodes[i];
+    if (!node.isText || schema.marks.inline_code.isInSet(node.marks) !== undefined) {
+      out.push(node);
+      continue;
+    }
+    let text = node.text as string;
+    if (i === 0) text = text.replace(LEADING_WHITESPACE, "");
+    if (i === last) text = text.replace(TRAILING_WHITESPACE, "");
+    if (text === "") continue;
+    out.push(text === node.text ? node : schema.text(text, node.marks));
+  }
+  return out;
 }
 
 function childrenOf(node: PMNode): PMNode[] {
