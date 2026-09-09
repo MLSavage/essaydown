@@ -65,6 +65,18 @@ export const MDAST_TYPES = [
 export const RAW_CLASS = "essaydown-raw";
 
 /**
+ * The attribute a `raw` node's opaque bytes travel in.
+ *
+ * The bytes are in the element *twice*, and deliberately: as the element's text, which is what the
+ * reader sees in the grey box, and as this attribute, which is what {@link nodes}' parse rule reads
+ * back. The text is never the source of truth on the way in — `raw` and `raw_inline` are leaf node
+ * types, so ProseMirror's DOM parser creates the node from the attribute and never descends into
+ * the element — which is what keeps a pasted raw node opaque: its displayed text is not re-parsed,
+ * so `<script>x</script>` in the box comes back as those characters and cannot become an element.
+ */
+export const RAW_VALUE_ATTR = "data-essaydown-raw";
+
+/**
  * The grey box of PRD §6.1: an `html` node is never rendered as HTML, it is shown as its own
  * source text in a read-only grey box. The styling is inline rather than in a stylesheet so the
  * box is grey wherever the schema is mounted, with no CSS file to import; `RAW_CLASS` is there
@@ -75,12 +87,83 @@ const RAW_STYLE =
   "padding:0.35em 0.5em;font-family:ui-monospace,monospace;white-space:pre-wrap;";
 
 function rawDOM(tag: string, node: PMNode): DOMOutputSpec {
+  const value = node.attrs.value as string;
   return [
     tag,
-    { class: RAW_CLASS, contenteditable: "false", style: RAW_STYLE },
-    node.attrs.value as string,
+    { class: RAW_CLASS, contenteditable: "false", style: RAW_STYLE, [RAW_VALUE_ATTR]: value },
+    value,
   ];
 }
+
+/** Read a `raw`/`raw_inline` node's attrs back out of the element {@link rawDOM} wrote. */
+function rawAttrs(dom: HTMLElement): { value: string } {
+  return { value: dom.getAttribute(RAW_VALUE_ATTR) ?? "" };
+}
+
+/**
+ * `""` is how a `data-` attribute spells "the schema's `null` default": an HTML attribute value is
+ * always a string, and `code_block`'s `lang`/`meta` are `string | null`. No Markdown fence has an
+ * empty info string — micromark gives `null`, never `""` — so nothing is collapsed by the pair.
+ */
+function emptyToNull(value: string | null): string | null {
+  return value === null || value === "" ? null : value;
+}
+
+/** `data-spread` is written only when the flag is true, so its absence is the schema's default. */
+function spreadOf(dom: HTMLElement): boolean {
+  return dom.getAttribute("data-spread") === "true";
+}
+
+const ALIGNMENTS: readonly string[] = ["left", "right", "center"];
+
+/**
+ * mdast's `align` is one entry per column, each `"left" | "right" | "center" | null`, so it is
+ * written as JSON: a comma-joined spelling could not tell `[]` from `[null]`, and `null` is a
+ * legitimate entry (a column with no alignment marker). Absent means the schema's `null` default.
+ *
+ * The value is read from whatever HTML was pasted, so it is validated rather than trusted: a
+ * string that is not JSON, or is not an array of the four admitted values, yields `null` — the
+ * same as an unaligned table — instead of throwing out of the paste or reaching `format`.
+ */
+function alignOf(dom: HTMLElement): Table["align"] {
+  const raw = dom.getAttribute("data-align");
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const ok = parsed.every((entry) => entry === null || ALIGNMENTS.includes(entry as string));
+  return ok ? (parsed as Table["align"]) : null;
+}
+
+/** `<ol start="…">`, guarded: pasted HTML can carry a value that is not a number. */
+function startOf(dom: HTMLElement): number | null {
+  const raw = dom.getAttribute("start");
+  if (raw === null) return null;
+  const start = Number.parseInt(raw, 10);
+  return Number.isNaN(start) ? null : start;
+}
+
+/**
+ * The three node types whose content is inline text, and the one whitespace decision they share.
+ *
+ * mdast writes a Markdown **soft line break** — a paragraph wrapped over two source lines — as a
+ * literal `\n` inside a `text` node, so it is a literal `\n` in the text node `toDOM` produces.
+ * ProseMirror's DOM parser normalises `\n` to a space unless the context is "preserve whitespace,
+ * fully", which is why a wrapped blockquote came back joined onto one line: the bytes were on the
+ * clipboard and the parser dropped them. `"full"` is the setting that keeps them.
+ *
+ * The cost, stated because it is real: whitespace in *foreign* HTML is no longer collapsed either,
+ * so a web page's `<p>` pasted with its source indentation keeps that indentation as soft breaks
+ * and runs of spaces — which render as one space in any Markdown reader, and whose leading and
+ * trailing runs `trimBlockEnds` already strips on the way out (task 1.13). Byte fidelity for the
+ * editor's own documents (PRD §6, invariant C) is worth that; silently rewriting the user's own
+ * line breaks is not.
+ */
+const INLINE_WHITESPACE = "full" as const;
 
 /**
  * Node specs. Declaration order is only significant for `doc` (the first entry is the top node);
@@ -91,9 +174,18 @@ function rawDOM(tag: string, node: PMNode): DOMOutputSpec {
  * They are the same "raw node" of the task text: same attrs, same grey box, both `atom` and
  * `contenteditable="false"`, so neither is editable in place.
  *
- * `parseDOM` is deliberately absent. This schema's round trip is mdast ↔ ProseMirror (below), not
- * DOM ↔ ProseMirror; nothing in Phase 1 parses a DOM into this schema, and the clipboard path that
- * would need it does not exist yet.
+ * **`parseDOM` is paired one-to-one with `toDOM`** (DECISIONS #review-1-r0 F2). The native
+ * clipboard path is not hypothetical: `prosemirror-view` serialises a copied slice with this
+ * schema's `DOMSerializer` and reads it back with its `DOMParser`, so a node with `toDOM` and no
+ * rule came back as its plain text and `# Heading` + `**bold**` pasted over itself as
+ * `Heading` + `bold`. Every rule below therefore inverts exactly the element its `toDOM` writes,
+ * and every attribute the node type carries is in that element: `heading.depth` in the tag name,
+ * `list.start` in `start`, `image`/`link` in `src`/`href`/`alt`/`title`, `code_block` in
+ * `data-lang`/`data-meta`, and the three the rendering has no HTML spelling for — `list.spread`,
+ * `list_item.spread` and `table.align` — in `data-spread` and `data-align`, each written only when
+ * it differs from the schema default so the elements a reader sees are unchanged. `doc` and `text`
+ * have neither `toDOM` nor `parseDOM`; `parse-dom.test.ts` enumerates the schema and fails if a
+ * future node type has one without the other.
  */
 export const nodes: Record<string, NodeSpec> = {
   doc: { content: "block+" },
@@ -102,6 +194,7 @@ export const nodes: Record<string, NodeSpec> = {
     group: "block",
     content: "inline*",
     toDOM: (): DOMOutputSpec => ["p", 0],
+    parseDOM: [{ tag: "p", preserveWhitespace: INLINE_WHITESPACE }],
   },
 
   heading: {
@@ -110,6 +203,12 @@ export const nodes: Record<string, NodeSpec> = {
     attrs: { depth: { default: 1 } },
     defining: true,
     toDOM: (node): DOMOutputSpec => [`h${node.attrs.depth as number}`, 0],
+    // One rule per depth: mdast's `depth` is 1–6 and the tag name is the only place it is written.
+    parseDOM: [1, 2, 3, 4, 5, 6].map((depth) => ({
+      tag: `h${depth}`,
+      attrs: { depth },
+      preserveWhitespace: INLINE_WHITESPACE,
+    })),
   },
 
   blockquote: {
@@ -117,6 +216,7 @@ export const nodes: Record<string, NodeSpec> = {
     content: "block+",
     defining: true,
     toDOM: (): DOMOutputSpec => ["blockquote", 0],
+    parseDOM: [{ tag: "blockquote" }],
   },
 
   code_block: {
@@ -134,11 +234,27 @@ export const nodes: Record<string, NodeSpec> = {
       },
       ["code", 0],
     ],
+    parseDOM: [
+      {
+        tag: "pre",
+        // The `<code>` `toDOM` nests inside the `<pre>`: taking it as the content element means
+        // the parser adds its *text* and never matches the element itself against the
+        // `inline_code` mark rule. `?? dom` is for the `<pre>` of some other editor, which has no
+        // inner `<code>`.
+        contentElement: (dom: HTMLElement): HTMLElement => dom.querySelector("code") ?? dom,
+        preserveWhitespace: "full" as const,
+        getAttrs: (dom: HTMLElement) => ({
+          lang: emptyToNull(dom.getAttribute("data-lang")),
+          meta: emptyToNull(dom.getAttribute("data-meta")),
+        }),
+      },
+    ],
   },
 
   thematic_break: {
     group: "block",
     toDOM: (): DOMOutputSpec => ["hr"],
+    parseDOM: [{ tag: "hr" }],
   },
 
   /**
@@ -149,17 +265,39 @@ export const nodes: Record<string, NodeSpec> = {
     group: "block",
     content: "list_item+",
     attrs: { ordered: { default: false }, start: { default: null }, spread: { default: false } },
-    toDOM: (node): DOMOutputSpec =>
-      node.attrs.ordered
-        ? ["ol", node.attrs.start === null ? {} : { start: node.attrs.start as number }, 0]
-        : ["ul", 0],
+    toDOM: (node): DOMOutputSpec => {
+      const ordered = node.attrs.ordered === true;
+      const attrs: Record<string, string | number> = {};
+      if (ordered && node.attrs.start !== null) attrs.start = node.attrs.start as number;
+      if (node.attrs.spread === true) attrs["data-spread"] = "true";
+      // A bullet list with nothing to say still renders as the bare `["ul", 0]` it always did;
+      // `ol` keeps its attribute object even when empty, which is what it always did too.
+      if (!ordered && Object.keys(attrs).length === 0) return ["ul", 0];
+      return [ordered ? "ol" : "ul", attrs, 0];
+    },
+    parseDOM: [
+      {
+        tag: "ol",
+        getAttrs: (dom: HTMLElement) => ({
+          ordered: true,
+          start: startOf(dom),
+          spread: spreadOf(dom),
+        }),
+      },
+      {
+        tag: "ul",
+        getAttrs: (dom: HTMLElement) => ({ ordered: false, start: null, spread: spreadOf(dom) }),
+      },
+    ],
   },
 
   list_item: {
     content: "block+",
     attrs: { spread: { default: false } },
     defining: true,
-    toDOM: (): DOMOutputSpec => ["li", 0],
+    toDOM: (node): DOMOutputSpec =>
+      node.attrs.spread === true ? ["li", { "data-spread": "true" }, 0] : ["li", 0],
+    parseDOM: [{ tag: "li", getAttrs: (dom: HTMLElement) => ({ spread: spreadOf(dom) }) }],
   },
 
   table: {
@@ -167,12 +305,19 @@ export const nodes: Record<string, NodeSpec> = {
     content: "table_row+",
     attrs: { align: { default: null } },
     isolating: true,
-    toDOM: (): DOMOutputSpec => ["table", ["tbody", 0]],
+    toDOM: (node): DOMOutputSpec =>
+      node.attrs.align === null
+        ? ["table", ["tbody", 0]]
+        : ["table", { "data-align": JSON.stringify(node.attrs.align) }, ["tbody", 0]],
+    // No `contentElement`: the `<tbody>` `toDOM` writes has no rule of its own, so the parser
+    // descends through it to the rows, and a `<thead>` in foreign HTML is reached the same way.
+    parseDOM: [{ tag: "table", getAttrs: (dom: HTMLElement) => ({ align: alignOf(dom) }) }],
   },
 
   table_row: {
     content: "table_cell+",
     toDOM: (): DOMOutputSpec => ["tr", 0],
+    parseDOM: [{ tag: "tr" }],
   },
 
   /**
@@ -183,6 +328,9 @@ export const nodes: Record<string, NodeSpec> = {
     content: "inline*",
     isolating: true,
     toDOM: (): DOMOutputSpec => ["td", 0],
+    // `td` only, because `toDOM` writes `td` only: mdast has no header/body distinction, so the
+    // schema has no second cell type for a `th` to invert to.
+    parseDOM: [{ tag: "td", preserveWhitespace: INLINE_WHITESPACE }],
   },
 
   raw: {
@@ -190,6 +338,7 @@ export const nodes: Record<string, NodeSpec> = {
     atom: true,
     attrs: { value: { default: "" } },
     toDOM: (node): DOMOutputSpec => rawDOM("div", node),
+    parseDOM: [{ tag: `div[${RAW_VALUE_ATTR}]`, getAttrs: rawAttrs }],
   },
 
   raw_inline: {
@@ -198,6 +347,7 @@ export const nodes: Record<string, NodeSpec> = {
     atom: true,
     attrs: { value: { default: "" } },
     toDOM: (node): DOMOutputSpec => rawDOM("span", node),
+    parseDOM: [{ tag: `span[${RAW_VALUE_ATTR}]`, getAttrs: rawAttrs }],
   },
 
   image: {
@@ -213,6 +363,16 @@ export const nodes: Record<string, NodeSpec> = {
         ...(node.attrs.title === null ? {} : { title: node.attrs.title as string }),
       },
     ],
+    parseDOM: [
+      {
+        tag: "img[src]",
+        getAttrs: (dom: HTMLElement) => ({
+          url: dom.getAttribute("src") ?? "",
+          alt: dom.getAttribute("alt"),
+          title: dom.getAttribute("title"),
+        }),
+      },
+    ],
   },
 
   hard_break: {
@@ -220,6 +380,7 @@ export const nodes: Record<string, NodeSpec> = {
     inline: true,
     selectable: false,
     toDOM: (): DOMOutputSpec => ["br"],
+    parseDOM: [{ tag: "br" }],
   },
 
   text: { group: "inline" },
@@ -251,11 +412,24 @@ export const marks: Record<string, MarkSpec> = {
       },
       0,
     ],
+    parseDOM: [
+      {
+        tag: "a[href]",
+        getAttrs: (dom: HTMLElement) => ({
+          url: dom.getAttribute("href") ?? "",
+          title: dom.getAttribute("title"),
+        }),
+      },
+    ],
   },
-  strong: { toDOM: (): DOMOutputSpec => ["strong", 0] },
-  emphasis: { toDOM: (): DOMOutputSpec => ["em", 0] },
-  delete: { toDOM: (): DOMOutputSpec => ["del", 0] },
-  inline_code: { code: true, toDOM: (): DOMOutputSpec => ["code", 0] },
+  strong: { toDOM: (): DOMOutputSpec => ["strong", 0], parseDOM: [{ tag: "strong" }] },
+  emphasis: { toDOM: (): DOMOutputSpec => ["em", 0], parseDOM: [{ tag: "em" }] },
+  delete: { toDOM: (): DOMOutputSpec => ["del", 0], parseDOM: [{ tag: "del" }] },
+  inline_code: {
+    code: true,
+    toDOM: (): DOMOutputSpec => ["code", 0],
+    parseDOM: [{ tag: "code" }],
+  },
 };
 
 /** The editor schema of PRD §6.1. Immutable, so one instance is shared by every document. */
