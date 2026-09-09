@@ -53,7 +53,12 @@ test.describe("store-level undo on /dev/editor", () => {
     await page.keyboard.press("ControlOrMeta+z");
     await expect.poll(() => markdown(page)).toBe("first\n");
 
-    await page.keyboard.press("ControlOrMeta+Shift+z");
+    // Capital Z: the shifted-letter route (`Mod-Z`, `store.ts`'s KEY_NAMES.redoShiftedLetter).
+    // Task 1.21 F9b (DECISIONS #review-1-r0): a lowercase `z` here is `key: "z"` with `shiftKey`
+    // set, an event no keyboard produces — Playwright's own `Shift+z` synthesis — and it happens
+    // to exercise the *other* binding (`Shift-Mod-z`, the keyCode fallback), so it never caught a
+    // deleted `Mod-Z` entry. `editor-toggle.spec.ts` keeps the lowercase spelling for that route.
+    await page.keyboard.press("ControlOrMeta+Shift+Z");
     await expect.poll(() => markdown(page)).toBe("first second\n");
   });
 });

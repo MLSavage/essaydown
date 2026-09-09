@@ -67,7 +67,10 @@ function cmCursor(page: Page): Promise<SourceCursor | null> {
       ch += node.textContent?.length ?? 0;
       node = walker.nextNode();
     }
-    return { text: line.textContent ?? "", ch: ch + (node === anchor ? selection.anchorOffset : 0) };
+    return {
+      text: line.textContent ?? "",
+      ch: ch + (node === anchor ? selection.anchorOffset : 0),
+    };
   });
 }
 
@@ -228,7 +231,39 @@ test.describe("source toggle on /dev/editor", () => {
     await page.keyboard.press("ControlOrMeta+z");
     await expect.poll(() => markdown(page)).toBe("");
 
+    // Lowercase z: the keyCode fallback route (`Shift-Mod-z`, `store.ts`'s
+    // KEY_NAMES.redoFromKeyCode). Task 1.21 F9b (DECISIONS #review-1-r0): Playwright synthesises
+    // `Shift+z` as `key: "z"` with `shiftKey` set, an event no keyboard produces for a letter key,
+    // but it is exactly the shape `w3c-keyname`'s keyCode fallback resolves to `Shift-Mod-z`, so
+    // this one case is kept, on purpose, to cover that route. `editor-undo.spec.ts` covers the
+    // shifted-letter route (`Mod-Z`) with the capital spelling instead.
     await page.keyboard.press("ControlOrMeta+Shift+z");
     await expect.poll(() => markdown(page)).toBe("word\n");
+  });
+
+  test("undo/redo chords reach the store while the source view is focused", async ({ page }) => {
+    // Task 1.21 F9a (DECISIONS #review-1-r0): every existing chord e2e presses undo/redo with the
+    // rendered (ProseMirror) view focused; `@codemirror/view`'s `keymap` facet resolves `Mod-` from
+    // its own module-level platform constant exactly as `prosemirror-keymap` does (1.verifyh), and
+    // nothing had ever dispatched a real keydown at the source view to prove `sourceUndoKeymap`
+    // reaches the store through it. Two bursts more than the 1 s coalescing window apart (PRD
+    // §6.5), so undo and redo each have one exact step to land on.
+    await openEditor(page);
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("source");
+    await page.locator(".cm-content").waitFor();
+
+    await page.keyboard.type("first", { delay: 10 });
+    await expect.poll(() => markdown(page)).toBe("first\n");
+
+    await page.waitForTimeout(1_500);
+    await page.keyboard.type(" second", { delay: 10 });
+    await expect.poll(() => markdown(page)).toBe("first second\n");
+
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect.poll(() => markdown(page)).toBe("first\n");
+
+    await page.keyboard.press("ControlOrMeta+Shift+Z");
+    await expect.poll(() => markdown(page)).toBe("first second\n");
   });
 });

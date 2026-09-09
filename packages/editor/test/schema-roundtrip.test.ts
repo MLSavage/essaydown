@@ -45,18 +45,25 @@ describe("mdast → ProseMirror → mdast over the corpus", () => {
     expect(names.length).toBeGreaterThan(0);
   });
 
+  // Collects what the loop below actually ran over, so the coverage assertion after it is a claim
+  // about the loop's own execution, not `names.length === Object.keys(index).length` — which is
+  // `x === x` under a comment claiming it pins the loop, and stays green however many `it`s the
+  // loop registers (task 1.21 F9c, DECISIONS #review-1-r0).
+  const tripped: string[] = [];
+
   for (const name of names) {
     it(`${name} formats identically after the trip`, () => {
+      tripped.push(name);
       const root = parse(read(name));
       expect(format(trip(root))).toBe(format(root));
     });
   }
 
   it("asserts one round trip per fixture listed in the index", () => {
-    // The count is the index's own length, never a literal: this pins that the loop above ran
-    // over every entry, so deleting a fixture from the index fails here rather than silently
-    // shrinking the matrix.
-    expect(names.length).toBe(Object.keys(index).length);
+    // `tripped` is populated by the `it` bodies above as they run, so this only holds if every
+    // fixture the loop iterated actually reached its assertion — deleting a fixture from the loop
+    // (leaving the index unchanged) or skipping one of its `it`s fails here.
+    expect(tripped.sort()).toEqual(names);
   });
 });
 
