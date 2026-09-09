@@ -11,7 +11,6 @@ import {
   type Sidecar,
 } from "@essaydown/core";
 import { EditorState as CMState, type TransactionSpec } from "@codemirror/state";
-import { keydownHandler } from "prosemirror-keymap";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { mdastToPM, schema } from "../src/schema.js";
 import { createDocumentStore, type DocumentStore } from "../src/store.js";
@@ -26,7 +25,6 @@ import {
   sourceOffset,
   sourceToggleKeymap,
   toggleKeyBindings,
-  toggleKeymap,
   toggleMode,
   togglePlugins,
   type BoundSourceView,
@@ -172,9 +170,10 @@ describe("cursorMap: rendered -> source", () => {
   it("sends a position no node owns to the end of the node before it", () => {
     const { root } = pair("one\n\ntwo\n");
     // A blank line opened between the two paragraphs: ProseMirror has a block mdast has not.
-    const withBlank = EditorState.create({ doc: mdastToPM(root).doc })
-      .tr.insert(5, mdastToPM(parse("")).doc.child(0))
-      .doc;
+    const withBlank = EditorState.create({ doc: mdastToPM(root).doc }).tr.insert(
+      5,
+      mdastToPM(parse("")).doc.child(0),
+    ).doc;
     const map = cursorMap(root, withBlank);
     expect(map.toSource(6)).toEqual({ line: 1, ch: 3 });
   });
@@ -190,11 +189,13 @@ describe("cursorMap: rendered -> source", () => {
   });
 
   it("walks marks, blockquotes, lists and tables", () => {
-    const source = "> *em* **[a](u)** ~~x~~ `c`\n\n- one\n- two\n\n| a | b |\n| - | - |\n| c | d |\n";
+    const source =
+      "> *em* **[a](u)** ~~x~~ `c`\n\n- one\n- two\n\n| a | b |\n| - | - |\n| c | d |\n";
     const { root, doc } = pair(source);
     const map = cursorMap(root, doc);
     const text = formatWithMap(root).text;
-    const lineOf = (needle: string): number => text.slice(0, text.indexOf(needle)).split("\n").length;
+    const lineOf = (needle: string): number =>
+      text.slice(0, text.indexOf(needle)).split("\n").length;
 
     // Inside the emphasis run of the blockquote's only paragraph.
     expect(map.toSource(3).line).toBe(lineOf("*em*"));
@@ -206,7 +207,10 @@ describe("cursorMap: rendered -> source", () => {
     });
     expect(secondItem).toBeGreaterThan(0);
     // Inside the table's bottom-right cell.
-    const cell = { line: lineOf("| c | d |") + 0, ch: text.split("\n")[lineOf("| c | d |") - 1].indexOf("d") };
+    const cell = {
+      line: lineOf("| c | d |") + 0,
+      ch: text.split("\n")[lineOf("| c | d |") - 1].indexOf("d"),
+    };
     expect(map.toSource(map.toRendered(cell))).toEqual(cell);
   });
 });
@@ -352,7 +356,10 @@ describe("bindCodeMirror", () => {
 
   it("takes the coalescing key from its options", () => {
     const store = storeFor("");
-    const binding = bindCodeMirror(store, new FakeSourceView(), { coalesceKey: "other", now: () => 1 });
+    const binding = bindCodeMirror(store, new FakeSourceView(), {
+      coalesceKey: "other",
+      now: () => 1,
+    });
     binding.change("x\n");
     expect(store.getState().stack.openKey).toBe("other");
   });
@@ -391,26 +398,142 @@ describe("bindCodeMirror", () => {
   });
 });
 
-describe("the chord", () => {
-  it("Cmd/Ctrl+/ reaches a ProseMirror keymap", () => {
+/* ------------------------------------------------ the platform behind `Mod-` (task 1.11) --- */
+
+/** The modifier a keydown event carries; on any one platform exactly one of the two is `Mod-`. */
+type Modifier = "ctrlKey" | "metaKey";
+
+/**
+ * The two platforms `Mod-` resolves on, and which modifier each one means (PRD §6.5: Cmd on
+ * macOS, Ctrl elsewhere).
+ *
+ * `prosemirror-keymap` makes that choice once, in a module-level constant evaluated at import
+ * (`const mac = typeof navigator != "undefined" && /Mac|iP(hone|[oa]d)/.test(navigator.platform)`
+ * in its `dist/index.js`), and Node 22 fills `navigator.platform` in from the host OS. So a
+ * keymap test that fires a `ctrlKey` event and asserts it was handled is really asserting which
+ * runner it landed on: the chord test below was green here and on ubuntu-latest and
+ * windows-latest and red on macos-latest (1.verifyh, ci.yml run 34333160626; DECISIONS #020).
+ * The tests below name their platform, and assert the modifier that platform does *not* use is
+ * left alone.
+ */
+const PLATFORMS = [
+  { label: "a Mac platform", platform: "MacIntel", mod: "metaKey", other: "ctrlKey" },
+  { label: "a non-Mac platform", platform: "Linux x86_64", mod: "ctrlKey", other: "metaKey" },
+] as const satisfies readonly { label: string; platform: string; mod: Modifier; other: Modifier }[];
+
+/**
+ * A keydown event as `prosemirror-keymap` reads one, carrying exactly one of the two `Mod-`
+ * modifiers. A plain object, not a `KeyboardEvent`: the unit suite runs in Node, where the DOM
+ * constructor does not exist, and the library reads only these five fields. The two modifier
+ * shapes are written out rather than computed (`{ [modifier]: true }`) so that both routes are
+ * literally present in this file.
+ */
+function chordEvent(
+  modifier: Modifier,
+  init: { key: string; keyCode: number; shiftKey?: boolean },
+): KeyboardEvent {
+  const base = { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...init };
+  return (
+    modifier === "metaKey" ? { ...base, metaKey: true } : { ...base, ctrlKey: true }
+  ) as KeyboardEvent;
+}
+
+/**
+ * `prosemirror-keymap`, and `../src/toggle.js` on top of it, re-evaluated with
+ * `navigator.platform` forced to `platform`.
+ *
+ * Two isolations, because the two modules live in different loaders. Vitest hands `node_modules`
+ * to Node's own ESM loader, which `vi.resetModules()` does not reach — checked directly while
+ * writing this: `resetModules()` followed by `import("prosemirror-keymap")` returns the first
+ * evaluation's copy, so both platforms answer alike and every absence case passes vacuously. The
+ * library is therefore re-evaluated by importing its *resolved URL with a query string*: a new
+ * URL is a new Node module. `../src/toggle.js` is inlined source, which `vi.resetModules()` does
+ * reset, but its own `import { keymap } from "prosemirror-keymap"` would resolve straight back to
+ * the cached copy, so the freshly evaluated library is handed to it with `vi.doMock`.
+ *
+ * `/` is not a shifted letter and `w3c-keyname` reads its own platform constant only for a
+ * Meta+Shift event, so this chord's name is the same on both platforms and only the modifier
+ * differs. This container is Linux: a forced `navigator.platform` is a proxy, and the only proof
+ * for macOS is the three-OS CI gate, which this file cannot observe.
+ */
+async function keymapOn(
+  platform: string,
+): Promise<typeof import("prosemirror-keymap") & typeof import("../src/toggle.js")> {
+  const resolved = import.meta.resolve("prosemirror-keymap");
+  const url = `${resolved}?platform=${encodeURIComponent(platform)}`;
+  vi.stubGlobal("navigator", { platform });
+  let library: typeof import("prosemirror-keymap");
+  try {
+    library = (await import(/* @vite-ignore */ url)) as typeof import("prosemirror-keymap");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  vi.resetModules();
+  vi.doMock("prosemirror-keymap", () => library);
+  try {
+    return { ...library, ...(await import("../src/toggle.js")) };
+  } finally {
+    vi.doUnmock("prosemirror-keymap");
+  }
+}
+
+/** The view a `keydownHandler` reads: its state, and where to send a command's transaction. */
+function handlerView() {
+  const state = EditorState.create({ doc: pair("hi\n").doc });
+  return { state, dispatch: () => undefined } as never;
+}
+
+describe.each(PLATFORMS)("the chord on $label", ({ platform, mod, other }) => {
+  it("Cmd/Ctrl+/ reaches a ProseMirror keymap on this platform's own modifier", async () => {
+    const keymap = await keymapOn(platform);
     const toggle = vi.fn();
-    const state = EditorState.create({ doc: pair("hi\n").doc, plugins: togglePlugins(toggle) });
-    // A plain object, not a `KeyboardEvent`: the unit suite runs in Node, where the DOM
-    // constructor does not exist, and `prosemirror-keymap` reads only these five fields.
-    const event = {
-      key: "/",
-      keyCode: 191,
-      altKey: false,
-      ctrlKey: true,
-      metaKey: false,
-      shiftKey: false,
-    } as KeyboardEvent;
-    const handled = keydownHandler(toggleKeymap(toggle))(
-      { state, dispatch: () => undefined } as never,
-      event,
+    const handled = keymap.keydownHandler(keymap.toggleKeymap(toggle))(
+      handlerView(),
+      chordEvent(mod, { key: "/", keyCode: 191 }),
     );
     expect(handled).toBe(true);
     expect(toggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the chord alone when the event carries the other platform's modifier", async () => {
+    const keymap = await keymapOn(platform);
+    const toggle = vi.fn();
+    const handled = keymap.keydownHandler(keymap.toggleKeymap(toggle))(
+      handlerView(),
+      chordEvent(other, { key: "/", keyCode: 191 }),
+    );
+    expect(handled).toBe(false);
+    expect(toggle).not.toHaveBeenCalled();
+  });
+
+  it("is installed by togglePlugins, which answers this platform's own modifier", async () => {
+    const keymap = await keymapOn(platform);
+    const toggle = vi.fn();
+    const plugins = keymap.togglePlugins(toggle);
+    expect(plugins).toHaveLength(1);
+    const handle = plugins[0].props.handleKeyDown;
+    expect(handle).toBeTypeOf("function");
+    expect(
+      handle?.call(plugins[0], handlerView(), chordEvent(mod, { key: "/", keyCode: 191 })),
+    ).toBe(true);
+    expect(toggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves togglePlugins' chord alone under the other platform's modifier", async () => {
+    const keymap = await keymapOn(platform);
+    const toggle = vi.fn();
+    const plugins = keymap.togglePlugins(toggle);
+    const handle = plugins[0].props.handleKeyDown;
+    expect(
+      handle?.call(plugins[0], handlerView(), chordEvent(other, { key: "/", keyCode: 191 })),
+    ).toBe(false);
+    expect(toggle).not.toHaveBeenCalled();
+  });
+});
+
+describe("the chord", () => {
+  it("togglePlugins is one plugin a ProseMirror state accepts", () => {
+    const state = EditorState.create({ doc: pair("hi\n").doc, plugins: togglePlugins(vi.fn()) });
     expect(state.plugins).toHaveLength(1);
   });
 

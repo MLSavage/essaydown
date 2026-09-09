@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import type { Root } from "mdast";
 import { canRedo, canUndo, emptySidecar, format, parse, type Sidecar } from "@essaydown/core";
 import { EditorState, Selection, TextSelection, type Transaction } from "prosemirror-state";
-import { keydownHandler } from "prosemirror-keymap";
 import type { EditorView as PMEditorView } from "prosemirror-view";
 import { EditorState as CMState } from "@codemirror/state";
 import { editorPlugins } from "../src/input.js";
@@ -12,11 +11,8 @@ import {
   bindProseMirror,
   createDocumentStore,
   sourceUndoKeymap,
-  storePlugins,
   undoKeyBindings,
-  undoKeymap,
   type BoundView,
-  type DocumentStore,
 } from "../src/store.js";
 
 /**
@@ -259,59 +255,168 @@ function handlerView(): PMEditorView {
   return { state, dispatch: () => undefined } as unknown as PMEditorView;
 }
 
-describe("undoKeymap (rendered view)", () => {
-  function pressed(store: DocumentStore, event: KeyboardEvent): boolean {
-    return keydownHandler(undoKeymap(store))(handlerView(), event);
-  }
+/* ------------------------------------------------ the platform behind `Mod-` (task 1.11) --- */
 
-  function twoSteps(): DocumentStore {
-    const store = createDocumentStore(parse("a\n"), SIDECAR);
+/** The modifier a keydown event carries; on any one platform exactly one of the two is `Mod-`. */
+type Modifier = "ctrlKey" | "metaKey";
+
+/**
+ * The two platforms `Mod-` resolves on, and which modifier each one means (PRD §6.5: Cmd on
+ * macOS, Ctrl elsewhere).
+ *
+ * `prosemirror-keymap` makes that choice once, in a module-level constant evaluated at import
+ * (`const mac = typeof navigator != "undefined" && /Mac|iP(hone|[oa]d)/.test(navigator.platform)`
+ * in its `dist/index.js`), and Node 22 fills `navigator.platform` in from the host OS. So a
+ * keymap test that fires a `ctrlKey` event and asserts it was handled is really asserting which
+ * runner it landed on: these tests were green here and on ubuntu-latest and windows-latest and
+ * red on macos-latest (1.verifyh, ci.yml run 34333160626; DECISIONS #020). Every test below names
+ * its platform, and asserts the modifier that platform does *not* use is left alone.
+ */
+const PLATFORMS = [
+  { label: "a Mac platform", platform: "MacIntel", mod: "metaKey", other: "ctrlKey" },
+  { label: "a non-Mac platform", platform: "Linux x86_64", mod: "ctrlKey", other: "metaKey" },
+] as const satisfies readonly { label: string; platform: string; mod: Modifier; other: Modifier }[];
+
+/**
+ * A keydown event carrying exactly one of the two `Mod-` modifiers.
+ *
+ * The two shapes are written out rather than computed (`{ [modifier]: true }`) so that both
+ * routes are literally present in this file and a reader can see which events it fires.
+ */
+function chordEvent(
+  modifier: Modifier,
+  init: { key: string; keyCode: number; shiftKey?: boolean },
+): KeyboardEvent {
+  return modifier === "metaKey"
+    ? keyEvent({ ...init, metaKey: true })
+    : keyEvent({ ...init, ctrlKey: true });
+}
+
+/**
+ * `prosemirror-keymap`, and `../src/store.js` on top of it, re-evaluated with
+ * `navigator.platform` forced to `platform`.
+ *
+ * Two isolations, because the two modules live in different loaders. Vitest hands `node_modules`
+ * to Node's own ESM loader, which `vi.resetModules()` does not reach — checked directly while
+ * writing this: `resetModules()` followed by `import("prosemirror-keymap")` returns the first
+ * evaluation's copy, so both platforms answer alike and every absence case passes vacuously. The
+ * library is therefore re-evaluated by importing its *resolved URL with a query string*: a new
+ * URL is a new Node module. `../src/store.js` is inlined source, which `vi.resetModules()` does
+ * reset, but its own `import { keymap } from "prosemirror-keymap"` would resolve straight back to
+ * the cached copy, so the freshly evaluated library is handed to it with `vi.doMock`.
+ *
+ * What is *not* isolated, stated because it changes one input below: `w3c-keyname`, which
+ * `prosemirror-keymap` imports for `keyName`, keeps the host's own platform constant (a bare
+ * specifier inside an externalised package resolves to the same URL however this file asks for
+ * it). It reads that constant only for a Meta+Shift event, where a real Mac ignores
+ * `event.key` and re-derives the name from `keyCode`; so the `key: "Ω"` event below reaches
+ * `Mod-Z` on a real Mac and `Shift-Mod-z` here. Both names are bound to redo, so the assertion is
+ * the same on both routes. This container is Linux: a forced `navigator.platform` is a proxy, and
+ * the only proof for macOS is the three-OS CI gate, which this file cannot observe.
+ */
+async function keymapOn(
+  platform: string,
+): Promise<typeof import("prosemirror-keymap") & typeof import("../src/store.js")> {
+  const resolved = import.meta.resolve("prosemirror-keymap");
+  const url = `${resolved}?platform=${encodeURIComponent(platform)}`;
+  vi.stubGlobal("navigator", { platform });
+  let library: typeof import("prosemirror-keymap");
+  try {
+    library = (await import(/* @vite-ignore */ url)) as typeof import("prosemirror-keymap");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  vi.resetModules();
+  vi.doMock("prosemirror-keymap", () => library);
+  try {
+    return { ...library, ...(await import("../src/store.js")) };
+  } finally {
+    vi.doUnmock("prosemirror-keymap");
+  }
+}
+
+describe.each(PLATFORMS)("undoKeymap (rendered view) on $label", ({ platform, mod, other }) => {
+  /** A store two snapshots deep, with the chord wired to the keymap this platform resolves. */
+  async function twoSteps() {
+    const keymap = await keymapOn(platform);
+    const store = keymap.createDocumentStore(parse("a\n"), SIDECAR);
     store.getState().commit(parse("b\n"), SIDECAR);
-    return store;
+    return {
+      keymap,
+      store,
+      pressed: (event: KeyboardEvent): boolean =>
+        keymap.keydownHandler(keymap.undoKeymap(store))(handlerView(), event),
+      markdown: (): string => format(store.getState().document.root),
+    };
   }
 
-  it("undoes on Ctrl+z", () => {
-    const store = twoSteps();
-    expect(pressed(store, keyEvent({ key: "z", keyCode: 90, ctrlKey: true }))).toBe(true);
-    expect(format(store.getState().document.root)).toBe("a\n");
+  it("undoes on Mod-z, the platform's own modifier", async () => {
+    const { pressed, markdown } = await twoSteps();
+    expect(pressed(chordEvent(mod, { key: "z", keyCode: 90 }))).toBe(true);
+    expect(markdown()).toBe("a\n");
   });
 
-  it("redoes on the shifted-letter route, where the event's key is 'Z'", () => {
-    const store = twoSteps();
+  it("leaves Mod-z alone when the event carries the other platform's modifier", async () => {
+    const { pressed, markdown } = await twoSteps();
+    expect(pressed(chordEvent(other, { key: "z", keyCode: 90 }))).toBe(false);
+    expect(markdown()).toBe("b\n");
+  });
+
+  it("redoes on the shifted-letter route, where the event's key is 'Z'", async () => {
+    const { store, pressed, markdown } = await twoSteps();
     store.getState().undo();
-    expect(pressed(store, keyEvent({ key: "Z", keyCode: 90, ctrlKey: true, shiftKey: true }))).toBe(
-      true,
-    );
-    expect(format(store.getState().document.root)).toBe("b\n");
+    expect(pressed(chordEvent(mod, { key: "Z", keyCode: 90, shiftKey: true }))).toBe(true);
+    expect(markdown()).toBe("b\n");
   });
 
-  it("redoes on the keyCode route, where the event's key is not a letter", () => {
-    const store = twoSteps();
+  it("leaves the shifted-letter route alone under the other platform's modifier", async () => {
+    const { store, pressed, markdown } = await twoSteps();
+    store.getState().undo();
+    expect(pressed(chordEvent(other, { key: "Z", keyCode: 90, shiftKey: true }))).toBe(false);
+    expect(markdown()).toBe("a\n");
+  });
+
+  it("redoes on the keyCode route, where the event's key is not a letter", async () => {
+    const { store, pressed, markdown } = await twoSteps();
     store.getState().undo();
     // A layout whose shifted `z` is not `Z`: only `base[90]` can name the binding here.
-    expect(pressed(store, keyEvent({ key: "Ω", keyCode: 90, ctrlKey: true, shiftKey: true }))).toBe(
-      true,
-    );
-    expect(format(store.getState().document.root)).toBe("b\n");
+    expect(pressed(chordEvent(mod, { key: "Ω", keyCode: 90, shiftKey: true }))).toBe(true);
+    expect(markdown()).toBe("b\n");
   });
 
-  it("leaves an unmodified z alone", () => {
-    const store = twoSteps();
-    expect(pressed(store, keyEvent({ key: "z", keyCode: 90 }))).toBe(false);
-    expect(format(store.getState().document.root)).toBe("b\n");
+  it("leaves the keyCode route alone under the other platform's modifier", async () => {
+    const { store, pressed, markdown } = await twoSteps();
+    store.getState().undo();
+    expect(pressed(chordEvent(other, { key: "Ω", keyCode: 90, shiftKey: true }))).toBe(false);
+    expect(markdown()).toBe("a\n");
   });
 
-  it("is installed by storePlugins, ahead of the editing keymaps", () => {
-    const store = twoSteps();
-    const plugins = storePlugins(store);
+  it("leaves an unmodified z alone", async () => {
+    const { pressed, markdown } = await twoSteps();
+    expect(pressed(keyEvent({ key: "z", keyCode: 90 }))).toBe(false);
+    expect(markdown()).toBe("b\n");
+  });
+
+  it("is installed by storePlugins, ahead of the editing keymaps", async () => {
+    const { keymap, store, markdown } = await twoSteps();
+    const plugins = keymap.storePlugins(store);
     expect(plugins).toHaveLength(1);
     const handle = plugins[0].props.handleKeyDown;
     expect(handle).toBeTypeOf("function");
     const view = handlerView();
-    expect(handle?.call(plugins[0], view, keyEvent({ key: "z", keyCode: 90, ctrlKey: true }))).toBe(
-      true,
+    expect(handle?.call(plugins[0], view, chordEvent(mod, { key: "z", keyCode: 90 }))).toBe(true);
+    expect(markdown()).toBe("a\n");
+  });
+
+  it("leaves storePlugins' chord alone under the other platform's modifier", async () => {
+    const { keymap, store, markdown } = await twoSteps();
+    const plugins = keymap.storePlugins(store);
+    const handle = plugins[0].props.handleKeyDown;
+    const view = handlerView();
+    expect(handle?.call(plugins[0], view, chordEvent(other, { key: "z", keyCode: 90 }))).toBe(
+      false,
     );
-    expect(format(store.getState().document.root)).toBe("a\n");
+    expect(markdown()).toBe("b\n");
   });
 });
 
