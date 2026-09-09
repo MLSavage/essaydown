@@ -115,18 +115,18 @@ describe("formatWithMap: the shape of the map", () => {
     ]);
   });
 
-  it("gives a table's rows and cells the hull of the cells `markdown-table` aligned", () => {
+  it("gives a table's rows their whole line and its cells the content between the delimiters", () => {
     const { text, map } = formatWithMap(parse("| a | b |\n| - | - |\n| c | d |\n"));
     expect(text).toBe("| a | b |\n| - | - |\n| c | d |\n");
     expect(layout(map)).toEqual([
       "(root) root 1:1-4:1",
       "0 table 1:1-3:10",
-      "0.0 tableRow 1:3-1:8",
+      "0.0 tableRow 1:1-1:10",
       "0.0.0 tableCell 1:3-1:4",
       "0.0.0.0 text 1:3-1:4",
       "0.0.1 tableCell 1:7-1:8",
       "0.0.1.0 text 1:7-1:8",
-      "0.1 tableRow 3:3-3:8",
+      "0.1 tableRow 3:1-3:10",
       "0.1.0 tableCell 3:3-3:4",
       "0.1.0.0 text 3:3-3:4",
       "0.1.1 tableCell 3:7-3:8",
@@ -134,11 +134,12 @@ describe("formatWithMap: the shape of the map", () => {
     ]);
   });
 
-  it("reports an empty table cell as unresolved, and a filled one beside it as resolved", () => {
-    const { map } = formatWithMap(parse("| a | b |\n| - | - |\n|  | c |\n"));
-    expect(map.unresolved).toEqual(["0.1.0"]);
-    expect(map.ranges["0.1.0"]).toBeUndefined();
-    expect(map.ranges["0.1.1"]).toEqual({ startLine: 3, startCol: 7, endLine: 3, endCol: 8 });
+  it("resolves an empty table cell to a point, and a filled one beside it to its content", () => {
+    const { text, map } = formatWithMap(parse("| a | b |\n| - | - |\n|  | c |\n"));
+    expect(text).toBe("| a | b |\n| - | - |\n|   | c |\n");
+    expect(map.unresolved).toEqual([]);
+    expect(rangeOf(map, "0.1.0")).toEqual({ startLine: 3, startCol: 3, endLine: 3, endCol: 3 });
+    expect(rangeOf(map, "0.1.1")).toEqual({ startLine: 3, startCol: 7, endLine: 3, endCol: 8 });
   });
 
   it("keeps one range per node when a paragraph's siblings make the serializer look ahead", () => {
@@ -318,5 +319,204 @@ describe("formatWithMap: a node the serializer rewrote after emitting it", () =>
     expect(map.unresolved).toEqual(["0.1"]);
     expect(map.ranges["0.0"]).toEqual({ startLine: 1, startCol: 1, endLine: 1, endCol: 2 });
     expect(map.ranges["0.2"]).toEqual({ startLine: 1, startCol: 4, endLine: 1, endCol: 12 });
+  });
+});
+
+/* ---------------------------------------------------------------- the table grid (1.15) --- */
+
+/** A phrasing or table node built by hand, loose enough to hold the shapes below. */
+interface Built {
+  type: string;
+  value?: string;
+  children?: Built[];
+}
+
+const text = (value: string): Built => ({ type: "text", value });
+const cell = (...children: Built[]): Built => ({ type: "tableCell", children });
+const row = (...cells: Built[]): Built => ({ type: "tableRow", children: cells });
+
+/** A root holding one table of the given rows, built by hand. */
+function tableOf(...rows: Built[]): Root {
+  return {
+    type: "root",
+    children: [{ type: "table", align: null, children: rows }],
+  } as unknown as Root;
+}
+
+/** The 1-based columns of `line`'s unescaped `|`: the delimiters of one row. */
+function delimiterColumns(line: string): number[] {
+  const columns: number[] = [];
+  for (let index = 0; index < line.length; index++) {
+    if (line[index] === "|" && line[index - 1] !== "\\") columns.push(index + 1);
+  }
+  return columns;
+}
+
+/** Assert `range` is a point strictly between delimiter `cell` and delimiter `cell + 1`. */
+function expectPointInsideCell(text_: string, range: NodeRange, cellIndex: number): void {
+  expect(range.startLine).toBe(range.endLine);
+  expect(range.startCol).toBe(range.endCol);
+  const columns = delimiterColumns(text_.split("\n")[range.startLine - 1]);
+  expect(columns.length).toBeGreaterThan(cellIndex + 1);
+  expect(range.startCol).toBeGreaterThan(columns[cellIndex]);
+  expect(range.startCol).toBeLessThan(columns[cellIndex + 1]);
+}
+
+/** The reproduction of DECISIONS #review-1-r0 F3: what `input.ts`'s table rule builds. */
+const REPRODUCTION = "| a | b |\n| - | - |\n| | |\n";
+
+/**
+ * One test per guard of the fix, enumerated from the diff of `placeTableGrid` and its helpers
+ * rather than from the acceptance sentences (CLAUDE.md's rule). The guards, in source order:
+ * the line-count check, the delimiter-line skip, `cellSlices`' column-count check,
+ * `delimiterOffsets`' even-backslash rule, `contentSlice`'s all-padding branch, and
+ * `setPlacedSpan`'s widening to the descendant hull.
+ */
+describe("formatWithMap: the table grid, guard by guard (task 1.15)", () => {
+  it("guard 1: a table whose output is not one line per row plus the delimiter line keeps the hull", () => {
+    // Raw HTML is opaque, so a newline inside it reaches the output and the grid has more lines
+    // than rows. Under the grid the header row would be its whole line, 1:1-1:18.
+    const { text: out, map } = formatWithMap(
+      tableOf(
+        row(cell(text("a")), cell(text("b"))),
+        row(cell({ type: "html", value: "<br>\n<br>" }), cell(text("d"))),
+      ),
+    );
+    expect(out.split("\n")).toHaveLength(5);
+    expect(rangeOf(map, "0.0")).toEqual({ startLine: 1, startCol: 3, endLine: 1, endCol: 16 });
+    expect(rangeOf(map, "0.0.0")).toEqual(rangeOf(map, "0.0.0.0"));
+  });
+
+  it("guard 2: the delimiter line belongs to no row, so body row i is on line i + 1", () => {
+    const { text: out, map } = formatWithMap(parse("| a |\n| - |\n| b |\n| c |\n| d |\n"));
+    expect(out).toBe("| a |\n| - |\n| b |\n| c |\n| d |\n");
+    const rows = map.entries.filter((entry) => entry.node.type === "tableRow");
+    expect(rows.map((entry) => entry.startLine)).toEqual([1, 3, 4, 5]);
+    expect(rows.map((entry) => entry.path)).toEqual(["0.0", "0.1", "0.2", "0.3"]);
+  });
+
+  it("guard 3: a row line whose delimiters do not divide it into one slice per column keeps the hull", () => {
+    // The `|` inside the opaque HTML is a fifth delimiter on a two-column line, so that row falls
+    // back to the hull of its cells while the header row above it still takes its whole line.
+    const { text: out, map } = formatWithMap(
+      tableOf(
+        row(cell(text("a")), cell(text("b"))),
+        row(cell({ type: "html", value: '<a b="|">' }), cell(text("d"))),
+      ),
+    );
+    // Four delimiters on a two-column line, where the grid needs exactly three.
+    expect(delimiterColumns(out.split("\n")[2])).toHaveLength(4);
+    expect(rangeOf(map, "0.0")).toEqual({ startLine: 1, startCol: 1, endLine: 1, endCol: 18 });
+    expect(rangeOf(map, "0.1")).toEqual({ startLine: 3, startCol: 3, endLine: 3, endCol: 16 });
+    expect(rangeOf(map, "0.1.0")).toEqual(rangeOf(map, "0.1.0.0"));
+  });
+
+  it("guard 4: an escaped delimiter inside a cell is not a cell boundary", () => {
+    const { text: out, map } = formatWithMap(parse("| a | b |\n| - | - |\n| x \\| y |  |\n"));
+    expect(out).toBe("| a      | b |\n| ------ | - |\n| x \\| y |   |\n");
+    // The whole escaped run is one cell's content; the empty cell after it is the second, not the
+    // third, which is what a `\|` counted as a delimiter would have made it.
+    expect(rangeOf(map, "0.1.0")).toEqual({ startLine: 3, startCol: 3, endLine: 3, endCol: 9 });
+    expect(rangeOf(map, "0.1.1")).toEqual({ startLine: 3, startCol: 12, endLine: 3, endCol: 12 });
+    expect(map.ranges["0.1.2"]).toBeUndefined();
+  });
+
+  it("guard 5: a cell whose slice is all padding is the point where its first character would go", () => {
+    const { text: out, map } = formatWithMap(parse(REPRODUCTION));
+    expect(out).toBe("| a | b |\n| - | - |\n|   |   |\n");
+    expect(rangeOf(map, "0.1.0")).toEqual({ startLine: 3, startCol: 3, endLine: 3, endCol: 3 });
+    expect(delimiterColumns(out.split("\n")[2])[0] + 2).toBe(3);
+  });
+
+  it("guard 6: a cell's range is widened to cover a descendant the padding put outside it", () => {
+    // The cell's own content starts with a space, so `markdown-table` writes `|  c |` and the
+    // `text` node was placed on that space — one column left of the trimmed content slice.
+    const { text: out, map } = formatWithMap(
+      tableOf(row(cell(text("a")), cell(text("b"))), row(cell(text(" c")), cell(text("d")))),
+    );
+    expect(out).toBe("| a  | b |\n| -- | - |\n|  c | d |\n");
+    expect(rangeOf(map, "0.1.0.0")).toEqual({ startLine: 3, startCol: 3, endLine: 3, endCol: 5 });
+    expect(rangeOf(map, "0.1.0")).toEqual(rangeOf(map, "0.1.0.0"));
+  });
+});
+
+describe("formatWithMap: empty table cells (task 1.15)", () => {
+  const EMPTY_CELLS =
+    "| a | b | c |\n| - | - | - |\n|  | y | z |\n| x |  | z |\n| x | y |  |\n|  |  |  |\n";
+
+  it("places the first, the middle and the last empty cell of a row inside its own delimiters", () => {
+    const { text: out, map } = formatWithMap(parse(EMPTY_CELLS));
+    expect(out.split("\n")[2]).toBe("|   | y | z |");
+    expectPointInsideCell(out, rangeOf(map, "0.1.0"), 0);
+    expectPointInsideCell(out, rangeOf(map, "0.2.1"), 1);
+    expectPointInsideCell(out, rangeOf(map, "0.3.2"), 2);
+    expect(rangeOf(map, "0.1.0")).toEqual({ startLine: 3, startCol: 3, endLine: 3, endCol: 3 });
+    expect(rangeOf(map, "0.2.1")).toEqual({ startLine: 4, startCol: 7, endLine: 4, endCol: 7 });
+    expect(rangeOf(map, "0.3.2")).toEqual({ startLine: 5, startCol: 11, endLine: 5, endCol: 11 });
+  });
+
+  it("gives a wholly empty body row its whole line and each of its cells a point in it", () => {
+    const { text: out, map } = formatWithMap(parse(EMPTY_CELLS));
+    expect(out.split("\n")[5]).toBe("|   |   |   |");
+    expect(rangeOf(map, "0.4")).toEqual({ startLine: 6, startCol: 1, endLine: 6, endCol: 14 });
+    for (const column of [0, 1, 2]) {
+      const range = rangeOf(map, `0.4.${column}`);
+      expectPointInsideCell(out, range, column);
+      expect(rangeContains(rangeOf(map, "0.4"), range.startLine, range.startCol)).toBe(true);
+    }
+  });
+
+  it("places the cells of a table whose header cells are empty", () => {
+    const { text: out, map } = formatWithMap(parse("|  |  |\n| - | - |\n| a | b |\n"));
+    expect(out).toBe("|   |   |\n| - | - |\n| a | b |\n");
+    expect(map.unresolved).toEqual([]);
+    expectPointInsideCell(out, rangeOf(map, "0.0.0"), 0);
+    expectPointInsideCell(out, rangeOf(map, "0.0.1"), 1);
+    expect(rangeOf(map, "0.0")).toEqual({ startLine: 1, startCol: 1, endLine: 1, endCol: 10 });
+    expect(rangeOf(map, "0.1.0")).toEqual({ startLine: 3, startCol: 3, endLine: 3, endCol: 4 });
+  });
+
+  it("resolves every path of the reproduction table, the root and its subtree apart", () => {
+    const root = parse(REPRODUCTION);
+    const { map } = formatWithMap(root);
+    expect(map.unresolved).toEqual([]);
+    expect(Object.keys(map.ranges).sort()).toEqual(
+      ["", "0", "0.0", "0.0.0", "0.0.0.0", "0.0.1", "0.0.1.0", "0.1", "0.1.0", "0.1.1"].sort(),
+    );
+  });
+});
+
+describe("nodeAt over a table with empty cells (task 1.15)", () => {
+  const { text, map } = formatWithMap(parse(REPRODUCTION));
+  const lines = text.split("\n");
+
+  it("answers every column of every line of the table, and never with the root", () => {
+    const answered: string[] = [];
+    for (let line = 1; line < lines.length; line++) {
+      for (let column = 1; column <= lines[line - 1].length; column++) {
+        const hit = nodeAt(map, line, column);
+        expect(hit).not.toBeNull();
+        expect(hit?.path).not.toBe(ROOT_PATH);
+        expect(rangeContains(hit as NodeRange, line, column)).toBe(true);
+        answered.push(hit?.path as string);
+      }
+    }
+    expect(new Set(answered)).toEqual(
+      // A header cell and its `text` cover the same columns, and `nodeAt` answers with the
+      // deeper of the two; the two empty cells of row 2 are zero width and answer nothing.
+      new Set(["0", "0.0", "0.0.0.0", "0.0.1.0", "0.1"]),
+    );
+  });
+
+  it("answers the padding of the empty body row with the row, never with the zero-width cell", () => {
+    const empty = rangeOf(map, "0.1.0");
+    expect(rangeContains(empty, empty.startLine, empty.startCol)).toBe(false);
+    expect(nodeAt(map, empty.startLine, empty.startCol)?.path).toBe("0.1");
+  });
+
+  it("is null past the end of a line and outside the string", () => {
+    expect(nodeAt(map, 3, lines[2].length + 1)).toBeNull();
+    expect(nodeAt(map, lines.length, 1)).toBeNull();
+    expect(nodeAt(map, 0, 1)).toBeNull();
   });
 });

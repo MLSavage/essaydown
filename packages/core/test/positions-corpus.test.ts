@@ -4,8 +4,10 @@ import { describe, expect, it } from "vitest";
 import { format } from "../src/format.js";
 import { parse } from "../src/parse.js";
 import {
+  childPath,
   formatWithMap,
   nodeAt,
+  pathDepth,
   rangeContains,
   ROOT_PATH,
   type PositionMap,
@@ -44,6 +46,11 @@ function seededRandom(seed: number): () => number {
 interface Node {
   type: string;
   children?: Node[];
+}
+
+function walkNodes(node: Node, visit: (n: Node) => void): void {
+  visit(node);
+  for (const child of node.children ?? []) walkNodes(child, visit);
 }
 
 function countNodes(node: Node): number {
@@ -174,6 +181,67 @@ describe("formatWithMap over fixtures/markdown (task 1.2)", () => {
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  it("places every childless table cell of the corpus at a point inside its own delimiters", () => {
+    // What keeps the "maps every node of the tree" clause above honest for a cell with nothing
+    // in it: `mdast-util-gfm-table` dispatches no handler for it, so before task 1.15 it had no
+    // range at all and the assertion was vacuous for the whole corpus.
+    const placed: string[] = [];
+    for (const name of names) {
+      const { text, map } = formatWithMap(parse(sourceOf(name)));
+      const lines = text.split("\n");
+      for (const entry of map.entries) {
+        if (entry.node.type !== "tableCell") continue;
+        if ((entry.node.children as unknown[]).length > 0) continue;
+        placed.push(`${name} ${entry.path}`);
+        // A point, and strictly between the two `|` that delimit it on its line.
+        expect(entry.startLine).toBe(entry.endLine);
+        expect(entry.startCol).toBe(entry.endCol);
+        const line = lines[entry.startLine - 1];
+        expect(line.lastIndexOf("|", entry.startCol - 1)).toBeLessThan(entry.startCol - 1);
+        expect(line.indexOf("|", entry.startCol - 1)).toBeGreaterThanOrEqual(entry.startCol - 1);
+      }
+    }
+    expect(placed.length).toBeGreaterThan(0);
+    // The fixture task 1.15 added contributes all of its own empty cells, counted from its tree
+    // rather than written down here.
+    const fixture = "table-empty-cells.md";
+    let childless = 0;
+    walkNodes(parse(sourceOf(fixture)) as unknown as Node, (node) => {
+      if (node.type === "tableCell" && (node.children ?? []).length === 0) childless++;
+    });
+    expect(childless).toBeGreaterThan(0);
+    expect(placed.filter((entry) => entry.startsWith(`${fixture} `))).toHaveLength(childless);
+  });
+
+  it("resolves every path of table-empty-cells.md, and rejects the root and out-of-range ones", () => {
+    // The acceptance's presence/absence pair on the fixture task 1.15 added. Presence: the paths
+    // are enumerated from the tree, so a cell the map forgets is a missing key, not a smaller
+    // loop. Absence: the two things `nodeAt` must never answer, on this same fixture.
+    const { text, map } = formatWithMap(parse(sourceOf("table-empty-cells.md")));
+    const paths: string[] = [];
+    const collect = (node: Node, path: string): void => {
+      paths.push(path);
+      (node.children ?? []).forEach((child, index) => collect(child, childPath(path, index)));
+    };
+    collect(parse(sourceOf("table-empty-cells.md")) as unknown as Node, ROOT_PATH);
+    expect(paths.filter((path) => pathDepth(path) === 3)).not.toHaveLength(0);
+    expect(paths.filter((path) => map.ranges[path] === undefined)).toEqual([]);
+
+    const lines = text.split("\n");
+    for (let line = 1; line <= lines.length; line++)
+      for (let column = 1; column <= lines[line - 1].length; column++)
+        expect(nodeAt(map, line, column)?.path).not.toBe(ROOT_PATH);
+    // Out of range: before the first line, past the last, and the line terminator of the table's
+    // last line — the one column of a row's line that the half-open end leaves to no node. On an
+    // interior line that column is still inside the multi-line `table` range, so the assertion
+    // has to be made where the range ends.
+    const last = lines.length - 1;
+    expect(lines[last - 1]).not.toBe("");
+    expect(nodeAt(map, 0, 1)).toBeNull();
+    expect(nodeAt(map, lines.length + 1, 1)).toBeNull();
+    expect(nodeAt(map, last, lines[last - 1].length + 1)).toBeNull();
   });
 
   it.each(names)("%s: the map is a pure function of root, which is not mutated", (name) => {

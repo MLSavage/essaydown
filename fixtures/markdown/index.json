@@ -714,6 +714,18 @@
     "sectionCount": 0,
     "paragraphStartLines": []
   },
+  "table-empty-cells.md": {
+    "nodeTypes": [
+      "root",
+      "table",
+      "tableCell",
+      "tableRow",
+      "text"
+    ],
+    "blockCount": 6,
+    "sectionCount": 0,
+    "paragraphStartLines": []
+  },
   "table-escaped-pipes.md": {
     "nodeTypes": [
       "root",

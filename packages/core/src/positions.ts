@@ -96,11 +96,13 @@ interface Line {
  * the end of the previous sibling that produced output — so it is never returned by
  * {@link nodeAt}, and the character at that position belongs to whatever else covers it.
  *
- * Two nodes get their range from their children rather than from their own output. The root
- * spans the whole string, trailing newline included. `tableRow` and `tableCell` are never
- * dispatched by `mdast-util-gfm-table` (it serializes a table's cells into a matrix and lets
- * `markdown-table` align them), so each takes the hull of the descendants that were dispatched;
- * an empty cell, having none, is reported in `unresolved`.
+ * Some nodes get their range from something other than their own output. The root spans the whole
+ * string, trailing newline included. `tableRow` and `tableCell` are never dispatched by
+ * `mdast-util-gfm-table` (it serializes a table's cells into a matrix and lets `markdown-table`
+ * align them), so they are placed from the grid the serializer wrote — see
+ * {@link placeTableGrid}, which is also where the zero-width rule above applies to an empty cell.
+ * Any node still without a range after all that takes the hull of the descendants that were
+ * dispatched, and one with no dispatched descendant either is reported in `unresolved`.
  *
  * `formatWithMap(root).text` is `format(root)`, and the map is a pure function of `root`: the
  * tree is never mutated and nothing is carried between calls.
@@ -271,8 +273,150 @@ function placeChildren(emission: Emission, toAbsolute: OffsetMap, spans: Map<Nod
     const start = local(at);
     spans.set(child.node, { start, end: length === 0 ? start : local(at + length - 1) + 1 });
     cursor = at + length;
-    placeChildren(child, (offset) => local(at + offset), spans);
+    const inside: OffsetMap = (offset) => local(at + offset);
+    placeChildren(child, inside, spans);
+    // After the recursion, so the cells' own contents are already placed and a cell's explicit
+    // range can be widened to cover them.
+    if (child.node.type === "table") placeTableGrid(child.node, child.value, inside, spans);
   }
+}
+
+/**
+ * Place a table's rows and cells from the grid `markdown-table` wrote.
+ *
+ * `mdast-util-gfm-table` never dispatches `tableRow` or `tableCell` through `state.handle`: it
+ * collects each cell's phrasing content into a matrix and lets `markdown-table` align the whole
+ * grid at once. The only emissions inside a table are therefore the cells' *contents*, and a row
+ * or a cell with no content of its own — an empty cell, or the wholly empty body row the editor's
+ * table input rule creates — had no range at all. The layout says where they are: one line per
+ * row, a delimiter line under the header, and one `|` before, between and after the columns.
+ *
+ * **Ownership rule.** A row owns its whole line, both outer delimiters included. That line is
+ * partitioned by the delimiters into adjacent half-open slices `(delimiter, next delimiter)`, one
+ * per column of the widest row — the delimiters themselves belong to the row, not to either cell
+ * beside them. A cell owns its slice with `markdown-table`'s padding spaces removed from both
+ * ends. A cell whose whole slice is padding is empty and owns no character: like every other
+ * zero-width node here its range is empty, and it sits where the cell's first character would be
+ * written — one column past the single padding space that follows its opening delimiter, so two
+ * columns past the delimiter itself (or on the delimiter's own next column, for the degenerate
+ * slice with no room for the padding). Being zero width it is
+ * never returned by {@link nodeAt} — a cursor on those padding spaces is in the row — and it is
+ * what a caret inside that cell maps to when the source view opens (task 1.7's cursor map reads
+ * `ranges` by path, not by position).
+ *
+ * Nothing is placed from a grid that does not match the tree: a table whose output does not have
+ * exactly one line per row plus the delimiter line, and a row whose line the delimiters do not
+ * divide into one slice per column, both fall back to the hull of their dispatched descendants
+ * rather than being given a wrong range.
+ */
+function placeTableGrid(
+  table: Nodes,
+  value: string,
+  toAbsolute: OffsetMap,
+  spans: Map<Nodes, Span>,
+): void {
+  const rows = childrenOf(table);
+  const lines = splitLines(value);
+  if (lines.length !== rows.length + 1) return;
+  const columns = rows.reduce((most, row) => Math.max(most, childrenOf(row).length), 0);
+  rows.forEach((row, index) => {
+    // The delimiter line sits between the header row and the first body row and is no node's, so
+    // row 0 is line 0 and row `i > 0` is line `i + 1`.
+    const line = lines[index === 0 ? 0 : index + 1];
+    const slices = cellSlices(line.text, columns);
+    if (slices === null) return;
+    setPlacedSpan(
+      row,
+      { start: line.start, end: line.start + line.text.length },
+      toAbsolute,
+      spans,
+    );
+    childrenOf(row).forEach((cell, column) => {
+      const content = contentSlice(line.text, slices[column]);
+      const span = { start: line.start + content.start, end: line.start + content.end };
+      setPlacedSpan(cell, span, toAbsolute, spans);
+    });
+  });
+}
+
+/**
+ * Record `local`, a span of the string `toAbsolute` maps, as `node`'s span in the canonical
+ * string, widened to cover any descendant already placed outside it.
+ *
+ * The widening is what keeps the map's containment invariant true when the serializer padded a
+ * cell in a way the trim above does not predict — a cell whose content itself begins with a space
+ * is written `|  c |` and its `text` node was placed on the space, one column left of the content
+ * slice. The node's range must contain its children's, so the hull wins where they disagree.
+ */
+function setPlacedSpan(
+  node: Nodes,
+  local: Span,
+  toAbsolute: OffsetMap,
+  spans: Map<Nodes, Span>,
+): void {
+  const start = toAbsolute(local.start);
+  const placed: Span =
+    local.end === local.start
+      ? { start, end: start }
+      : { start, end: toAbsolute(local.end - 1) + 1 };
+  const hull = descendantHull(node, spans);
+  spans.set(node, hull === undefined ? placed : union(placed, hull));
+}
+
+/** The hull of the spans already recorded for `node`'s descendants, or `undefined` for none. */
+function descendantHull(node: Nodes, spans: Map<Nodes, Span>): Span | undefined {
+  let hull: Span | undefined;
+  for (const child of childrenOf(node)) {
+    const span = spans.get(child) ?? descendantHull(child, spans);
+    if (span) hull = hull ? union(hull, span) : span;
+  }
+  return hull;
+}
+
+/**
+ * One row line's `columns` cell slices, or `null` when its delimiters do not describe that many
+ * columns — a cell holding raw HTML with a `|` in it puts a delimiter the grid does not own on
+ * the line, and a wrong grid is worse than no grid.
+ */
+function cellSlices(line: string, columns: number): Span[] | null {
+  const delimiters = delimiterOffsets(line);
+  if (delimiters.length !== columns + 1) return null;
+  return delimiters
+    .slice(0, -1)
+    .map((start, index) => ({ start: start + 1, end: delimiters[index + 1] }));
+}
+
+/**
+ * The offsets of the cell delimiters of one row line: every `|` that is not escaped.
+ * `mdast-util-gfm-table` writes a `|` inside a cell as `\|` and a literal backslash as `\\`, so a
+ * `|` is a delimiter exactly when the run of backslashes immediately before it has even length.
+ */
+function delimiterOffsets(line: string): number[] {
+  const offsets: number[] = [];
+  for (let index = 0; index < line.length; index++) {
+    if (line[index] !== "|") continue;
+    let backslashes = 0;
+    while (index - backslashes - 1 >= 0 && line[index - backslashes - 1] === "\\") backslashes++;
+    if (backslashes % 2 === 0) offsets.push(index);
+  }
+  return offsets;
+}
+
+/** The padding character `markdown-table` puts around a cell's content. */
+const PADDING = " ";
+
+/**
+ * `slice` without the padding `markdown-table` put around the cell's content, and the zero-width
+ * point one column after the opening delimiter when the slice is all padding (an empty cell).
+ */
+function contentSlice(line: string, slice: Span): Span {
+  let start = slice.start;
+  let end = slice.end;
+  while (start < end && line[start] === PADDING) start++;
+  while (end > start && line[end - 1] === PADDING) end--;
+  if (start < end) return { start, end };
+  const point = Math.min(slice.start + 1, slice.end);
+  return { start: point, end: point };
 }
 
 /**
