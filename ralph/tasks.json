@@ -1088,13 +1088,250 @@
   "reviewSetDescription": "Review set for Phase 1. Phase checks: typing latency p95 with 10k words on /dev/editor (< 16 ms or a follow-up task is inserted at reconciliation)."
  },
  {
+  "id": "1.13",
+  "model": "opus",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F1 — Claude finding 1 blocker, Sol finding 6 required, Grok finding 1; Michael's 1.9 record in #002-outline-feel, escalated by him to a PRD §6 portability defect): a paragraph or heading edited in the rendered view keeps ProseMirror's text verbatim (`leafToMdast`/`pmToMdast`, packages/editor/src/schema.ts), so an ordinary trailing space before Enter reaches `format`, whose `unsafe` rule escapes a space before a line ending as `&#x20;` — `hello ` + Enter + `world` → `hello&#x20;\\n\\nworld\\n`; `- one ` + Enter → `- one&#x20;\\n`. `parse` already discards these spaces (micromark strips the leading and trailing whitespace of a paragraph line), so the editor hands the serializer a tree no Markdown file parses to, and the copied Markdown is not a `format(parse(x))` fixed point. Fix in `pmToMdast` (schema.ts), so every consumer of the editor's tree agrees with `parse` — not in the serializer's unsafe table (Grok: do not weaken it) and not at the DevEditor copy button: strip exactly the whitespace micromark strips at the boundary of a paragraph, heading or table cell — leading ASCII whitespace of the block's first text run and trailing whitespace of its last — with the ownership rule stated once in the doc comment. Untouched: a text run adjacent to a `break` node (a hard break already serialises correctly), inline code, code blocks, and the opaque `raw`/`html`/`yaml` bytes; a run that becomes empty is dropped, not kept as an empty text node. Then close the blind spot Claude's risk 1 names: every round-trip leg today is seeded from `parse(fixture)`, so no test can reach a tree only the editor builds. Add one corpus leg seeded from the editor's own output — for every fixture in fixtures/markdown/index.json, build `mdastToPM(parse(x))`, apply a typing-shaped ProseMirror transaction that appends a space to the end of every paragraph and heading, and assert that `format(pmToMdast(doc))` is a fixed point of parse∘format (`format(parse(out)) === out`) and equals `format(parse(x))`; the same leg on the unchanged doc is the absence case. Title the leg `editor fixed point` in the test name. Playwright on /dev/editor: type `X`, space, Enter, `Y` — the markdown pane reads `X\\n\\nY\\n`; the absence case (no space) reads the same; a list item typed with a trailing space serialises without the entity; a heading typed with a trailing space likewise. One test per guard, enumerated from the diff (leading strip, trailing strip, break-adjacent untouched, inline code untouched, raw untouched, empty run dropped, table cell), the journal naming the test that discharges each. Scope: packages/editor/src/schema.ts, packages/editor/test/**, e2e/web/*.spec.ts, docs/lessons.md, the journal. Zero new dependencies (PRD §4).",
+  "acceptance": "The seven guards each have a named unit test in packages/editor/test/ and the journal lists them; the `editor fixed point` corpus leg is green for every fixture listed in fixtures/markdown/index.json (count from the index, never a literal) and is asserted to be able to fail (one hand-built doc with a trailing space and the strip disabled by a test-local shim, or an equivalent, goes red — recorded in the journal, not committed as a skip); the existing schema-roundtrip and roundtrip suites are unchanged and green; Playwright on /dev/editor: the presence case types `X`, space, Enter, `Y` and the markdown pane is exactly `X\\n\\nY\\n`, the absence case is the same string, the list and heading cases contain no `&#x20;`; `grep -rn '&#x20;' e2e/web packages/editor/test` names only assertions of absence; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only packages/editor/src/schema.ts, packages/editor/test/**, e2e/web/**, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.10.r0d"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.14",
+  "model": "opus",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F2 — Sol finding 1 required): the ProseMirror schema in packages/editor/src/schema.ts defines `toDOM` for every node and mark and no `parseDOM` rule (the comment near line 94 says the native clipboard path is unused; it is not), so the editor's own copy → paste in the rendered view reconstructs the pasted HTML as plain text: `# Heading\\n\\n**bold**\\n` selected, copied and pasted over itself becomes `Heading\\n\\nbold\\n` (Sol's `/report/paste.cjs`, reproduced in docs/reviews/phase-1-r0-sol.md). Add `parseDOM` rules paired one-to-one with each `toDOM` — headings by level, paragraph, emphasis, strong, delete/strikethrough, link (href, title), image (src, alt, title), inline code, code block (language), blockquote, ordered list (start) and bullet list, list item, table/row/cell (alignment), thematic break, hard break — preserving every attribute the schema carries; the opaque `raw` atom round-trips by its stored value (a `data-` attribute or equivalent on its `toDOM`, read back by its rule) and its displayed text is never re-parsed as markup, so a pasted raw node cannot become executable HTML. Unit: a test that enumerates `schema.nodes` and `schema.marks` and asserts every one with a `toDOM` has a `parseDOM`, so a future node cannot be added without its rule; if a DOM is available in vitest without a new dependency, the corpus leg `DOMSerializer` → `DOMParser` → `eq` over every fixture in index.json, else the journal says so and the Playwright corpus leg below carries it. Playwright on /dev/editor: for every fixture in fixtures/markdown/index.json (loaded through the dev bar, count from the index), select all, copy, paste over the selection, and assert the markdown pane is byte-identical before and after; plus explicit cases for a heading, strong/emphasis, a nested list, a table, a fenced code block and a raw HTML block, and one case pasting plain text from the clipboard (set with the Playwright clipboard API) into a paragraph that stays plain. Scope: packages/editor/src/schema.ts, packages/editor/test/**, e2e/web/**, docs/lessons.md, the journal. Zero new dependencies (PRD §4).",
+  "acceptance": "The enumeration test is present and green; the Playwright self copy/paste corpus leg is green for every fixture in index.json and byte-identical before and after (count from the index, never a literal); the six explicit structure cases and the plain-text case are green; the raw-node case asserts the pasted document contains the same `raw` node value and that no element from its text was created in the DOM; the existing 1.1 schema round-trip suite is unchanged and green; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only packages/editor/src/schema.ts, packages/editor/test/**, e2e/web/**, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.13"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.15",
+  "model": "opus",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F3 — Sol finding 4 required): `formatWithMap` in packages/core/src/positions.ts derives the ranges of nodes the serializer does not dispatch (table rows and cells) from their descendants' spans, so an empty cell or a wholly empty row has no range, and `nodeAt`/the map cannot resolve paths `0.1`, `0.1.0`, `0.1.1` of `| a | b |\\n| - | - |\\n| | |\\n` — the shape the 1.3 table input rule itself creates (`packages/editor/src/input.ts:179`), so a cursor toggle from the new empty body row has no mapping. Give every row and cell an explicit range from the table layout the serializer writes (delimiter positions), so an empty cell maps to its zero-width point between its delimiters; state the ownership rule for the zero-width cell once in the doc comment (CLAUDE.md's half-open-slice rule) and test the first, middle and last empty cells, a wholly empty body row, a table whose header cells are empty, and the cursor toggle from the newly created empty body row on /dev/editor (Playwright). Add one LF fixture with empty cells to fixtures/markdown/ with its index.json entry (paragraphStartLines and nodeTypes filled the way 0.22 did), so the positions-corpus test's \"every node has a range\" assertion covers cells with no descendants; the map stays pure (no DOM). Scope: packages/core/src/positions.ts, packages/core/test/**, fixtures/markdown/**, e2e/web/**, docs/lessons.md, the journal. Zero new dependencies (PRD §4).",
+  "acceptance": "Each of the six guards has a named unit test and the journal lists them; `nodeAt` resolves every path of the reproduction table and the new fixture (presence) and still rejects the root and out-of-range paths (absence); the positions-corpus suite is green for every fixture in index.json including the new one; invariants A/B/C green for the new fixture; Playwright: on /dev/editor create a table with the input rule, place the caret in the empty body cell, toggle to source, and the source cursor sits inside that cell's delimiters (line and ch asserted from the canonical text written in the test); `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only packages/core/src/positions.ts, packages/core/test/**, fixtures/markdown/**, e2e/web/**, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.14"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.16",
+  "model": "opus",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F4 — Sol findings 2 and 3 required; one class: source ↔ rendered cursor coordinates): (a) `apps/desktop/src/dev/DevEditor.tsx:92` passes the raw CodeMirror (line, ch) to the cursor map built from the canonical serialization, so a source edit that changes the canonical line layout moves the next rendered edit — `alpha\\n\\n\\n\\nbeta` with the cursor before `beta`, toggle, type `X` gives `alpha\\n\\nbetaX\\n`, expected `alpha\\n\\nXbeta\\n`; (b) `packages/editor/src/toggle.ts:233` maps character offsets ignoring escapes and continuation prefixes, so even canonical source lands the cursor on the wrong character — in `a\\*b c` the PM position before `b` maps to source ch 2 (before `*`) instead of ch 3; in `> alpha\\n> beta gamma` the position before `beta` maps to line 2 ch 0 instead of ch 2. Fix: translate the live source cursor through the parsed node and its offset within that node into canonical coordinates before consulting the map (parse the live buffer and map through its own node/offset), and carry the serializer's per-character transformations (escapes, continuation prefixes, marker widths, indentation) in both directions, rather than assuming one source character per text character — if the formatter must export an offset table for this, add it to packages/core/src/positions.ts as a pure function and say so in the journal. Tests assert independently derived locations (Sol's lesson: a round trip through two mutually wrong functions, or an in-bounds check, proves nothing): extra blank lines, a Setext heading (`Alpha\\n=====`) and a `* item` list spelling, an escaped character, a blockquote prefix, a nested-list prefix, an emphasis marker, each with the expected (line, ch) and PM position written by hand from the canonical text; the translation creates no undo entry (the existing toggle/undo test stays green). Playwright: Sol's two reproductions as specs, asserting the exact markdown pane after the typed `X`. Scope: packages/editor/src/toggle.ts, apps/desktop/src/dev/DevEditor.tsx, packages/editor/test/**, e2e/web/**, packages/core/src/positions.ts and packages/core/test/** only for the exported offset table, docs/lessons.md, the journal. Zero new dependencies (PRD §4).",
+  "acceptance": "Each of the seven hand-derived cases has a named unit test and the journal lists them with the expected coordinates; both Playwright reproductions are green with the exact expected markdown; the 200-seeded-positions toggle test of 1.7 and the toggle/undo test stay green; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only the files named in the scope, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.15"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.17",
+  "model": "opus",
+  "description": "Phase 1 follow-up required by task 1.10's phase check (\"typing latency p95 with 10k words on /dev/editor: < 16 ms or a follow-up task is inserted at reconciliation\"; DECISIONS #review-1-r0 F5 — Claude findings 2 and 7, Sol finding 5 required). Measurements at r0, all Linux headless Chromium, Vite dev build: rendered view p95 15.0 / 13.9 / 14.1 ms at 10k words and 26.3 ms at 20k (Claude: keydown → first mutation of the markdown pane, both timestamps in-page, 120 presses); 38.6 / 39.5 ms (Sol: beforeinput → the next timer task after input and observer work); source view p95 40.6 ms at 10k words (Claude, same harness as its rendered run). The two protocols differ by 2.5× on the same tree, so the number is protocol-bound; the cost is not: every rendered doc-changing transaction runs `pmToMdast` over the whole document (`packages/editor/src/store.ts:167`), the /dev/editor snapshot re-runs `format(root)` on every `useSyncExternalStore` read (`apps/desktop/src/dev/DevEditor.tsx:72`), and every source-view keystroke re-parses the whole buffer (`packages/editor/src/toggle.ts:479`; `parse` is 37 ms at 10k words against `format` 0.9 ms). Three changes. (1) Cache the formatted snapshot by root identity so a read whose root is unchanged returns the same string instance without serialising. (2) Commit the source buffer on the coalescing boundary, not per update: schedule `parse` + commit on the `SOURCE_KEY` burst window (or an idle callback bounded by it), the CodeMirror buffer staying authoritative for what the user sees in between, the binding's `shownText` echo guard unchanged, undo grouping unchanged, and a toggle or an unmount flushing the pending commit first so nothing typed is lost (a test for the flush). (3) One Playwright spec, e2e/web/latency.spec.ts, whose doc comment states the protocol: a document generated in-test at 1k and 10k words of agent-written prose (never a personal text), the caret in a mid-document paragraph, N single-character presses after W warm-ups, latency = keydown timestamp to the first mutation of the markdown pane, both in-page; p50/p95 printed to the test output and attached as Playwright annotations, for the rendered view and for the source view. The assertion is a relationship, never a magnitude from one run (CLAUDE.md): p95 at 10k words is within a stated factor of p95 at 1k words, the factor and its reason in the spec's doc comment; the absolute numbers are evidence for the 1.10.r1 reviewers, who judge the 16 ms criterion from them under this protocol — never a CI pass condition on shared runners. Incremental `pmToMdast` is not built here: append the option with the r0 numbers to docs/V1.1-BACKLOG.md. Scope: packages/editor/src/store.ts, packages/editor/src/toggle.ts, apps/desktop/src/dev/DevEditor.tsx, packages/editor/test/**, e2e/web/**, docs/V1.1-BACKLOG.md, docs/lessons.md, the journal. Zero new dependencies (PRD §4).",
+  "acceptance": "Unit tests per guard, named in the journal: an unchanged root yields the identical snapshot string instance and a changed root a new one; N rapid source updates inside the burst window produce one store commit and one undo entry, and an update after the window a second; a toggle and an unmount flush the pending source commit; the existing 1.6/1.7 undo and toggle suites stay green. The latency spec runs inside the ordinary `playwright test` invocation (so 1.verify.r1h runs it on all three runners) and is green; the journal records p50/p95 at 1k and 10k words for the rendered and the source view, before and after the changes, measured in this container under the spec's protocol, with the honest statement that they are one machine's numbers; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only the scope files, docs/V1.1-BACKLOG.md, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.16"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.18",
+  "model": "sonnet",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F6 — Claude finding 3, Grok risk 3; discharges backlog lines #review-0-r2 H2 and H9, whose revisit trigger \"the Phase 1 task that first calls `writeFrontMatter` from the shell\" fired at task 1.8 without anyone looking): `apps/desktop/src/dev/outline-document.ts:41` writes the Outline topic into `question:` through `writeFrontMatter`, and `needsQuoting` in packages/core/src/sidecar.ts ignores YAML core-schema implicit resolution, so the topics `no`, `true`, `null`, `~`, `123`, `1.5`, `.inf`, `2026-01-01`, `off`, `y` are written bare and a third-party YAML reader (Typora, Obsidian, pandoc) takes them back typed. Add the core-schema implicit resolvers as one clause of `needsQuoting` — booleans `true|false|yes|no|on|off|y|n`, `null|~` and the empty string, integers including `0x`/`0o` forms and signs, floats including exponent forms and `.inf`/`.nan`, ISO dates and timestamps, case-insensitive where YAML 1.1/1.2 are — quoting such values with the grammar task 0.15 defined; extend the value table at packages/core/test/front-matter-boundary.test.ts:231 by one row per resolver (presence: quoted and read back as the same string) and rows that must stay bare (`hello`, `1a`, `no way`, `2026-01-01 essay`), and assert `ok: true` per row before the invariant-A check (H9: the parameterized test near line 203 returns early on `ok: false`, so a regression from escaped to refused stays green today). Playwright outline-produce.spec.ts: a topic `true` produces a quoted `question:` value and the rendered hint shows the string `true`. Scope: packages/core/src/sidecar.ts, packages/core/test/**, e2e/web/outline-produce.spec.ts, docs/lessons.md, the journal. Zero new dependencies (PRD §4); no YAML library.",
+  "acceptance": "Every resolver class has a presence row and the bare set an absence row in the value table; each row asserts `ok: true` and invariant A (the written file re-reads to the same value and re-serialises byte-identically); the existing 0.15 grammar tests are unchanged and green; the corpus identity test for `writeFrontMatter` stays green; the Playwright case is green; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only packages/core/src/sidecar.ts, packages/core/test/**, e2e/web/outline-produce.spec.ts, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.17"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.19",
+  "model": "sonnet",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F7 — Grok finding 2, Claude finding 4; Michael's decision recorded there): packages/editor/package.json declares `codemirror` `^6.0.2`, the kitchen-sink meta-package, which nothing imports (`grep -rn 'from \"codemirror\"' packages apps` is empty) and which pulls `@codemirror/commands@6.11.0` — CodeMirror's `history` — into pnpm-lock.yaml. That falsifies two comments that document a safety property: `packages/editor/src/source.ts:30-32` (\"`@codemirror/commands` is not a dependency of this package … the surest way to keep it that way is to never import the package it lives in\") and `packages/editor/src/store.ts:40-42` (the same for both editors). The property they protect is PRD §4/§6.5's single snapshot-based undo stack: a later task could import `history` from a package that is legitimately installed and break Cmd/Ctrl+Z with a green suite. Remove the `codemirror` entry; refresh pnpm-lock.yaml by removal only (`pnpm install`, then `git diff pnpm-lock.yaml` shows removed lines only — no addition, no version change of any other package); confirm `@codemirror/commands` is no longer reachable from `@essaydown/editor` (`pnpm why @codemirror/commands` and the lockfile's `packages/editor` importer block; record both in the journal) — if it is still reachable through another declared package, name it in the journal and stop without removing a second package (the reconciliation decides). Then re-verify both comments against the lockfile rather than assuming they became true again: reword each to state what is actually installed, and add one vitest test that reads packages/editor/package.json and asserts `codemirror`, `@codemirror/commands` and `prosemirror-history` are absent from every dependency block, and reads pnpm-lock.yaml's `packages/editor` importer and asserts `@codemirror/commands` is not resolved for it — so the property has a test rather than a comment. The direct `@lezer/highlight` and `@lezer/markdown` entries stay: source.ts imports them by name, which is the correct declaration (relying on them arriving through `@codemirror/lang-markdown` would be a phantom dependency), and the reconciliation commit ratifies them in PRD §4. Scope: packages/editor/package.json, pnpm-lock.yaml, the two comments, one new test file under packages/editor/test/, docs/lessons.md, the journal. No dependency added (PRD §4).",
+  "acceptance": "`git diff --stat` against the branch base touches only packages/editor/package.json (one removed line), pnpm-lock.yaml (removed lines only: `git diff pnpm-lock.yaml | grep -c '^+[^+]'` is 0, recorded in the journal), packages/editor/src/source.ts and packages/editor/src/store.ts (comment lines only), one new test file, docs/lessons.md and docs/progress/journal-main.md; `pnpm why @codemirror/commands` output in the journal shows no path from @essaydown/editor; the new test is green and goes red when a scratch copy of the manifest re-adds `codemirror` (recorded, reverted before the commit); every e2e/web spec green in the container (the source view is unchanged); `pnpm lint && pnpm test && cargo test` green.",
+  "dependencies": [
+   "1.18"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.20",
+  "model": "sonnet",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F8 — Michael's rule: a dependency rule caught only at review is a rule with no enforcement point; this is the fourth package to reach a review before anyone asked — `zod` at #review-0-r0 Grok 8, then `@lezer/highlight`, `@lezer/markdown` and `codemirror` at #review-1-r0 — and backlog line `[review-0-r1 (b)]` already named the existing bar scripts as the place, not new machinery): add `scripts/check-deps.mjs` (plain Node, no dependency, the way ralph/generate-tasks.mjs is written) that reads every workspace `package.json` (the globs in pnpm-workspace.yaml plus the root) and every `Cargo.toml` in the Cargo workspace, collects the direct names from `dependencies`, `devDependencies`, `optionalDependencies`, `[dependencies]`, `[dev-dependencies]` and `[build-dependencies]` (workspace-internal `workspace:*` entries excluded), and checks each against the committed allowlist `docs/dependencies.json` — `{ \"npm\": { \"<name>\": \"<PRD §4 row or DECISIONS id that admits it>\" }, \"cargo\": { … } }` — failing, and naming the package, the manifest and the sentence to add, when a direct dependency has no entry, and failing likewise when an allowlist entry names a package no manifest declares, so the list cannot rot. Seed the allowlist from the manifests at this SHA with every entry pointing at its admitting text (the two `@lezer` packages at the PRD §4 Source-editor sentence written by #review-1-r0; `zod` at its §4 row; eslint, prettier, typescript, vitest, `@vitest/coverage-v8`, Playwright, Vite, React, the Tauri CLI/API packages and the `@types/*` packages at the §4 Frontend/Tests/Shell rows). Wire it into the root `lint` script — `eslint . && node scripts/check-deps.mjs && pnpm -r --if-present typecheck` — so it runs on every task's bar and on all three CI runners through the existing `pnpm lint` step: no workflow change, no runner change. Tests (vitest, temp-dir fixtures): an undeclared package fails naming it and its manifest; a stale allowlist entry fails naming it; a `workspace:*` entry is ignored; the real tree passes. Scope: scripts/check-deps.mjs, docs/dependencies.json, package.json (the root `lint` script only), one test file, docs/lessons.md, the journal. Zero new dependencies (PRD §4).",
+  "acceptance": "`pnpm lint` runs the check and is green on the real tree (its output line recorded in the journal); mutation: adding a fake package to a workspace manifest in a scratch copy makes `node scripts/check-deps.mjs` exit non-zero naming the package (recorded, reverted before the commit); every allowlist entry names an existing PRD §4 row or DECISIONS id (a test greps docs/PRD.md and docs/DECISIONS.md for each referenced anchor or row label); `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only scripts/check-deps.mjs, docs/dependencies.json, package.json, one test file, docs/lessons.md and docs/progress/journal-main.md; no manifest dependency block or lockfile change.",
+  "dependencies": [
+   "1.19"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.21",
+  "model": "sonnet",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r0 F9 — Claude findings 5, 6, 10, 11, Grok finding 3, Sol finding 7's test half; one class: assertions that cannot fail). (a) The source view's undo/redo chords are never dispatched as key events on any platform — packages/editor/test/store.test.ts:423-451 asserts binding-name strings and calls `binding.run` directly, and no e2e presses undo or redo while the source view is focused (e2e/web/editor-toggle.spec.ts:216 toggles back to rendered first); `@codemirror/view` resolves `Mod-` from a module-level platform constant exactly as `prosemirror-keymap` does (the 1.verifyh class, one layer over). Add one e2e in editor-toggle.spec.ts that toggles to source, types two bursts more than a second apart, presses `ControlOrMeta+z` then `ControlOrMeta+Shift+Z` with the source view focused, and asserts the markdown pane after each press. (b) Both redo presses (e2e/web/editor-undo.spec.ts:56, editor-toggle.spec.ts:231) spell `ControlOrMeta+Shift+z`, which Playwright synthesises as `key: \"z\"` with shiftKey — an event no keyboard produces — so `Mod-Z` is never exercised: Claude deleted the `Mod-Z` entries from `undoKeymap` and `undoKeyBindings` and all six tests stayed green. Spell the redo presses `ControlOrMeta+Shift+Z`; keep exactly one `ControlOrMeta+Shift+z` case with a comment naming the keyCode route it covers; then repeat the mutation (delete `Mod-Z` from both tables) and record in the journal which tests go red, reverting before the commit. (c) packages/editor/test/schema-roundtrip.test.ts:57-64 asserts `names.length === Object.keys(index).length` where `names` is `Object.keys(index).sort()` — `x === x` — under a comment claiming it pins the loop's coverage; replace it with an assertion over what the loop produced (collect the names each loop body saw and compare that list to `names`). (d) e2e/web/editor-source.spec.ts:29-43 measures colours on seven probe spans the test appends to `document.body` itself, so a highlighter that assigns no class stays green: for each class the fixture actually produces (heading, link, code, blockquote, list marker, table delimiter — Claude counted live spans for all six) assert a real `.cm-content .essaydown-tok-<name>` node exists and measure the colour on it; keep the probe only for emphasis, which essay-fixture lacks, with a comment saying so. Not in scope, recorded on the backlog: Grok 5's duplicated `keymapOn` helper; depth-specific heading colours (Sol 7). Scope: the named test and spec files, docs/lessons.md, the journal; no source file. Zero new dependencies (PRD §4).",
+  "acceptance": "Each of (a)–(d) has a named test and the journal lists them; the mutation record in the journal names at least one test per platform route that went red with `Mod-Z` deleted and states the tree was restored (`git status` clean of the mutation before the commit); the source-view chord e2e is green in the container with the honest statement that only the 1.verify.r1h gate proves it on macOS and Windows; every e2e/web spec green in the container; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only packages/editor/test/**, e2e/web/**, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.20"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.22",
+  "model": "sonnet",
+  "description": "Phase 1 review fix, test-only (DECISIONS #review-1-r0 F10; discharges backlog lines #review-0-r2 H3 and H5, whose revisit point was \"the first Phase 1 task that edits packages/core/src/blocks.ts, else the Phase 1 reconciliation appends it as a test-only fix task\" — no Phase 1 task edited blocks.ts): the promoted rule \"every core operation of the shape f(root, …) → root has a corpus-wide identity test\" is discharged for `reorderSentences`, `replaceSentence` and `writeFrontMatter` only; `moveBlock(root, i, i)`, `moveSection(root, i, i)` and `replaceBlock(root, id, ownNode)` have synthetic tests (Claude ran all three over the corpus at r2 and at r0 of this phase: byte-identical today — a missing guard, not a bug). Add the corpus leg for the three: for every fixture in fixtures/markdown/index.json each no-op re-serialises byte-identically, and one non-identity case per operation on one fixture proves the leg can fail. H5: packages/core/test/fixtures-corpus.test.ts:116 builds the node-type union from index.json metadata, so the corpus-coverage claim certifies itself — build the union from the parsed trees and assert each index entry's `nodeTypes` against its own tree, presence and absence. No source change: if a test finds a defect, stop, record it in the journal and lessons and do not fix it (the reconciliation decides). Scope: packages/core/test/**, docs/lessons.md, the journal. Zero new dependencies (PRD §4).",
+  "acceptance": "Three identity legs and three non-identity cases are present and green (fixture count from the index, never a literal); the rebuilt node-type assertion is green and goes red when one index entry's `nodeTypes` is altered in a scratch copy (recorded, reverted before the commit); `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only packages/core/test/**, docs/lessons.md and docs/progress/journal-main.md; no source, manifest or lockfile change.",
+  "dependencies": [
+   "1.21"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r1",
+  "model": "sonnet",
+  "description": "Phase 1 verification for review attempt r1 (RUNNER-SPEC §3, §5.5): freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. `promote-lessons` is a manual step carried by this task's text (DECISIONS #review-1-r0): append this line, verbatim, to the `## Code rules` list of both CLAUDE.md and AGENTS.md (identical below line 1; `ralph/check-agent-rules.sh` must stay green): `- Every round-trip family (parser ↔ serializer, mdast ↔ ProseMirror, the position map) has one corpus leg seeded from the writing surface's own output (a ProseMirror doc changed by a typing-shaped transaction, a mode operation's result), not only from parse(fixture); the test title names the leg, and the editor's output is asserted to be a fixed point of parse∘format.` The journal names the test that discharges the clause (the `editor fixed point` leg of 1.13).",
+  "acceptance": "pnpm lint (which now includes `node scripts/check-deps.mjs`), pnpm test, cargo test green in the container; every e2e/web spec green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change and touches only CLAUDE.md, AGENTS.md, docs/lessons.md and the journal; `ralph/check-agent-rules.sh` exits 0; `tests/agent-rules.test.ts` passes.",
+  "dependencies": [
+   "1.22"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r1h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "1.verify.r1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "description": "CI gate for 1.verify.r1: scripts/gate.sh 1.verify.r1h pushes integrated_sha of 1.verify.r1 to ci/1.verify.r1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"playwright-report\"] into /logs/ci/1.verify.r1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r1h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "dependencies": [
+   "1.verify.r1"
+  ]
+ },
+ {
+  "id": "1.10.r1a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, claude reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r1 (after the r0 FAIL, DECISIONS #review-1-r0). Phase checks as r0: typing latency p95 with 10k words on /dev/editor, now measured under the 1.17 protocol (e2e/web/latency.spec.ts doc comment) and reported with the protocol named — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r1h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r1-specific checks: each r0 finding's disposition in DECISIONS #review-1-r0 verified against the tree (fixed, deferred with a backlog line, or recorded); the `editor fixed point` leg of 1.13 and the clipboard round trip of 1.14 probed independently by typing and pasting in a browser, not only by reading the tests; the cursor cases of 1.16 checked against hand-derived positions; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; the 1.9 record in DECISIONS #002-outline-feel read for anything the fix chain should have taken and did not.",
+  "acceptance": "/logs/reviews/1/r1/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r1h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r1b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, sol reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r1 (after the r0 FAIL, DECISIONS #review-1-r0). Phase checks as r0: typing latency p95 with 10k words on /dev/editor, now measured under the 1.17 protocol (e2e/web/latency.spec.ts doc comment) and reported with the protocol named — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r1h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r1-specific checks: each r0 finding's disposition in DECISIONS #review-1-r0 verified against the tree (fixed, deferred with a backlog line, or recorded); the `editor fixed point` leg of 1.13 and the clipboard round trip of 1.14 probed independently by typing and pasting in a browser, not only by reading the tests; the cursor cases of 1.16 checked against hand-derived positions; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; the 1.9 record in DECISIONS #002-outline-feel read for anything the fix chain should have taken and did not.",
+  "acceptance": "/logs/reviews/1/r1/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r1h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r1c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, grok reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r1 (after the r0 FAIL, DECISIONS #review-1-r0). Phase checks as r0: typing latency p95 with 10k words on /dev/editor, now measured under the 1.17 protocol (e2e/web/latency.spec.ts doc comment) and reported with the protocol named — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r1h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r1-specific checks: each r0 finding's disposition in DECISIONS #review-1-r0 verified against the tree (fixed, deferred with a backlog line, or recorded); the `editor fixed point` leg of 1.13 and the clipboard round trip of 1.14 probed independently by typing and pasting in a browser, not only by reading the tests; the cursor cases of 1.16 checked against hand-derived positions; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; the 1.9 record in DECISIONS #002-outline-feel read for anything the fix chain should have taken and did not. Grok-specific (DECISIONS #review-1-r0, reviewer-shape record: Grok's read-only vantage is kept on purpose — it finds what manifests and logs show, which the two cold-build reviewers share a blind spot for): Grok reads the tree and /logs only and cites /logs/ci/1.verify.r1h/accepted/ for the cold build; for each r0 finding of Claude and Sol that Grok did not raise or rated lower, state whether a read-only review could have found it and, if so, why Grok's severity differed; and state explicitly the verdict Grok gives if any r0 blocker or required finding is not discharged in the tree.",
+  "acceptance": "/logs/reviews/1/r1/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r1h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r1d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r1",
+  "description": "Reconciliation of review attempt r1 for review set 1.10 (phase 1): copy the three reports to docs/reviews/phase-1-r1-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-1-r1 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 1.verify.r2 and 1.10.r2a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "1.10.r1a",
+   "1.10.r1b",
+   "1.10.r1c"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
   "id": "1.close",
   "model": "opus",
   "execution": "runner",
   "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/1 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/2; then finalise .evidence/closes and the next phase base record.",
   "acceptance": "main == reconciliation_sha of the newest Phase 1 review attempt (verdict PASS); suite green on that commit; branch phase/2 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
   "dependencies": [
-   "1.10.r0d"
+   "1.10.r1d"
   ],
   "nextPhase": "2",
   "nextBranch": "phase/2",
@@ -2024,7 +2261,7 @@
  {
   "id": "post.1",
   "model": "opus",
-  "description": "Retrospective proposal: read docs/lessons.md, docs/reviews/*, docs/progress/journal-*.md and the per-task metrics; write docs/RETRO.md with the §10.4 metrics table and a proposed diff to BUILD-DEFAULTS.md (new defaults, removed defaults, changed thresholds), one line of evidence per change, every hunk carrying a stable id `H-<n>`.",
+  "description": "Retrospective proposal: read docs/lessons.md, docs/reviews/*, docs/progress/journal-*.md and the per-task metrics; write docs/RETRO.md with the §10.4 metrics table and a proposed diff to BUILD-DEFAULTS.md (new defaults, removed defaults, changed thresholds), one line of evidence per change, every hunk carrying a stable id `H-<n>`. The reviewer table tabulates unique findings per reviewer per phase and the severity each reviewer assigned to findings two or more raised (from the reviewer citations in every `DECISIONS.md#review-N-r<k>` entry and the reports they cite), never verdicts per reviewer: RUNNER-SPEC §5.4 has no vote, so a verdict was never the signal (DECISIONS #review-1-r0, Michael's rule).",
   "acceptance": "docs/RETRO.md exists with the metrics table and a unified diff block against BUILD-DEFAULTS.md in which every hunk has an `Evidence:` line.",
   "dependencies": [
    "5.3e",
