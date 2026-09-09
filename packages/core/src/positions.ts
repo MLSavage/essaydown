@@ -40,10 +40,44 @@ export interface PositionMap {
   unresolved: string[];
 }
 
-/** {@link formatWithMap}'s result: the canonical string and its position map. */
+/**
+ * Where each character of one `text` node's `value` is written.
+ *
+ * A node's range says where the node is; this says where its *characters* are, which is not the
+ * same thing wherever the serializer writes a character as more than itself. `starts[i]` and
+ * `ends[i]` are the half-open offsets of the spelling of value character `i`, and
+ * `starts[value.length]` is the offset one past the last spelling, so the cursor at the end of the
+ * value has an answer too.
+ *
+ * **Ownership rule.** The spellings are adjacent half-open slices, one per character, in order:
+ * character `i` owns its whole spelling, the escaping backslash of `\*` and every byte of a
+ * character reference `&#x20;` included, so a cursor anywhere inside one is *before* that
+ * character and never inside its escape. What lies between two spellings — `ends[i]` up to
+ * `starts[i + 1]`, which is a continuation prefix (`> `, a list item's indentation) and nothing
+ * else — is owned by no character; {@link spellingIndex} gives it to the character after it,
+ * because that character is the first on the prefix's own line. A character whose spelling is
+ * empty cannot arise: every rule in {@link spellingOffsets} consumes at least one character.
+ */
+export interface SpellingTable {
+  /** `starts[i]` is where value character `i`'s spelling begins; `starts[n]` is the last end. */
+  readonly starts: readonly number[];
+  /** `ends[i]` is one past the end of value character `i`'s spelling. */
+  readonly ends: readonly number[];
+}
+
+/** {@link formatWithMap}'s result: the canonical string, its position map and its spellings. */
 export interface FormatWithMapResult {
   text: string;
   map: PositionMap;
+  /**
+   * One {@link SpellingTable} per `text` node of the tree, by path — the node's characters in
+   * `text`'s own offsets. A `text` node the serializer wrote in a way {@link spellingOffsets}
+   * cannot account for has no entry, and so does every node that is not `text`: only a `text`
+   * node's bytes are its characters (see {@link formatWithMap}).
+   */
+  spellings: Record<string, SpellingTable>;
+  /** The offset each line of `text` starts at: 1-based line `n` is at index `n - 1`. */
+  lineStarts: readonly number[];
 }
 
 /** A half-open character span `[start, end)` of the canonical string. */
@@ -121,9 +155,16 @@ export function formatWithMap(root: Root): FormatWithMapResult {
   rootEmission.value = text;
 
   const spans = new Map<Nodes, Span>();
+  const written = new Map<Nodes, SpellingTable>();
   spans.set(root, { start: 0, end: text.length });
-  placeChildren(rootEmission, (offset) => offset, spans);
-  return { text, map: buildMap(root, text, spans) };
+  placeChildren(rootEmission, (offset) => offset, spans, written);
+  const map = buildMap(root, text, spans);
+  const spellings: Record<string, SpellingTable> = {};
+  for (const entry of map.entries) {
+    const table = written.get(entry.node);
+    if (table !== undefined) spellings[entry.path] = table;
+  }
+  return { text, map, spellings, lineStarts: lineStartsOf(text) };
 }
 
 /**
@@ -157,6 +198,141 @@ export function rangeContains(range: NodeRange, line: number, column: number): b
 /** The number of steps from the root to `path`: `ROOT_PATH` is 0, `"3.1"` is 2. */
 export function pathDepth(path: string): number {
   return path === ROOT_PATH ? 0 : path.split(".").length;
+}
+
+/* ------------------------------------------------------------------ character spellings -- */
+
+/**
+ * Line up `value`, a `text` node's characters, with `written`, the Markdown that spells them,
+ * starting at offset `from`. The result is in `written`'s own offsets; `undefined` when `written`
+ * does not spell `value` under the rules below, so a caller is never handed a wrong alignment.
+ *
+ * One source character per character is exactly what does *not* hold here, which is the whole
+ * reason this exists: a character is written either as itself, or escaped with a backslash
+ * (`\*`), or as a numeric character reference (`&#x20;`, `&#42;` — what `mdast-util-to-markdown`
+ * emits where a backslash would not be read as an escape). The escape rule is tried first, so the
+ * two characters of `\\` are read as the one escaped backslash they spell rather than as a
+ * backslash that happens to precede one.
+ *
+ * Between two characters there may also be something that spells no character at all: the
+ * continuation prefix a blockquote (`> `) or a list item (indentation) puts at the start of every
+ * line after the first. It is skipped, but only immediately after a line ending and only over
+ * characters that can *be* a prefix, so a real mismatch is still a refusal rather than a silent
+ * resynchronisation. {@link SpellingTable} states which character owns it.
+ *
+ * Pure: it reads two strings and allocates two arrays.
+ */
+export function spellingOffsets(
+  value: string,
+  written: string,
+  from = 0,
+): SpellingTable | undefined {
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let at = from;
+  let afterLineEnding = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    // The direct match is tried first, so a prefix character is only ever skipped where it does
+    // not spell the character being placed.
+    while (
+      afterLineEnding &&
+      spellingEnd(written, at, character) === undefined &&
+      CONTINUATION.has(written.charAt(at))
+    ) {
+      at += 1;
+    }
+    const end = spellingEnd(written, at, character);
+    if (end === undefined) return undefined;
+    starts.push(at);
+    ends.push(end);
+    at = end;
+    afterLineEnding = character === "\n";
+  }
+  starts.push(at);
+  return { starts, ends };
+}
+
+/** The characters a continuation prefix is made of: a blockquote's marker and indentation. */
+const CONTINUATION = new Set([" ", "\t", ">"]);
+
+/** A numeric character reference, hexadecimal or decimal — the two spellings `safe` can emit. */
+const REFERENCE = /^&#(?:x([0-9a-f]+)|([0-9]+));/i;
+
+/** One past the end of `character`'s spelling at `at` in `written`, or `undefined` for no match. */
+function spellingEnd(written: string, at: number, character: string): number | undefined {
+  if (written.startsWith(`\\${character}`, at)) return at + 2;
+  if (written.startsWith(character, at)) return at + 1;
+  const reference = REFERENCE.exec(written.slice(at, at + REFERENCE_LIMIT));
+  if (reference === null) return undefined;
+  const [hexadecimal, decimal] = [reference[1], reference[2]];
+  const code = hexadecimal === undefined ? Number(decimal) : Number.parseInt(hexadecimal, 16);
+  return String.fromCodePoint(code) === character ? at + reference[0].length : undefined;
+}
+
+/** Longer than any reference `safe` writes (`&#x10FFFF;`), so the match never scans the rest. */
+const REFERENCE_LIMIT = 12;
+
+/** A spelling table's offsets carried from one string into the string it was written into. */
+function absoluteSpelling(table: SpellingTable, toAbsolute: OffsetMap): SpellingTable {
+  const ends = table.ends.map((offset) => toAbsolute(offset - 1) + 1);
+  // The last entry of `starts` is one past the last spelling, so it is mapped like an end.
+  const starts = table.starts.map((offset, index) =>
+    index < ends.length ? toAbsolute(offset) : toAbsolute(offset - 1) + 1,
+  );
+  return { starts, ends };
+}
+
+/** The offset each line of `text` starts at. `text` is canonical, so LF is the only terminator. */
+export function lineStartsOf(text: string): number[] {
+  const starts = [0];
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === LINE_FEED) starts.push(index + 1);
+  }
+  return starts;
+}
+
+const LINE_FEED = 10;
+
+/** The offset of (`line`, `column`) in the string `lineStarts` describes, clamped into it. */
+export function offsetOf(lineStarts: readonly number[], line: number, column: number): number {
+  const index = Math.min(Math.max(line, 1), lineStarts.length) - 1;
+  return lineStarts[index] + Math.max(column - 1, 0);
+}
+
+/** The 1-based (line, column) where value character `index`'s spelling begins, `index` clamped. */
+export function spellingPoint(
+  lineStarts: readonly number[],
+  table: SpellingTable,
+  index: number,
+): { line: number; column: number } {
+  const clamped = Math.min(Math.max(index, 0), table.starts.length - 1);
+  return pointOf(lineStarts, table.starts[clamped]);
+}
+
+/**
+ * Which character of the value owns (`line`, `column`), by the ownership rule of
+ * {@link SpellingTable}: the first whose spelling has not ended yet, and the end of the value for
+ * a position past the last spelling.
+ */
+export function spellingIndex(
+  lineStarts: readonly number[],
+  table: SpellingTable,
+  line: number,
+  column: number,
+): number {
+  const offset = offsetOf(lineStarts, line, column);
+  for (let index = 0; index < table.ends.length; index += 1) {
+    if (offset < table.ends[index]) return index;
+  }
+  return table.ends.length;
+}
+
+/** The 1-based (line, column) of `offset` in the string `lineStarts` describes. */
+function pointOf(lineStarts: readonly number[], offset: number): { line: number; column: number } {
+  let index = lineStarts.length - 1;
+  while (index > 0 && lineStarts[index] > offset) index -= 1;
+  return { line: index + 1, column: offset - lineStarts[index] + 1 };
 }
 
 /** The path of child `index` of the node at `path`. */
@@ -259,8 +435,17 @@ function patchIndentLines(state: ToMarkdownState, instrumentation: Instrumentati
  *
  * A child whose output cannot be found from the cursor is skipped with its subtree; it surfaces
  * as an `unresolved` path rather than as a wrong range.
+ *
+ * A `text` child also has its characters placed one by one into `spellings`, from the string it
+ * was found in and the same `local` map, so the escapes the serializer added and the prefixes its
+ * ancestors added are both carried (see {@link SpellingTable}).
  */
-function placeChildren(emission: Emission, toAbsolute: OffsetMap, spans: Map<Nodes, Span>): void {
+function placeChildren(
+  emission: Emission,
+  toAbsolute: OffsetMap,
+  spans: Map<Nodes, Span>,
+  spellings: Map<Nodes, SpellingTable>,
+): void {
   const indent = emission.indent;
   const shift = indent ? indentOffsetMap(indent.source, emission.value) : undefined;
   const container = indent && shift ? indent.source : emission.value;
@@ -274,7 +459,11 @@ function placeChildren(emission: Emission, toAbsolute: OffsetMap, spans: Map<Nod
     spans.set(child.node, { start, end: length === 0 ? start : local(at + length - 1) + 1 });
     cursor = at + length;
     const inside: OffsetMap = (offset) => local(at + offset);
-    placeChildren(child, inside, spans);
+    if (child.node.type === "text") {
+      const table = spellingOffsets(child.node.value, container, at);
+      if (table !== undefined) spellings.set(child.node, absoluteSpelling(table, local));
+    }
+    placeChildren(child, inside, spans, spellings);
     // After the recursion, so the cells' own contents are already placed and a cell's explicit
     // range can be widened to cover them.
     if (child.node.type === "table") placeTableGrid(child.node, child.value, inside, spans);

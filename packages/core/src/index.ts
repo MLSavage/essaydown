@@ -12,12 +12,18 @@ export {
   rangeContains,
   pathDepth,
   childPath,
+  spellingOffsets,
+  spellingPoint,
+  spellingIndex,
+  lineStartsOf,
+  offsetOf,
   ROOT_PATH,
   type NodeRange,
   type PositionEntry,
   type PositionMap,
   type FormatWithMapResult,
   type OffsetMap,
+  type SpellingTable,
 } from "./positions.js";
 export {
   fnv1a64,

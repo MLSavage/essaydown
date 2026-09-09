@@ -37,6 +37,7 @@ export {
   SOURCE_KEY,
   TOGGLE_KEY,
   bindCodeMirror,
+  canonicalCursor,
   otherMode,
   cursorMap,
   renderedSelection,

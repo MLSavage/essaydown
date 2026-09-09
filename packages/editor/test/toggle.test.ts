@@ -18,6 +18,7 @@ import {
   SOURCE_KEY,
   TOGGLE_KEY,
   bindCodeMirror,
+  canonicalCursor,
   cursorMap,
   otherMode,
   renderedSelection,
@@ -550,5 +551,175 @@ describe("the chord", () => {
     const toggle = vi.fn();
     const state = CMState.create({ doc: "x", extensions: [sourceToggleKeymap(toggle)] });
     expect(state.doc.toString()).toBe("x");
+  });
+});
+
+/**
+ * Task 1.16 (DECISIONS #review-1-r0 F4, Sol findings 2 and 3): the two coordinate systems a
+ * (line, ch) pair can belong to, and the characters the serializer does not write as themselves.
+ *
+ * Every expected pair below is written by hand from the canonical text quoted in the test, never
+ * derived by round-tripping one of the two functions through the other — a round trip through two
+ * mutually wrong functions proves nothing (Sol). The ProseMirror positions are hand-written too,
+ * and each is checked against the character it names with {@link charAt}, so a position past the
+ * end of the document cannot pass by taking the fallback path (lesson 1.7).
+ */
+
+/** The character ProseMirror position `pos` sits before, for checking a hand-written position. */
+function charAt(doc: ReturnType<typeof mdastToPM>["doc"], pos: number): string {
+  return doc.textBetween(pos, pos + 1);
+}
+
+describe("cursorMap: characters the serializer did not write as themselves (task 1.16)", () => {
+  it("an escaped character: `a\\*b c` puts `b` at ch 3, not ch 2", () => {
+    // Canonical `a\*b c`: a=0, \=1, *=2, b=3, ' '=4, c=5. The value is `a*b c`, so the position
+    // before `b` is the paragraph's content start (1) plus 2.
+    const { root, doc } = pair("a\\*b c\n");
+    expect(formatWithMap(root).text).toBe("a\\*b c\n");
+    const map = cursorMap(root, doc);
+    expect(charAt(doc, 3)).toBe("b");
+    expect(map.toSource(3)).toEqual({ line: 1, ch: 3 });
+    expect(map.toRendered({ line: 1, ch: 3 })).toBe(3);
+    // The escape is one character of the document: both of its columns are before the `*`.
+    expect(map.toSource(2)).toEqual({ line: 1, ch: 1 });
+    expect(map.toRendered({ line: 1, ch: 1 })).toBe(2);
+    expect(map.toRendered({ line: 1, ch: 2 })).toBe(2);
+  });
+
+  it("a blockquote prefix: `> beta gamma` puts `beta` at line 2 ch 2, not ch 0", () => {
+    // Canonical `> alpha\n> beta gamma`. The blockquote is at 0, its paragraph at 1, the text at
+    // 2, so the position before `beta` is 2 + 6 (`alpha` and the line break).
+    const { root, doc } = pair("> alpha\n> beta gamma\n");
+    expect(formatWithMap(root).text).toBe("> alpha\n> beta gamma\n");
+    const map = cursorMap(root, doc);
+    expect(charAt(doc, 8)).toBe("b");
+    expect(map.toSource(8)).toEqual({ line: 2, ch: 2 });
+    expect(map.toRendered({ line: 2, ch: 2 })).toBe(8);
+    // The `> ` belongs to the character after it: a cursor on either column is before `beta`.
+    expect(map.toRendered({ line: 2, ch: 0 })).toBe(8);
+    expect(map.toRendered({ line: 2, ch: 1 })).toBe(8);
+    // And the line break before it is still the character before.
+    expect(map.toSource(7)).toEqual({ line: 1, ch: 7 });
+  });
+
+  it("a nested-list prefix: the wrapped line's `c` is at line 3 ch 4", () => {
+    // Canonical `- a\n  - b\n    c`. The outer list is at 0, its item at 1, its paragraph at 2
+    // (text `a` at 3), the nested list at 5, its item at 6, its paragraph at 7, so the text
+    // `b\nc` starts at 8 and `c` is at 8 + 2.
+    const { root, doc } = pair("- a\n  - b\n    c\n");
+    expect(formatWithMap(root).text).toBe("- a\n  - b\n    c\n");
+    const map = cursorMap(root, doc);
+    expect(charAt(doc, 8)).toBe("b");
+    expect(charAt(doc, 10)).toBe("c");
+    expect(map.toSource(10)).toEqual({ line: 3, ch: 4 });
+    expect(map.toRendered({ line: 3, ch: 4 })).toBe(10);
+    // The four columns of indentation belong to `c`, the first character of their line.
+    expect(map.toRendered({ line: 3, ch: 0 })).toBe(10);
+    expect(map.toSource(8)).toEqual({ line: 2, ch: 4 });
+  });
+
+  it("an emphasis marker: the closing `*` is the position after the run, the opening one before", () => {
+    // Canonical `a *b* c`: a=0, ' '=1, *=2, b=3, *=4, ' '=5, c=6. The paragraph's content starts
+    // at 1, so `b` is at 3 and the position after it is 4.
+    const { root, doc } = pair("a *b* c\n");
+    expect(formatWithMap(root).text).toBe("a *b* c\n");
+    const map = cursorMap(root, doc);
+    expect(charAt(doc, 3)).toBe("b");
+    expect(charAt(doc, 4)).toBe(" ");
+    // Closing delimiter (ch 4): after the emphasis's last character.
+    expect(map.toRendered({ line: 1, ch: 4 })).toBe(4);
+    // Opening delimiter (ch 2): before its first, which is also the end of `a `.
+    expect(map.toRendered({ line: 1, ch: 2 })).toBe(3);
+    expect(map.toSource(3)).toEqual({ line: 1, ch: 3 });
+    // A link's `](url)` is the same shape: the whole tail is its closing delimiter.
+    const link = pair("x [a](u) y\n");
+    const linkMap = cursorMap(link.root, link.doc);
+    expect(formatWithMap(link.root).text).toBe("x [a](u) y\n");
+    expect(charAt(link.doc, 4)).toBe(" ");
+    // `x ` is 1..3, the link text `a` is 3..4, so after the link is 4; `](u)` is ch 4 to ch 7.
+    expect(linkMap.toRendered({ line: 1, ch: 5 })).toBe(4);
+    expect(linkMap.toRendered({ line: 1, ch: 2 })).toBe(3);
+  });
+
+  it("keeps answering a node with no text of its own with its own start", () => {
+    // The delimiter rule is for marks only: a fenced block still answers with the node itself.
+    const { root, doc } = pair("```js\ncode\n```\n");
+    expect(cursorMap(root, doc).toRendered({ line: 2, ch: 1 })).toBe(0);
+  });
+});
+
+describe("canonicalCursor: a live source buffer that is not canonical (task 1.16)", () => {
+  it("extra blank lines: the cursor before `beta` is canonical line 3 ch 0", () => {
+    // Sol's reproduction. `alpha\n\n\n\nbeta` serialises to `alpha\n\nbeta\n`, so the live line 5
+    // is canonical line 3; the second paragraph's content starts at 8 (paragraph 1 is 0..7).
+    const live = "alpha\n\n\n\nbeta";
+    expect(canonicalCursor(live, { line: 5, ch: 0 })).toEqual({ line: 3, ch: 0 });
+    const { root, doc } = pair(live);
+    expect(formatWithMap(root).text).toBe("alpha\n\nbeta\n");
+    expect(charAt(doc, 8)).toBe("b");
+    expect(cursorMap(root, doc).toRendered({ line: 3, ch: 0 })).toBe(8);
+  });
+
+  it("a Setext heading: `Alpha\\n=====` is `# Alpha`, so ch 0 is canonical ch 2", () => {
+    const live = "Alpha\n=====";
+    expect(canonicalCursor(live, { line: 1, ch: 0 })).toEqual({ line: 1, ch: 2 });
+    // And inside the word: live ch 3 (`h`) is canonical ch 5, two columns further along.
+    expect(canonicalCursor(live, { line: 1, ch: 3 })).toEqual({ line: 1, ch: 5 });
+    const { root, doc } = pair(live);
+    expect(formatWithMap(root).text).toBe("# Alpha\n");
+    expect(charAt(doc, 1)).toBe("A");
+    expect(cursorMap(root, doc).toRendered({ line: 1, ch: 2 })).toBe(1);
+  });
+
+  it("a `* item` list spelling: the marker changes, and a wider one moves the column", () => {
+    // `* item` and `- item` are the same width, so the cursor before `item` stays at ch 2 — the
+    // spelling that changed is the marker character. `*   item` is three columns wider and is
+    // the same tree, so its live ch 4 is canonical ch 2 as well.
+    expect(canonicalCursor("* item", { line: 1, ch: 2 })).toEqual({ line: 1, ch: 2 });
+    expect(canonicalCursor("*   item", { line: 1, ch: 4 })).toEqual({ line: 1, ch: 2 });
+    const { root, doc } = pair("* item");
+    expect(formatWithMap(root).text).toBe("- item\n");
+    // list 0, item 1, paragraph 2, so the text starts at 3.
+    expect(charAt(doc, 3)).toBe("i");
+    expect(cursorMap(root, doc).toRendered({ line: 1, ch: 2 })).toBe(3);
+  });
+
+  it("carries an escape in the live buffer through the node's own offsets", () => {
+    // The live bytes are canonical here, but the translation still goes through the parsed node:
+    // live ch 3 is the `b` of the value `a*b c`, which is written at canonical ch 3.
+    expect(canonicalCursor("a\\*b c", { line: 1, ch: 3 })).toEqual({ line: 1, ch: 3 });
+    // A cursor inside the escape is before the `*`, which is written at ch 1.
+    expect(canonicalCursor("a\\*b c", { line: 1, ch: 2 })).toEqual({ line: 1, ch: 1 });
+  });
+
+  it("normalises the line endings `parse` normalises, so no line number moves", () => {
+    expect(canonicalCursor("alpha\r\n\r\n\r\n\r\nbeta", { line: 5, ch: 0 })).toEqual({
+      line: 3,
+      ch: 0,
+    });
+    // A break *inside* a node is where the normalisation earns its keep: the text node's value
+    // holds `alpha\nbeta`, so without the rewrite the `\r` is a character no spelling accounts
+    // for and the whole node is refused. Canonical `alpha\nbeta\n` puts `beta` at line 2 ch 0.
+    expect(canonicalCursor("alpha\r\nbeta", { line: 2, ch: 0 })).toEqual({ line: 2, ch: 0 });
+    expect(canonicalCursor("alpha\rbeta", { line: 2, ch: 0 })).toEqual({ line: 2, ch: 0 });
+  });
+
+  it("answers a position no node owns from the node before it, and an empty buffer from the top", () => {
+    // Live line 3 is one of the blank lines between the two paragraphs; the node before it is
+    // `alpha`, whose canonical end is line 1 ch 5.
+    expect(canonicalCursor("alpha\n\n\n\nbeta", { line: 3, ch: 0 })).toEqual({ line: 1, ch: 5 });
+    expect(canonicalCursor("", { line: 1, ch: 0 })).toEqual({ line: 1, ch: 0 });
+    expect(canonicalCursor("\n\n", { line: 2, ch: 0 })).toEqual({ line: 1, ch: 0 });
+  });
+
+  it("answers a node that is not text with the node's own start", () => {
+    // A cursor on a fence line: the code node is placed but never entered.
+    expect(canonicalCursor("```js\ncode\n```", { line: 2, ch: 2 })).toEqual({ line: 1, ch: 0 });
+  });
+
+  it("falls back to the node's start when the live spelling cannot be accounted for", () => {
+    // `&amp;` is a named character reference, which `spellingOffsets` refuses; the cursor then
+    // lands at the start of the paragraph's text rather than at a guessed character.
+    expect(canonicalCursor("a&amp;b", { line: 1, ch: 6 })).toEqual({ line: 1, ch: 0 });
   });
 });

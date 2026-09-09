@@ -4,9 +4,15 @@ import {
   childPath,
   format,
   formatWithMap,
+  lineStartsOf,
   nodeAt,
+  offsetOf,
   parse,
+  spellingIndex,
+  spellingOffsets,
+  spellingPoint,
   type NodeRange,
+  type PositionEntry,
   type PositionMap,
 } from "@essaydown/core";
 import type {
@@ -46,6 +52,17 @@ import type { DocumentStore } from "./store.js";
  * which places every mdast node in the canonical string. Coordinates are CodeMirror's: `line` is
  * 1-based, `ch` is a 0-based offset in UTF-16 code units, while the position map's columns are
  * 1-based, so the two differ by exactly one and the conversion is spelled out at every crossing.
+ *
+ * **Two things a (line, ch) pair can be about, and they are not the same document.**
+ * {@link cursorMap} speaks *canonical* coordinates throughout — places in `format(root)`, the
+ * string the source view is opened with. The bytes in the source view after that are the user's
+ * own, and they need not be canonical: extra blank lines, a Setext heading, a `*` bullet all
+ * serialise to something else. So a cursor read out of a live source view goes through
+ * {@link canonicalCursor} first, which parses those bytes and carries the cursor across through
+ * the node it is in and its offset within that node. Inside a node, neither direction assumes one
+ * source character per character of the tree: the serializer's escapes and the continuation
+ * prefixes of blockquotes and list items are carried by the spelling tables of task 1.2's
+ * position map (`SpellingTable`).
  */
 
 /** §6.5's source burst: every document-changing CodeMirror commit carries this coalescing key. */
@@ -53,9 +70,6 @@ export const SOURCE_KEY = "source";
 
 /** The chord that swaps the two views. One name: `/` is not a shifted letter. */
 export const TOGGLE_KEY = "Mod-/";
-
-/** LF, the only line terminator the canonical string contains (`format` emits `\n`). */
-const NEWLINE = 10;
 
 /** Which of the two views is showing. */
 export type EditorMode = "rendered" | "source";
@@ -135,16 +149,16 @@ function inlineWidth(node: PhrasingContent): number {
   }
 }
 
-/** Whether `node` is one of the four mark nodes {@link inlineWidth} recurses into. */
+/** Whether a node type is one of the four marks {@link inlineWidth} recurses into. */
+function isMark(type: string): boolean {
+  return type === "emphasis" || type === "strong" || type === "delete" || type === "link";
+}
+
+/** {@link isMark} as a narrowing over a phrasing node. */
 function isMarkNode(
   node: PhrasingContent,
 ): node is Extract<PhrasingContent, { type: "emphasis" | "strong" | "delete" | "link" }> {
-  return (
-    node.type === "emphasis" ||
-    node.type === "strong" ||
-    node.type === "delete" ||
-    node.type === "link"
-  );
+  return isMark(node.type);
 }
 
 function walkInline(
@@ -221,29 +235,6 @@ function correspondences(root: Root, doc: PMNode): Correspondence[] {
 
 /* ------------------------------------------------------------------ the cursor map ------- */
 
-/**
- * Walk `offset` UTF-16 code units into `value` from the start of `range`.
- *
- * The walk counts a `\n` as a new line and everything else as one column, which is a *lower
- * bound* on the real column: wherever the serializer escaped a character (`\*`) or prefixed a
- * line (`> `, list indentation) the canonical string is longer than the value, never shorter. So
- * the result is always inside the node's own range, and it is exact for the ordinary case of a
- * paragraph of unescaped prose, which is the case a cursor is in.
- */
-function advance(range: NodeRange, value: string, offset: number): SourcePosition {
-  let line = range.startLine;
-  let col = range.startCol;
-  for (let i = 0; i < offset; i += 1) {
-    if (value.charCodeAt(i) === NEWLINE) {
-      line += 1;
-      col = 1;
-    } else {
-      col += 1;
-    }
-  }
-  return { line, ch: col - 1 };
-}
-
 /** The innermost correspondence covering `pos`, or `null`. A boundary belongs to the later node. */
 function innermostAt(entries: readonly Correspondence[], pos: number): Correspondence | null {
   let best: Correspondence | null = null;
@@ -274,23 +265,6 @@ function afterLastNode(
   return best === null ? { line: 1, ch: 0 } : { line: best.endLine, ch: best.endCol - 1 };
 }
 
-
-/** The inverse of {@link advance}: how far into `value` the (line, ch) of `position` is. */
-function offsetWithin(range: NodeRange, value: string, position: SourcePosition): number {
-  const col = position.ch + 1;
-  let line = range.startLine;
-  let column = range.startCol;
-  for (let i = 0; i < value.length; i += 1) {
-    if (line > position.line || (line === position.line && column >= col)) return i;
-    if (value.charCodeAt(i) === NEWLINE) {
-      line += 1;
-      column = 1;
-    } else {
-      column += 1;
-    }
-  }
-  return value.length;
-}
 
 /**
  * {@link afterLastNode}'s mirror: the ProseMirror position for a place in the canonical string
@@ -355,23 +329,27 @@ export interface CursorMap {
  * The cursor mapping between `doc`'s positions and `format(root)`'s (line, ch) pairs.
  *
  * Both directions share one position map and one correspondence list, so a toggle pays for the
- * serialisation once. Inside a `text` node the offset is carried across character by character;
- * every other node is answered with its own start, because the map places nodes and only a text
- * node's bytes are its text (see {@link walkBlock}).
+ * serialisation once. Inside a `text` node the offset is carried across through that node's
+ * spelling table, so an escaped character (`\*`) and a continuation prefix (`> `, a list item's
+ * indentation) are counted as the serializer wrote them and not as one character each. Every
+ * other node is answered with its own start — the map places nodes, and only a text node's bytes
+ * are its text (see {@link walkBlock}) — except on the delimiters of a mark, where
+ * {@link delimiterPosition} tells the opening one from the closing one.
  */
 export function cursorMap(root: Root, doc: PMNode): CursorMap {
-  const { map } = formatWithMap(root);
+  const { map, spellings, lineStarts } = formatWithMap(root);
   const entries = correspondences(root, doc);
   return {
     toSource(pos) {
       const inside = innermostAt(entries, pos);
       if (inside !== null) {
         const range = map.ranges[inside.path];
-        if (range !== undefined) {
-          return inside.node.type === "text"
-            ? advance(range, inside.node.value, pos - inside.pmStart)
-            : { line: range.startLine, ch: range.startCol - 1 };
+        const table = spellings[inside.path];
+        if (table !== undefined) {
+          const { line, column } = spellingPoint(lineStarts, table, pos - inside.pmStart);
+          return { line, ch: column - 1 };
         }
+        if (range !== undefined) return { line: range.startLine, ch: range.startCol - 1 };
       }
       return afterLastNode(entries, map, pos);
     },
@@ -380,14 +358,133 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
       if (found !== null) {
         const entry = entries.find((candidate) => candidate.path === found.path);
         if (entry !== undefined) {
-          return found.node.type === "text"
-            ? entry.pmStart + offsetWithin(found, found.node.value, position)
-            : entry.pmStart;
+          const table = spellings[found.path];
+          if (table !== undefined) {
+            return entry.pmStart + spellingIndex(lineStarts, table, position.line, position.ch + 1);
+          }
+          return delimiterPosition(entry, found, map, position);
         }
       }
       return afterLastLine(entries, map, position);
     },
   };
+}
+
+/**
+ * Where a position that landed on a node rather than inside one of its `text` descendants goes.
+ *
+ * `nodeAt` answers with a mark (`emphasis`, `strong`, `delete`, `link`) exactly when the position
+ * is on one of the mark's own delimiters — `*`, `**`, `~~`, or a link's `](url)` — because the
+ * children cover everything between them. A delimiter is not a character of the document, so the
+ * cursor belongs beside the mark, and which side is decided by the content it sits on: at or past
+ * the end of the mark's last child it is the closing delimiter and the answer is the position
+ * after the mark; anywhere else it is the opening one and the answer is the position before it.
+ * Every other node answers with its own start, as before.
+ */
+function delimiterPosition(
+  entry: Correspondence,
+  found: PositionEntry,
+  map: PositionMap,
+  position: SourcePosition,
+): number {
+  if (!isMark(found.node.type)) return entry.pmStart;
+  const children = "children" in found.node ? found.node.children : [];
+  const last = map.ranges[childPath(found.path, children.length - 1)];
+  if (last === undefined) return entry.pmStart;
+  const column = position.ch + 1;
+  const after =
+    position.line > last.endLine || (position.line === last.endLine && column >= last.endCol);
+  return after ? entry.pmEnd : entry.pmStart;
+}
+
+/* ------------------------------------------------------------------ live source coords ---- */
+
+/** One node of a parsed live buffer: its path, and the offsets its source occupies. */
+interface LiveNode {
+  readonly path: string;
+  readonly node: Nodes;
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * The place in `format(parse(text))` that (`line`, `ch`) of `text` names.
+ *
+ * The source view holds the user's own bytes, and `cursorMap` speaks canonical coordinates, so a
+ * cursor read from a live view is translated here first: `text` is parsed, the node the cursor is
+ * in is found in *its* coordinates, and the cursor is re-expressed as that node's own path and an
+ * offset within it — which the canonical position map then places, escapes and continuation
+ * prefixes included. `alpha\n\n\n\nbeta` and `alpha\n\nbeta` parse to the same tree, so the cursor
+ * before `beta` is the same cursor in both, whichever line the user's bytes put it on.
+ *
+ * Line endings are normalised exactly as `parse` normalises them, so the offsets the parser
+ * reports and the (line, ch) CodeMirror reports describe the same string; CodeMirror counts a
+ * `\r\n` and a lone `\r` as one line break too, so no line number moves under the rewrite.
+ *
+ * A position no node owns — a blank line, the end of a document — is answered from the last node
+ * that ends at or before it, whose canonical end is where `cursorMap` will look for the block
+ * above; with no such node the answer is the top of the document.
+ */
+export function canonicalCursor(text: string, position: SourcePosition): SourcePosition {
+  const live = text.replace(/\r\n?/g, "\n");
+  const root = parse(live);
+  const liveStarts = lineStartsOf(live);
+  const offset = offsetOf(liveStarts, position.line, position.ch + 1);
+  const nodes = liveNodes(root);
+  const { map, spellings, lineStarts } = formatWithMap(root);
+
+  const inside = innermostLive(nodes, offset);
+  if (inside !== null) {
+    const range = map.ranges[inside.path];
+    const table = spellings[inside.path];
+    if (inside.node.type === "text") {
+      const written = spellingOffsets(inside.node.value, live, inside.start);
+      if (table !== undefined && written !== undefined) {
+        const index = spellingIndex(liveStarts, written, position.line, position.ch + 1);
+        const { line, column } = spellingPoint(lineStarts, table, index);
+        return { line, ch: column - 1 };
+      }
+    }
+    if (range !== undefined) return { line: range.startLine, ch: range.startCol - 1 };
+  }
+  const before = lastLiveNodeBefore(nodes, offset);
+  const range = before === null ? undefined : map.ranges[before.path];
+  if (range === undefined) return { line: 1, ch: 0 };
+  return { line: range.endLine, ch: range.endCol - 1 };
+}
+
+/** Every node of a parsed buffer that carries source offsets, in pre-order, the root excluded. */
+function liveNodes(root: Root): LiveNode[] {
+  const out: LiveNode[] = [];
+  const visit = (node: Nodes, path: string): void => {
+    const at = node.position;
+    if (path !== ROOT_PATH && at?.start.offset !== undefined && at.end.offset !== undefined) {
+      out.push({ path, node, start: at.start.offset, end: at.end.offset });
+    }
+    if ("children" in node) {
+      (node.children as Nodes[]).forEach((child, index) => visit(child, childPath(path, index)));
+    }
+  };
+  visit(root, ROOT_PATH);
+  return out;
+}
+
+/** The innermost live node covering `offset`, or `null`. A boundary belongs to the later node. */
+function innermostLive(nodes: readonly LiveNode[], offset: number): LiveNode | null {
+  let best: LiveNode | null = null;
+  for (const node of nodes) {
+    if (node.start <= offset && offset <= node.end) best = node;
+  }
+  return best;
+}
+
+/** The last live node ending at or before `offset`, which is what an unowned position is after. */
+function lastLiveNodeBefore(nodes: readonly LiveNode[], offset: number): LiveNode | null {
+  let best: LiveNode | null = null;
+  for (const node of nodes) {
+    if (node.end <= offset && (best === null || node.end >= best.end)) best = node;
+  }
+  return best;
 }
 
 /** `pos` as a selection of `doc`, clamped into the document and snapped to a text position. */

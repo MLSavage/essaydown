@@ -3,6 +3,7 @@ import { emptySidecar, format, parse } from "@essaydown/core";
 import {
   bindCodeMirror,
   bindProseMirror,
+  canonicalCursor,
   createDocumentStore,
   cursorMap,
   editorPlugins,
@@ -40,8 +41,10 @@ import { questionHintPlugin } from "./outline-hints.js";
  * a toggle takes back the last real edit rather than the toggle. The cursor is carried across in
  * the canonical string's own coordinates (1-based line, 0-based `ch`): the outgoing view converts
  * its cursor to a {@link SourcePosition}, `carried` holds it, and the incoming view converts it
- * back. Nothing clears `carried` — re-applying the same position is idempotent, and clearing it
- * would lose the cursor to React StrictMode's second mount.
+ * back. Coming out of the source view that conversion is `canonicalCursor`, because the bytes in
+ * that view are the user's and a (line, ch) of theirs is not a (line, ch) of `format(root)`.
+ * Nothing clears `carried` — re-applying the same position is idempotent, and clearing it would
+ * lose the cursor to React StrictMode's second mount.
  *
  * The dev-only top bar is the Phase 1 human gate's handle on the route: "Load fixture…" opens a
  * file chooser and commits whatever Markdown it is given, and "Copy Markdown" puts the store's
@@ -89,7 +92,9 @@ export default function DevEditor() {
     if (pm !== null) {
       carried.current = cursorMap(root, pm.state.doc).toSource(pm.state.selection.head);
     } else if (cm !== null) {
-      carried.current = sourceCursor(cm.state);
+      // The source view holds the user's own bytes, which need not be canonical, and the cursor
+      // map speaks canonical coordinates; `canonicalCursor` translates through the parsed node.
+      carried.current = canonicalCursor(cm.state.doc.toString(), sourceCursor(cm.state));
     }
     const next = toggleMode(store, modeRef.current);
     modeRef.current = next;

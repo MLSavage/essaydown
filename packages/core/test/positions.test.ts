@@ -6,10 +6,15 @@ import {
   childPath,
   formatWithMap,
   indentOffsetMap,
+  lineStartsOf,
   nodeAt,
+  offsetOf,
   pathDepth,
   rangeContains,
   ROOT_PATH,
+  spellingIndex,
+  spellingOffsets,
+  spellingPoint,
   type NodeRange,
   type PositionMap,
 } from "../src/positions.js";
@@ -518,5 +523,147 @@ describe("nodeAt over a table with empty cells (task 1.15)", () => {
     expect(nodeAt(map, 3, lines[2].length + 1)).toBeNull();
     expect(nodeAt(map, lines.length, 1)).toBeNull();
     expect(nodeAt(map, 0, 1)).toBeNull();
+  });
+});
+
+describe("spellingOffsets: one text node's characters in the Markdown that spells them", () => {
+  it("gives every character one offset, and the value's end one more", () => {
+    const table = spellingOffsets("abc", "abc");
+    expect(table).toEqual({ starts: [0, 1, 2, 3], ends: [1, 2, 3] });
+  });
+
+  it("gives an escaped character its backslash: `a*b c` is written `a\\*b c`", () => {
+    // Hand-derived from the string: a=0, \=1, *=2, b=3, ' '=4, c=5. The `*` owns [1, 3), so the
+    // cursor before `b` is offset 3 and a cursor inside the escape is still before the `*`.
+    expect(spellingOffsets("a*b c", "a\\*b c")).toEqual({
+      starts: [0, 1, 3, 4, 5, 6],
+      ends: [1, 3, 4, 5, 6],
+    });
+  });
+
+  it("reads `\\\\` as the one escaped backslash it spells, not as an escape of the next", () => {
+    // `\*` is written `\\` + `\*`: the literal backslash owns [0, 2) and the `*` owns [2, 4).
+    expect(spellingOffsets("\\*", "\\\\\\*")).toEqual({ starts: [0, 2, 4], ends: [2, 4] });
+  });
+
+  it("gives a character reference every one of its bytes, hexadecimal and decimal", () => {
+    expect(spellingOffsets(" x", "&#x20;x")).toEqual({ starts: [0, 6, 7], ends: [6, 7] });
+    expect(spellingOffsets("*", "&#42;")).toEqual({ starts: [0, 5], ends: [5] });
+  });
+
+  it("skips the continuation prefix a blockquote puts after a line ending", () => {
+    // `> alpha\n> beta`: `alpha` at 2..7, the line ending at 7, `beta` from 10 — the `> ` of the
+    // second line is between the line ending's spelling and `b`'s, and belongs to neither.
+    expect(spellingOffsets("alpha\nbeta", "> alpha\n> beta", 2)).toEqual({
+      starts: [2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14],
+      ends: [3, 4, 5, 6, 7, 8, 11, 12, 13, 14],
+    });
+  });
+
+  it("skips a list item's indentation, and only right after a line ending", () => {
+    expect(spellingOffsets("b\nc", "  - b\n    c", 4)).toEqual({
+      starts: [4, 5, 10, 11],
+      ends: [5, 6, 11],
+    });
+    // A space inside the line is a character of the value and is never skipped as a prefix.
+    expect(spellingOffsets("b c", "b c")).toEqual({ starts: [0, 1, 2, 3], ends: [1, 2, 3] });
+  });
+
+  it("refuses a spelling it cannot account for rather than resynchronising", () => {
+    // A named character reference is not one of the three rules, so the whole table is refused.
+    expect(spellingOffsets("a&b", "a&amp;b")).toBeUndefined();
+    expect(spellingOffsets("abc", "axc")).toBeUndefined();
+    expect(spellingOffsets("ab", "a")).toBeUndefined();
+    // A numeric reference that decodes to some other character is not this character's spelling.
+    expect(spellingOffsets("*", "&#43;")).toBeUndefined();
+    // The prefix skip stops at the end of its own line rather than eating the next one.
+    expect(spellingOffsets("a\nb", "a\n  >  \nb")).toBeUndefined();
+  });
+
+  it("gives an empty value the offset it starts at and no characters", () => {
+    expect(spellingOffsets("", "abc", 2)).toEqual({ starts: [2], ends: [] });
+  });
+});
+
+describe("formatWithMap: the spelling table of each text node", () => {
+  it("carries the serializer's escapes into canonical offsets", () => {
+    const { text, spellings, lineStarts } = formatWithMap(parse("a\\*b c\n"));
+    expect(text).toBe("a\\*b c\n");
+    expect(lineStarts).toEqual([0, 7]);
+    expect(spellings["0.0"]).toEqual({ starts: [0, 1, 3, 4, 5, 6], ends: [1, 3, 4, 5, 6] });
+    // Value offset 2 is `b`, written at line 1 column 4 — one column further than counting the
+    // value's characters would say.
+    expect(spellingPoint(lineStarts, spellings["0.0"], 2)).toEqual({ line: 1, column: 4 });
+    expect(spellingIndex(lineStarts, spellings["0.0"], 1, 4)).toBe(2);
+    // Both columns of the escape belong to the `*`, and the end of the value has an answer.
+    expect(spellingIndex(lineStarts, spellings["0.0"], 1, 2)).toBe(1);
+    expect(spellingIndex(lineStarts, spellings["0.0"], 1, 3)).toBe(1);
+    expect(spellingPoint(lineStarts, spellings["0.0"], 5)).toEqual({ line: 1, column: 7 });
+  });
+
+  it("carries a blockquote's continuation prefix", () => {
+    const { text, spellings, lineStarts } = formatWithMap(parse("> alpha\n> beta gamma\n"));
+    expect(text).toBe("> alpha\n> beta gamma\n");
+    const table = spellings["0.0.0"];
+    // `beta` starts at value offset 6, written on line 2 at column 3 — after the `> `.
+    expect(spellingPoint(lineStarts, table, 6)).toEqual({ line: 2, column: 3 });
+    expect(spellingIndex(lineStarts, table, 2, 3)).toBe(6);
+    // The prefix itself is owned by the character after it, on its own line.
+    expect(spellingIndex(lineStarts, table, 2, 1)).toBe(6);
+    expect(spellingIndex(lineStarts, table, 2, 2)).toBe(6);
+    // The line ending before it is still the character before.
+    expect(spellingIndex(lineStarts, table, 1, 8)).toBe(5);
+  });
+
+  it("carries a nested list item's indentation", () => {
+    const { text, spellings, lineStarts } = formatWithMap(parse("- a\n  - b\n    c\n"));
+    expect(text).toBe("- a\n  - b\n    c\n");
+    const table = spellings["0.0.1.0.0.0"];
+    expect(spellingPoint(lineStarts, table, 0)).toEqual({ line: 2, column: 5 });
+    expect(spellingPoint(lineStarts, table, 2)).toEqual({ line: 3, column: 5 });
+    expect(spellingIndex(lineStarts, table, 3, 5)).toBe(2);
+    expect(spellingIndex(lineStarts, table, 3, 1)).toBe(2);
+  });
+
+  it("places the first, middle and last character of a text node that is not first on its line", () => {
+    const { text, spellings, lineStarts } = formatWithMap(parse("a *bcd* e\n"));
+    expect(text).toBe("a *bcd* e\n");
+    const table = spellings["0.1.0"];
+    expect(spellingPoint(lineStarts, table, 0)).toEqual({ line: 1, column: 4 });
+    expect(spellingPoint(lineStarts, table, 1)).toEqual({ line: 1, column: 5 });
+    expect(spellingPoint(lineStarts, table, 2)).toEqual({ line: 1, column: 6 });
+    expect(spellingPoint(lineStarts, table, 3)).toEqual({ line: 1, column: 7 });
+  });
+
+  it("has one table per text node and none for any other node", () => {
+    const { map, spellings } = formatWithMap(parse("# H\n\n`code` and <b>x</b>\n"));
+    const texts = map.entries.filter((entry) => entry.node.type === "text").map((e) => e.path);
+    expect(texts.length).toBeGreaterThan(0);
+    expect(Object.keys(spellings).sort()).toEqual(texts.sort());
+  });
+
+  it("clamps an index and a column that are outside the value", () => {
+    const { spellings, lineStarts } = formatWithMap(parse("abc\n"));
+    const table = spellings["0.0"];
+    expect(spellingPoint(lineStarts, table, -4)).toEqual({ line: 1, column: 1 });
+    expect(spellingPoint(lineStarts, table, 99)).toEqual({ line: 1, column: 4 });
+    expect(spellingIndex(lineStarts, table, 1, 99)).toBe(3);
+    expect(spellingIndex(lineStarts, table, 99, 1)).toBe(3);
+    expect(spellingIndex(lineStarts, table, 1, 0)).toBe(0);
+  });
+});
+
+describe("lineStartsOf and offsetOf", () => {
+  it("gives every line its start, the empty last line included", () => {
+    expect(lineStartsOf("a\nbb\n")).toEqual([0, 2, 5]);
+    expect(lineStartsOf("")).toEqual([0]);
+  });
+
+  it("clamps a line and a column into the string", () => {
+    const starts = lineStartsOf("a\nbb\n");
+    expect(offsetOf(starts, 2, 2)).toBe(3);
+    expect(offsetOf(starts, 0, 1)).toBe(0);
+    expect(offsetOf(starts, 99, 1)).toBe(5);
+    expect(offsetOf(starts, 1, -3)).toBe(0);
   });
 });
