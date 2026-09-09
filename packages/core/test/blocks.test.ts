@@ -318,6 +318,103 @@ describe("moveSection", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Corpus-wide identity invariant (task 1.22, DECISIONS #review-1-r0 F10, discharging
+// backlog #review-0-r2 H3): "every core operation of the shape f(root, …) → root has a
+// corpus-wide identity test" (CLAUDE.md) was proved for reorderSentences, replaceSentence
+// and writeFrontMatter but not moveBlock, moveSection or replaceBlock — a missing guard,
+// not a known bug (Claude re-ran all three over the corpus by hand at r2 and at this
+// phase's r0 and found them byte-identical today). Each identity leg is paired with one
+// non-identity case on one fixture, so a mutation that made the leg vacuously pass (lesson
+// 1.16/1.18: a guard whose removal changes nothing on its own test's inputs is not tested)
+// would be caught by the corresponding "is not vacuous" case going green for the wrong
+// reason instead of red.
+// ---------------------------------------------------------------------------
+
+const sourceNames = Object.keys(index).sort();
+
+function fixtureRoot(name: string): Root {
+  return parse(fixture(name));
+}
+
+describe("moveBlock, moveSection and replaceBlock are the identity for their own no-op argument, corpus-wide", () => {
+  it("moveBlock(root, i, i) re-serialises every fixture byte-identically, for every top-level index", () => {
+    let fixturesChecked = 0;
+    let movesChecked = 0;
+    for (const name of sourceNames) {
+      const root = fixtureRoot(name);
+      const before = format(root);
+      for (let i = 0; i < root.children.length; i += 1) {
+        expect(format(moveBlock(root, i, i))).toBe(before);
+        movesChecked += 1;
+      }
+      fixturesChecked += 1;
+    }
+    expect(fixturesChecked).toBe(sourceNames.length);
+    expect(movesChecked).toBeGreaterThan(0);
+  });
+
+  it("moveSection(root, i, i) re-serialises every fixture byte-identically, for every section index", () => {
+    let fixturesChecked = 0;
+    let movesChecked = 0;
+    for (const name of sourceNames) {
+      const root = fixtureRoot(name);
+      const before = format(root);
+      const sections = sectionsOf(root);
+      for (let i = 0; i < sections.length; i += 1) {
+        expect(format(moveSection(root, i, i))).toBe(before);
+        movesChecked += 1;
+      }
+      fixturesChecked += 1;
+    }
+    expect(fixturesChecked).toBe(sourceNames.length);
+    // Not every fixture has a heading, so this proves the leg ran on at least the fixtures that do.
+    expect(movesChecked).toBeGreaterThan(0);
+  });
+
+  it("replaceBlock(root, id, ownNode) re-serialises every fixture byte-identically, for every block", () => {
+    let fixturesChecked = 0;
+    let replacementsChecked = 0;
+    for (const name of sourceNames) {
+      const root = fixtureRoot(name);
+      const before = format(root);
+      for (const block of blocksOf(root)) {
+        expect(format(replaceBlock(root, block.contentId, structuredClone(block.node)))).toBe(before);
+        replacementsChecked += 1;
+      }
+      fixturesChecked += 1;
+    }
+    expect(fixturesChecked).toBe(sourceNames.length);
+    expect(replacementsChecked).toBeGreaterThan(0);
+  });
+
+  it("a genuine reorder is not byte-identical, so the moveBlock leg above is not vacuous", () => {
+    const root = fixtureRoot("essay-fixture.md");
+    const before = format(root);
+    expect(root.children.length).toBeGreaterThan(1);
+    expect(format(moveBlock(root, 0, root.children.length - 1))).not.toBe(before);
+  });
+
+  it("a genuine section move is not byte-identical, so the moveSection leg above is not vacuous", () => {
+    const root = fixtureRoot("essay-fixture.md");
+    const before = format(root);
+    const sections = sectionsOf(root);
+    expect(sections.length).toBeGreaterThan(1);
+    expect(format(moveSection(root, 0, sections.length - 1))).not.toBe(before);
+  });
+
+  it("a genuine replacement is not byte-identical, so the replaceBlock leg above is not vacuous", () => {
+    const root = fixtureRoot("essay-fixture.md");
+    const before = format(root);
+    // root.children[0] is never a listItem or tableRow (blocksOf only descends into those
+    // nested), so replaceBlock's type constraint never rejects this paragraph replacement.
+    const block = blocksOf(root)[0];
+    expect(format(replaceBlock(root, block.contentId, paragraph("A different paragraph.")))).not.toBe(
+      before,
+    );
+  });
+});
+
 describe("setHeadingDepth", () => {
   it("re-depths an H2 with H3 children to H3 with H4 children", () => {
     const root = parse("## Parent\n\nBody.\n\n### Child\n\nMore.\n\n## Next\n");

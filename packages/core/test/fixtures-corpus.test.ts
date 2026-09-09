@@ -113,12 +113,40 @@ describe("fixtures/markdown corpus (task 0.4, grown by later tasks)", () => {
     }
   });
 
-  it("has no supported §6.1 node type absent from the union of node types across the corpus", () => {
+  it("has no supported §6.1 node type absent from the union of node types the corpus's own trees contain", () => {
+    // H5 (task 1.22, DECISIONS #review-1-r0 F10): the union used to come from index.json's own
+    // `nodeTypes` field, so an index entry that under- or over-claimed its fixture's types could
+    // never be caught — the corpus-coverage claim certified itself. Building the union from the
+    // parsed trees instead means this assertion is about the fixtures, not about the index.
     const union = new Set<string>();
-    for (const entry of Object.values(index)) {
-      for (const type of entry.nodeTypes) union.add(type);
+    for (const name of sourceNames) {
+      const root = parse(readFileSync(`${FIXTURES}/${name}`, "utf8")) as unknown as Node;
+      walk(root, (n) => union.add(n.type));
     }
     expect([...union].sort()).toEqual(SUPPORTED_NODE_TYPES);
+  });
+
+  it("has index.json's nodeTypes matching each fixture's own parsed tree, presence and absence", () => {
+    for (const name of sourceNames) {
+      const root = parse(readFileSync(`${FIXTURES}/${name}`, "utf8")) as unknown as Node;
+      const actual = new Set<string>();
+      walk(root, (n) => actual.add(n.type));
+      const claimed = new Set(index[name].nodeTypes);
+
+      // Presence: every type the index claims for this fixture really occurs in its tree.
+      for (const type of claimed) {
+        expect(actual.has(type)).toBe(true);
+      }
+      // Absence: every §6.1 type this fixture's tree actually contains is claimed by the index.
+      // The membership check is belt-and-braces should this test ever run in isolation from the
+      // one above: that test is what actually proves no fixture's tree contains a type outside
+      // SUPPORTED_NODE_TYPES in the first place.
+      for (const type of actual) {
+        if (SUPPORTED_NODE_TYPES.includes(type)) {
+          expect(claimed.has(type)).toBe(true);
+        }
+      }
+    }
   });
 
   it("has hand-computed blockCounts for five named fixtures (PRD §6.1: root's direct children, plus each listItem, plus each tableRow)", () => {
