@@ -127,6 +127,33 @@ jobs:
         shell: bash
         run: cargo test 2>&1 | tee cargo-test.log
 
+      # The browser cache is per runner, never assume it is present. --with-deps installs the
+      # OS package dependencies Chromium needs on Linux; macOS and Windows runners already carry
+      # them, and --with-deps there `sudo`s in a way that fails outside apt-based images.
+      - name: Install Playwright browser (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: pnpm --filter @essaydown/e2e-web exec playwright install --with-deps chromium
+
+      - name: Install Playwright browser (macOS, Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: pnpm --filter @essaydown/e2e-web exec playwright install chromium
+
+      - name: Playwright (e2e/web)
+        shell: bash
+        env:
+          PLAYWRIGHT_HTML_OPEN: never
+        run: pnpm --filter @essaydown/e2e-web exec playwright test --reporter=list,html
+
+      - name: playwright-report-${{ matrix.os }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.os }}
+          path: e2e/web/playwright-report
+          if-no-files-found: ignore
+
       - name: Runner conformance suite (RUNNER-SPEC §12, ubuntu leg only)
         if: runner.os == 'Linux'
         shell: bash
@@ -154,5 +181,13 @@ jobs:
         with:
           name: test-logs
           pattern: test-logs-*
+          separate-directories: true
+          delete-merged: true
+
+      - name: playwright-report
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: playwright-report
+          pattern: playwright-report-*
           separate-directories: true
           delete-merged: true
