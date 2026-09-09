@@ -1100,6 +1100,37 @@ export function readFrontMatter(root: Root): FrontMatter {
   };
 }
 
+/**
+ * YAML core-schema implicit resolvers (YAML 1.2 core schema §10.3, widened to the YAML 1.1
+ * boolean spellings a plain `essaydown` reader has no opinion on but Typora, Obsidian and pandoc's
+ * YAML front-matter readers still resolve): a plain scalar matching one of these is read back
+ * *typed* by a third-party reader even though this app's own grammar reads the line as the literal
+ * string, so `needsQuoting` promotes it to quoted on the way out (DECISIONS #review-1-r0 F6, Claude
+ * finding 3 / Grok risk 3). Every resolver is case-insensitive, as the YAML resolvers themselves
+ * are (`True`, `NULL`, `.INF` all resolve the same as their lowercase spelling).
+ */
+const CORE_SCHEMA_BOOL = /^(?:true|false|yes|no|on|off|y|n)$/iu;
+const CORE_SCHEMA_NULL = /^(?:null|~)$/iu;
+/** Signed decimal, and the `0x`/`0o` radix forms the task names — not YAML 1.1's bare-`0`-prefixed octal. */
+const CORE_SCHEMA_INT = /^[-+]?(?:0x[0-9a-f]+|0o[0-7]+|[0-9]+)$/iu;
+/** A decimal float (bare digits included, since `123` must already match `CORE_SCHEMA_INT`), or `.inf`/`.nan`. */
+const CORE_SCHEMA_FLOAT =
+  /^[-+]?(?:\.(?:inf|nan)|(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:e[-+]?[0-9]+)?)$/iu;
+/** ISO 8601 date, or date+time with an optional fractional second and `Z`/offset — no bare time-of-day. */
+const CORE_SCHEMA_TIMESTAMP =
+  /^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[t ][0-9]{1,2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:[ \t]*z|[-+][0-9]{1,2}(?::[0-9]{2})?)?)?$/iu;
+
+/** Whether a third-party YAML reader would resolve `value` to something other than a string. */
+function isCoreSchemaScalar(value: string): boolean {
+  return (
+    CORE_SCHEMA_BOOL.test(value) ||
+    CORE_SCHEMA_NULL.test(value) ||
+    CORE_SCHEMA_INT.test(value) ||
+    CORE_SCHEMA_FLOAT.test(value) ||
+    CORE_SCHEMA_TIMESTAMP.test(value)
+  );
+}
+
 /** Whether a plain scalar would be re-read as something other than this exact string. */
 function needsQuoting(value: string): boolean {
   if (value === "") return true;
@@ -1109,6 +1140,7 @@ function needsQuoting(value: string): boolean {
   if (hasUnwritableRaw(value)) return true;
   if (/(?:^|\s)#/u.test(value)) return true;
   if (/:(?:\s|$)/u.test(value)) return true;
+  if (isCoreSchemaScalar(value)) return true;
   return YAML_INDICATORS.includes(value[0]);
 }
 

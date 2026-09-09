@@ -258,6 +258,78 @@ describe("the reader accepts a plain scalar exactly when the writer would emit i
   });
 });
 
+// ---------------------------------------------------------------------------
+// F6 — YAML core-schema implicit resolvers are quoted, not written bare
+//
+// DECISIONS #review-1-r0 F6 (Claude finding 3, Grok risk 3): `needsQuoting` tested only this
+// writer's own grammar, so a topic like `no` or `2026-01-01` went onto the line bare and a
+// third-party YAML reader (Typora, Obsidian, pandoc) took it back as a boolean or a date, not the
+// string the app wrote. Each presence row is a value one resolver class covers; each absence row
+// is one that must stay bare because no resolver's grammar matches the whole string. Every row
+// asserts `ok: true` directly rather than branching on it (H9: a test that returns early on
+// `ok: false` stays green through a regression from escaped to refused), then invariant A: the
+// written document re-reads to the same value and re-serialising it again is a no-op.
+// ---------------------------------------------------------------------------
+
+const CORE_SCHEMA_PRESENCE: readonly [string, string][] = [
+  ["a yes/no boolean", "no"],
+  ["a true/false boolean", "true"],
+  ["an on/off boolean", "off"],
+  ["a y/n boolean", "y"],
+  ["the null literal", "null"],
+  ["the tilde null", "~"],
+  ["a decimal integer", "123"],
+  ["a signed integer", "-7"],
+  ["a hex integer", "0x1F"],
+  ["an octal integer", "0o17"],
+  ["a decimal float", "1.5"],
+  ["a float with an exponent", "1e10"],
+  ["positive infinity", ".inf"],
+  ["not a number", ".nan"],
+  ["an ISO date", "2026-01-01"],
+  ["an ISO timestamp", "2026-01-01T12:00:00Z"],
+];
+
+/** None of these is a *whole-string* match for a resolver's grammar, so they must stay bare. */
+const CORE_SCHEMA_ABSENCE: readonly [string, string][] = [
+  ["an ordinary word", "hello"],
+  ["digits with a trailing letter", "1a"],
+  ["a boolean word followed by more words", "no way"],
+  ["a date followed by more words", "2026-01-01 essay"],
+];
+
+describe("a YAML core-schema implicit resolver is quoted on the way out (F6)", () => {
+  it.each(CORE_SCHEMA_PRESENCE)(
+    "%s (%s) is written quoted and reads back unchanged",
+    (_name, value) => {
+      const root = withFrontMatter("title: The Fountain Pen", "question: seed");
+      const write = writeFrontMatter(root, { question: value });
+      expect(write.ok).toBe(true);
+
+      expect(yamlOf(write.root)).toBe(`title: The Fountain Pen\nquestion: "${value}"`);
+      expect(readFrontMatter(write.root).question).toMatchObject({ writable: true, value });
+
+      // Invariant A: re-serialising the written document is a no-op.
+      const written = format(write.root);
+      expect(format(parse(written))).toBe(written);
+      expect(readFrontMatter(parse(written)).question).toMatchObject({ writable: true, value });
+    },
+  );
+
+  it.each(CORE_SCHEMA_ABSENCE)("%s (%s) stays bare", (_name, value) => {
+    const root = withFrontMatter("title: The Fountain Pen", "question: seed");
+    const write = writeFrontMatter(root, { question: value });
+    expect(write.ok).toBe(true);
+
+    expect(yamlOf(write.root)).toBe(`title: The Fountain Pen\nquestion: ${value}`);
+    expect(readFrontMatter(write.root).question).toMatchObject({ writable: true, value });
+
+    const written = format(write.root);
+    expect(format(parse(written))).toBe(written);
+    expect(readFrontMatter(parse(written)).question).toMatchObject({ writable: true, value });
+  });
+});
+
 describe("a line carrying a line terminator that is not `\\n` is still a mapping line", () => {
   it("does not make the block malformed, and does not take the other key down with it", () => {
     // `KEY_LINE`'s `.` under the `u` flag without `s` excluded U+2028/U+2029, so this whole block

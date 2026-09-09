@@ -41,3 +41,28 @@ test("outline: three questions, one nested, Produce opens /dev/editor with the b
   await expect(hints.nth(1)).toHaveText("Q2");
   await expect(hints.nth(2)).toHaveText("Q2a");
 });
+
+/**
+ * Task 1.18 (DECISIONS #review-1-r0 F6): a topic a YAML core-schema resolver would read back
+ * typed must come out of `writeFrontMatter` quoted, and a question with the same text is
+ * unaffected — a heading's hint is never mdast front matter, so it stays the literal string.
+ */
+test("outline: a topic a YAML reader would resolve as a boolean is produced quoted", async ({
+  page,
+}) => {
+  await page.goto("/dev/outline");
+
+  await page.getByTestId("topic").fill("true");
+  await page.getByTestId("question-draft").fill("true");
+  await page.getByTestId("add-question").click();
+
+  await page.getByTestId("produce").click();
+  await page.waitForURL("**/dev/editor");
+
+  const markdown = await page.getByTestId("markdown").textContent();
+  expect(markdown).toBe('---\nquestion: "true"\n---\n\n## true\n');
+
+  const hints = page.locator(".question-hint");
+  await expect(hints).toHaveCount(1);
+  await expect(hints.nth(0)).toHaveText("true");
+});
