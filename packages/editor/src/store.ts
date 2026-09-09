@@ -3,6 +3,7 @@ import {
   createUndoStack,
   current,
   endCoalescing,
+  format,
   push,
   redo,
   undo,
@@ -88,6 +89,37 @@ export function createDocumentStore(
       endCoalescing: () => move(endCoalescing(get().stack)),
     };
   });
+}
+
+/**
+ * A one-slot memo of a root's canonical Markdown, keyed on the root's *identity*.
+ *
+ * A reader of "what does the store currently serialise to?" is called far more often than the
+ * store changes: `useSyncExternalStore` calls its snapshot getter on every render and on every
+ * notification, so `/dev/editor` was running `format(root)` several times per keystroke over the
+ * whole document (task 1.10's phase check; DECISIONS #review-1-r0 F5). `push` stores a root by
+ * reference — the same identity both bindings' echo guards are built on — so a read whose root is
+ * the one already serialised answers with the string instance it produced last time and `format`
+ * runs once per committed snapshot.
+ *
+ * One slot, not a map: the readers are all "the current snapshot", and a cache that outlived the
+ * snapshot would hold every root an undo stack has ever had. Alternating between two roots
+ * therefore re-serialises, which is what the stack's own `undo`/`redo` do anyway.
+ *
+ * `serialise` is injected only so a test can count the calls; every caller uses the default.
+ */
+export function createFormatCache(
+  serialise: (root: Root) => string = format,
+): (root: Root) => string {
+  let cached: Root | null = null;
+  let text = "";
+  return (root) => {
+    if (root !== cached) {
+      cached = root;
+      text = serialise(root);
+    }
+    return text;
+  };
 }
 
 /**

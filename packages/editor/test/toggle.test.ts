@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { Root } from "mdast";
 import {
+  COALESCE_WINDOW_MS,
   canUndo,
   emptySidecar,
   format,
@@ -60,6 +61,39 @@ function fixture(name: string): string {
 function pair(markdown: string): { root: Root; doc: ReturnType<typeof mdastToPM>["doc"] } {
   const root = parse(markdown);
   return { root, doc: mdastToPM(root).doc };
+}
+
+/**
+ * A clock and a timer queue driven by hand, so a burst boundary is an exact place in a test rather
+ * than a wall-clock wait. `now` and `schedule` share the same time, which is what makes the `at`
+ * the store records and the moment the deferred commit runs agree (task 1.17).
+ */
+class FakeClock {
+  time = 0;
+  private tasks: { at: number; run: () => void }[] = [];
+
+  readonly now = (): number => this.time;
+
+  readonly schedule = (run: () => void, ms: number): (() => void) => {
+    const task = { at: this.time + ms, run };
+    this.tasks.push(task);
+    return () => {
+      this.tasks = this.tasks.filter((other) => other !== task);
+    };
+  };
+
+  /** Move `ms` forward and run everything that comes due, in the order it was scheduled. */
+  advance(ms: number): void {
+    this.time += ms;
+    const due = this.tasks.filter((task) => task.at <= this.time);
+    this.tasks = this.tasks.filter((task) => task.at > this.time);
+    for (const task of due) task.run();
+  }
+
+  /** How many timers are still waiting. */
+  get waiting(): number {
+    return this.tasks.length;
+  }
 }
 
 /** A stand-in for CodeMirror's `EditorView` holding only what `BoundSourceView` names. */
@@ -343,43 +377,51 @@ describe("bindCodeMirror", () => {
   it("commits an edit as a source burst, at the injected time", () => {
     const store = storeFor("");
     const view = new FakeSourceView();
-    const now = vi.fn(() => 42);
-    const binding = bindCodeMirror(store, view, { now });
+    const clock = new FakeClock();
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
 
     binding.change("hello\n");
+    clock.advance(COALESCE_WINDOW_MS);
 
     expect(format(store.getState().document.root)).toBe("hello\n");
     expect(store.getState().stack.openKey).toBe(SOURCE_KEY);
-    expect(store.getState().stack.entries.at(-1)?.at).toBe(42);
-    expect(now).toHaveBeenCalled();
+    expect(store.getState().stack.entries.at(-1)?.at).toBe(COALESCE_WINDOW_MS);
     binding.destroy();
   });
 
   it("takes the coalescing key from its options", () => {
+    const clock = new FakeClock();
     const store = storeFor("");
     const binding = bindCodeMirror(store, new FakeSourceView(), {
       coalesceKey: "other",
-      now: () => 1,
+      now: clock.now,
+      schedule: clock.schedule,
     });
     binding.change("x\n");
+    clock.advance(COALESCE_WINDOW_MS);
     expect(store.getState().stack.openKey).toBe("other");
   });
 
   it("ignores its own echo", () => {
+    const clock = new FakeClock();
     const store = storeFor("hello\n");
     const view = new FakeSourceView();
-    const binding = bindCodeMirror(store, view);
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
     const before = store.getState().stack;
     binding.change(view.text());
+    expect(clock.waiting).toBe(0);
+    clock.advance(COALESCE_WINDOW_MS);
     expect(store.getState().stack).toBe(before);
   });
 
   it("accepts an unclosed fence and re-parses it leniently", () => {
+    const clock = new FakeClock();
     const store = storeFor("");
     const view = new FakeSourceView();
-    const binding = bindCodeMirror(store, view);
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
 
     expect(() => binding.change("```js\nhalf a fence\n")).not.toThrow();
+    clock.advance(COALESCE_WINDOW_MS);
     expect(store.getState().document.root.children[0].type).toBe("code");
     // The view keeps the bytes the user typed; nothing re-serialised over them.
     expect(view.text()).toBe("hello\n".slice(0, 0));
@@ -396,6 +438,204 @@ describe("bindCodeMirror", () => {
     binding.destroy();
     store.getState().commit(parse("three\n"), SIDECAR, { at: 2 });
     expect(view.text()).toBe("two\n");
+  });
+});
+
+/**
+ * The deferred source commit of task 1.17 (DECISIONS #review-1-r0 F5): `parse` over the whole
+ * buffer moves off the keystroke path and onto the burst boundary. One test per guard in the diff,
+ * named in the journal — the guards are the schedule itself, the reschedule, the window's source,
+ * the echo comparison against the pending text, the two flushes (toggle and unmount), the flush of
+ * nothing, and the drop on a pull.
+ *
+ * Every case drives {@link FakeClock} rather than a real timer: the acceptance is about *which*
+ * side of the coalescing window an update falls on, which a wall-clock wait can only approximate.
+ */
+describe("bindCodeMirror commits on the burst boundary", () => {
+  /** A binding on a fresh empty store, with the clock that drives both its timer and its `at`. */
+  function bound(markdown = "", options: { coalesceWindowMs?: number } = {}) {
+    const clock = new FakeClock();
+    const store = createDocumentStore(parse(markdown), SIDECAR, { at: 0, ...options });
+    const view = new FakeSourceView();
+    const roots: Root[] = [];
+    store.subscribe((state) => roots.push(state.document.root));
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
+    return { clock, store, view, binding, roots };
+  }
+
+  /** The Markdown the store currently holds. */
+  function committed(store: DocumentStore): string {
+    return format(store.getState().document.root);
+  }
+
+  it("nothing is committed while the burst is still inside the window", () => {
+    const { clock, store, binding, roots } = bound();
+
+    for (const text of ["w\n", "wo\n", "wor\n", "word\n"]) {
+      binding.change(text);
+      clock.advance(100);
+    }
+
+    expect(roots).toEqual([]);
+    expect(committed(store)).toBe("");
+    expect(store.getState().stack.entries).toHaveLength(1);
+  });
+
+  it("four updates inside the window are one commit and one undo entry", () => {
+    const { clock, store, binding, roots } = bound();
+
+    for (const text of ["w\n", "wo\n", "wor\n", "word\n"]) {
+      binding.change(text);
+      clock.advance(100);
+    }
+    clock.advance(COALESCE_WINDOW_MS);
+
+    expect(roots).toHaveLength(1);
+    expect(committed(store)).toBe("word\n");
+    expect(store.getState().stack.entries).toHaveLength(2);
+    expect(store.getState().stack.openKey).toBe(SOURCE_KEY);
+  });
+
+  it("each update reschedules the one commit rather than adding a timer", () => {
+    const { clock, binding } = bound();
+
+    binding.change("a\n");
+    expect(clock.waiting).toBe(1);
+    binding.change("ab\n");
+    binding.change("abc\n");
+    expect(clock.waiting).toBe(1);
+  });
+
+  it("an update after the window is a second commit and a second undo entry", () => {
+    const { clock, store, binding, roots } = bound();
+
+    binding.change("first\n");
+    clock.advance(COALESCE_WINDOW_MS);
+    expect(roots).toHaveLength(1);
+    expect(store.getState().stack.entries).toHaveLength(2);
+
+    clock.advance(1);
+    binding.change("first second\n");
+    clock.advance(COALESCE_WINDOW_MS);
+
+    expect(roots).toHaveLength(2);
+    expect(committed(store)).toBe("first second\n");
+    // Two entries beside the seed: the two commits are more than one window apart, so the store
+    // opens a new coalescing group for the second exactly as it did per keystroke before.
+    expect(store.getState().stack.entries).toHaveLength(3);
+    expect(store.getState().stack.entries.at(-2)?.state.root).toBe(roots[0]);
+  });
+
+  it("the wait is the stack's own coalescing window, not a constant of its own", () => {
+    const { clock, store, binding } = bound("", { coalesceWindowMs: 250 });
+
+    binding.change("x\n");
+    clock.advance(249);
+    expect(committed(store)).toBe("");
+    clock.advance(1);
+    expect(committed(store)).toBe("x\n");
+  });
+
+  it("a character typed and deleted again inside the window is not taken for an echo", () => {
+    const { clock, store, binding } = bound("hello\n");
+
+    binding.change("hellox\n");
+    clock.advance(10);
+    binding.change("hello\n");
+    clock.advance(COALESCE_WINDOW_MS);
+
+    // The pending "hellox" was replaced, not left to be written back over the deletion.
+    expect(committed(store)).toBe("hello\n");
+  });
+
+  it("flush commits the pending text now, and leaves nothing scheduled", () => {
+    const { clock, store, binding, roots } = bound();
+
+    binding.change("typed\n");
+    binding.flush();
+
+    expect(committed(store)).toBe("typed\n");
+    expect(roots).toHaveLength(1);
+    expect(clock.waiting).toBe(0);
+    clock.advance(COALESCE_WINDOW_MS);
+    expect(roots).toHaveLength(1);
+  });
+
+  it("flush with nothing pending pushes nothing", () => {
+    const { store, binding } = bound("hello\n");
+    const before = store.getState().stack;
+
+    binding.flush();
+    binding.flush();
+
+    expect(store.getState().stack).toBe(before);
+  });
+
+  it("destroy flushes before it unsubscribes, so an unmount loses nothing", () => {
+    const { clock, store, view, binding } = bound();
+
+    binding.change("typed\n");
+    binding.destroy();
+
+    expect(committed(store)).toBe("typed\n");
+    // And the subscription is gone: a later commit is not pulled into the view.
+    store.getState().commit(parse("other\n"), SIDECAR, { at: clock.now() + 5_000 });
+    expect(view.text()).not.toBe("other\n");
+  });
+
+  /**
+   * The call-site guard: `DevEditor`'s toggle flushes *before* `toggleMode` closes the coalescing
+   * group. Deleting that line loses nothing typed — the source view unmounts on the same swap and
+   * `destroy` flushes — so the only behaviour it changes is the group boundary, and the input that
+   * separates the two orders needs a burst already committed with the group still open. That is a
+   * pair of bursts inside one 1 s window, which is a clock a browser spec cannot hold steady on
+   * three shared runners; it is pinned here instead, where the clock is injected. The pair below
+   * is the whole separation: same events, the two orders, one entry against two.
+   */
+  it("flushing before the mode swap keeps the burst in one undo entry (DevEditor's order)", () => {
+    const { clock, store, binding } = bound();
+
+    binding.change("word\n");
+    clock.advance(COALESCE_WINDOW_MS);
+    const entries = store.getState().stack.entries.length;
+
+    binding.change("word two\n");
+    binding.flush();
+    toggleMode(store, "source");
+
+    expect(store.getState().stack.entries).toHaveLength(entries);
+    expect(store.getState().stack.openKey).toBeNull();
+    expect(committed(store)).toBe("word two\n");
+  });
+
+  it("flushing after it would open a second entry, which is why the order is the other one", () => {
+    const { clock, store, binding } = bound();
+
+    binding.change("word\n");
+    clock.advance(COALESCE_WINDOW_MS);
+    const entries = store.getState().stack.entries.length;
+
+    binding.change("word two\n");
+    toggleMode(store, "source");
+    binding.flush();
+
+    expect(store.getState().stack.entries).toHaveLength(entries + 1);
+  });
+
+  it("a snapshot arriving from elsewhere drops the pending commit", () => {
+    const { clock, store, view, binding, roots } = bound("one\n");
+
+    binding.change("one typed\n");
+    store.getState().commit(parse("loaded\n"), SIDECAR, { at: 5_000 });
+    expect(view.text()).toBe("loaded\n");
+
+    clock.advance(COALESCE_WINDOW_MS);
+
+    // Two notifications would mean the abandoned text was written over the snapshot that
+    // superseded it; the load is the only one.
+    expect(roots).toHaveLength(1);
+    expect(committed(store)).toBe("loaded\n");
+    expect(clock.waiting).toBe(0);
   });
 });
 
@@ -721,5 +961,34 @@ describe("canonicalCursor: a live source buffer that is not canonical (task 1.16
     // `&amp;` is a named character reference, which `spellingOffsets` refuses; the cursor then
     // lands at the start of the paragraph's text rather than at a guessed character.
     expect(canonicalCursor("a&amp;b", { line: 1, ch: 6 })).toEqual({ line: 1, ch: 0 });
+  });
+});
+
+/**
+ * Kept apart from the suite above, which injects a clock: this is the one case that runs the
+ * default timer, so `setTimeout` and the `clearTimeout` its cancel returns are both exercised.
+ */
+describe("the default timer", () => {
+  it("schedules the deferred commit with setTimeout, and clears it on the next keystroke", () => {
+    vi.useFakeTimers();
+    try {
+      const store = storeFor("");
+      const binding = bindCodeMirror(store, new FakeSourceView());
+
+      binding.change("a\n");
+      vi.advanceTimersByTime(COALESCE_WINDOW_MS - 1);
+      expect(format(store.getState().document.root)).toBe("");
+
+      // The reschedule: if the first timer were still live it would fire one tick from here.
+      binding.change("ab\n");
+      vi.advanceTimersByTime(COALESCE_WINDOW_MS - 1);
+      expect(format(store.getState().document.root)).toBe("");
+
+      vi.advanceTimersByTime(1);
+      expect(format(store.getState().document.root)).toBe("ab\n");
+      binding.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

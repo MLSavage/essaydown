@@ -265,7 +265,6 @@ function afterLastNode(
   return best === null ? { line: 1, ch: 0 } : { line: best.endLine, ch: best.endCol - 1 };
 }
 
-
 /**
  * {@link afterLastNode}'s mirror: the ProseMirror position for a place in the canonical string
  * that no node owns — a blank line, a column past the end of a line, or a line belonging to a node
@@ -525,13 +524,26 @@ export interface SourceBindOptions {
   readonly coalesceKey?: string;
   /** Injected clock, so a test can place two bursts an exact distance apart. */
   readonly now?: () => number;
+  /**
+   * Injected timer for the deferred commit: run `run` in `ms`, and return the cancel for it.
+   * `setTimeout`/`clearTimeout` by default; a test injects a clock it steps by hand.
+   */
+  readonly schedule?: (run: () => void, ms: number) => () => void;
 }
 
 export interface SourceBinding {
-  /** The source view's text changed: parse it leniently and commit. Call from an update listener. */
+  /** The source view's text changed: remember it, and commit it at the end of the burst. */
   change(text: string): void;
-  /** Stop pulling store changes into the view. */
+  /** Commit the text typed since the last commit now. A no-op when nothing is pending. */
+  flush(): void;
+  /** Flush, then stop pulling store changes into the view. */
   destroy(): void;
+}
+
+/** {@link SourceBindOptions.schedule}'s default: a plain timer. */
+function timerSchedule(run: () => void, ms: number): () => void {
+  const handle: ReturnType<typeof setTimeout> = setTimeout(run, ms);
+  return () => clearTimeout(handle);
 }
 
 /**
@@ -544,6 +556,23 @@ export interface SourceBinding {
  * *text* as well, because the source view is the one place where the document the user sees is
  * not `format(root)` — an intermediate edit is whatever they typed, and re-serialising the lenient
  * parse back over it would move the cursor and un-type half a fence.
+ *
+ * **The commit waits for the end of the burst** (task 1.17; DECISIONS #review-1-r0 F5). `parse` is
+ * 37 ms on a 10 k-word document against `format`'s 0.9 ms, so parsing the whole buffer on every
+ * keystroke put the largest single cost in the product on the keystroke path. The store coalesces
+ * a source burst into one undo entry anyway, so nothing is gained by pushing each keystroke:
+ * `change` records the text and schedules the commit one coalescing window later, and a further
+ * keystroke inside that window replaces both the text and the timer. The window is the stack's own
+ * (`coalesceWindowMs`), so the chain of keystrokes that becomes one commit here is exactly the
+ * chain that used to become one coalesced undo entry — the grouping the user sees is unchanged,
+ * and so is `openKey`, because the deferred commit still carries `coalesceKey`.
+ *
+ * In between, the CodeMirror buffer is what the user sees and it is already authoritative (above),
+ * so a pending commit changes nothing on screen. What it does change is that the typed text is not
+ * in the store yet, so anything that reads the store instead of the buffer flushes first:
+ * {@link SourceBinding.flush} for a toggle, {@link SourceBinding.destroy} for an unmount. A pull
+ * goes the other way — an undo, a redo, a loaded fixture supersede what was typed, so the pending
+ * commit is dropped rather than written over the snapshot that has just arrived.
  */
 export function bindCodeMirror(
   store: DocumentStore,
@@ -552,10 +581,33 @@ export function bindCodeMirror(
 ): SourceBinding {
   const coalesceKey = options.coalesceKey ?? SOURCE_KEY;
   const now = options.now ?? Date.now;
+  const schedule = options.schedule ?? timerSchedule;
   let shown = store.getState().document.root;
   let shownText = "";
+  /** The text typed since the last commit, and the cancel of the commit scheduled for it. */
+  let pending: string | null = null;
+  let cancel: (() => void) | null = null;
+
+  /** Forget the pending text and unschedule its commit. */
+  const drop = (): void => {
+    pending = null;
+    if (cancel !== null) cancel();
+    cancel = null;
+  };
+
+  const commitPending = (): void => {
+    const text = pending;
+    drop();
+    if (text === null) return;
+    const { document, commit } = store.getState();
+    const root = parse(text);
+    shown = root;
+    shownText = text;
+    commit(root, document.sidecar, { coalesceKey, at: now() });
+  };
 
   const pull = (root: Root): void => {
+    drop();
     shown = root;
     const text = format(root);
     shownText = text;
@@ -571,15 +623,20 @@ export function bindCodeMirror(
   return {
     change(text) {
       // The pull above dispatches a change of its own, so the view's update listener calls back
-      // with text this binding has just written; that is the echo, and it commits nothing.
-      if (text === shownText) return;
-      const { document, commit } = store.getState();
-      const root = parse(text);
-      shown = root;
-      shownText = text;
-      commit(root, document.sidecar, { coalesceKey, at: now() });
+      // with text this binding has just written; that is the echo, and it commits nothing. The
+      // text last *seen* is the pending one while a commit is waiting: typing a character and
+      // deleting it again inside one window is a change back to `shownText`, and taking that for
+      // an echo would leave the pending commit to write the deleted character back.
+      if (text === (pending ?? shownText)) return;
+      pending = text;
+      if (cancel !== null) cancel();
+      cancel = schedule(commitPending, store.getState().stack.coalesceWindowMs);
     },
-    destroy: unsubscribe,
+    flush: commitPending,
+    destroy() {
+      commitPending();
+      unsubscribe();
+    },
   };
 }
 

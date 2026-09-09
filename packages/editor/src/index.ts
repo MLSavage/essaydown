@@ -22,6 +22,7 @@ export {
   TYPING_KEY,
   bindProseMirror,
   createDocumentStore,
+  createFormatCache,
   sourceUndoKeymap,
   storePlugins,
   undoKeyBindings,

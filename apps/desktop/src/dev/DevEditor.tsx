@@ -5,6 +5,7 @@ import {
   bindProseMirror,
   canonicalCursor,
   createDocumentStore,
+  createFormatCache,
   cursorMap,
   editorPlugins,
   renderedSelection,
@@ -72,8 +73,13 @@ export default function DevEditor() {
   useEffect(() => {
     clearOutlineHandoff();
   }, []);
+  // `useSyncExternalStore` calls its getter on every render and every notification, so the
+  // serialisation is memoised on the root's identity (task 1.17) rather than run per call. One
+  // cache for the life of the route, not one per store: the key is the root object, and a new
+  // store is built from a fresh `parse`, so no two stores can present the same root here.
+  const formatted = useMemo(() => createFormatCache(), []);
   const markdown = useSyncExternalStore(store.subscribe, () =>
-    format(store.getState().document.root),
+    formatted(store.getState().document.root),
   );
   const [mode, setMode] = useState<EditorMode>("rendered");
   const [status, setStatus] = useState("");
@@ -83,11 +89,17 @@ export default function DevEditor() {
   const modeRef = useRef<EditorMode>("rendered");
   const rendered = useRef<EditorView | null>(null);
   const source = useRef<SourceEditorView | null>(null);
+  const sourceBinding = useRef<SourceBinding | null>(null);
   const carried = useRef<SourcePosition | null>(null);
 
   const toggle = useCallback(() => {
     const pm = rendered.current;
     const cm = source.current;
+    // The source view commits on the burst boundary (task 1.17), so what is typed in the last
+    // window before a toggle is still only in the CodeMirror buffer; the rendered view is built
+    // from the store, so the pending commit is made *before* the group is closed — which is the
+    // order the per-keystroke commit produced, and leaves the toggle itself pushing nothing.
+    sourceBinding.current?.flush();
     const root = store.getState().document.root;
     if (pm !== null) {
       carried.current = cursorMap(root, pm.state.doc).toSource(pm.state.selection.head);
@@ -163,6 +175,7 @@ export default function DevEditor() {
       },
     });
     source.current = view;
+    sourceBinding.current = binding;
     const at = carried.current;
     if (at !== null) {
       view.dispatch({ selection: { anchor: sourceOffset(view.state, at) }, scrollIntoView: true });
@@ -170,6 +183,9 @@ export default function DevEditor() {
     view.focus();
     return () => {
       source.current = null;
+      sourceBinding.current = null;
+      // `destroy` flushes: an unmount (a toggle, a StrictMode remount, leaving the route) must not
+      // drop the text typed inside the last burst window.
       binding?.destroy();
       view.destroy();
     };

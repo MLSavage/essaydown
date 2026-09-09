@@ -10,6 +10,7 @@ import {
   TYPING_KEY,
   bindProseMirror,
   createDocumentStore,
+  createFormatCache,
   sourceUndoKeymap,
   undoKeyBindings,
   type BoundView,
@@ -464,5 +465,65 @@ describe("the default clock", () => {
     } finally {
       now.mockRestore();
     }
+  });
+});
+
+/**
+ * Task 1.17's snapshot cache (DECISIONS #review-1-r0 F5). Two guards, one test each: an unchanged
+ * root answers from the slot, a changed root serialises again.
+ *
+ * The count is the assertion, not the string: two equal strings are `===` in JavaScript whatever
+ * produced them, so "the identical instance" can only be shown by the work *not* being done. That
+ * is what `serialise` is injected for; the last case pairs it with the real `format` so the cached
+ * value is also the right one.
+ */
+describe("createFormatCache", () => {
+  it("serialises once for a root that has not changed", () => {
+    const serialise = vi.fn((root: Root) => format(root));
+    const cache = createFormatCache(serialise);
+    const root = parse("hello\n");
+
+    const first = cache(root);
+    const second = cache(root);
+    const third = cache(root);
+
+    expect(serialise).toHaveBeenCalledTimes(1);
+    expect(second).toBe(first);
+    expect(third).toBe(first);
+  });
+
+  it("serialises again for a different root, and answers with the new string", () => {
+    const serialise = vi.fn((root: Root) => format(root));
+    const cache = createFormatCache(serialise);
+
+    const first = cache(parse("one\n"));
+    const second = cache(parse("two\n"));
+
+    expect(serialise).toHaveBeenCalledTimes(2);
+    expect(first).toBe("one\n");
+    expect(second).toBe("two\n");
+  });
+
+  it("re-serialises a root it has seen before but is not holding (one slot, not a map)", () => {
+    const serialise = vi.fn((root: Root) => format(root));
+    const cache = createFormatCache(serialise);
+    const one = parse("one\n");
+    const two = parse("two\n");
+
+    cache(one);
+    cache(two);
+    expect(cache(one)).toBe("one\n");
+    expect(serialise).toHaveBeenCalledTimes(3);
+  });
+
+  it("serialises with format by default, over every snapshot a store walks through", () => {
+    const store = createDocumentStore(parse("one\n"), SIDECAR, { at: 0 });
+    const cache = createFormatCache();
+
+    expect(cache(store.getState().document.root)).toBe("one\n");
+    store.getState().commit(parse("two\n"), SIDECAR, { at: 1 });
+    expect(cache(store.getState().document.root)).toBe("two\n");
+    store.getState().undo();
+    expect(cache(store.getState().document.root)).toBe("one\n");
   });
 });
