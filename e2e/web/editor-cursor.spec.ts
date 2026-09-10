@@ -80,13 +80,12 @@ test.describe("the cursor carried out of the source view (task 1.16)", () => {
     await typeXInRendered(page);
 
     // The `X` lands immediately before `beta`, which is this task's whole claim. The soft line
-    // break becoming a space is a *separate, pre-existing* defect and not the cursor's: typing
-    // anywhere in a paragraph that contains one collapses it, with no source view and no carried
-    // cursor involved (`alpha\nbeta gamma` typed into at the end gives `alpha beta gammaX`, on
-    // this task's code and on its branch base alike). The expectation is therefore the exact pane
-    // as it is today; when that defect is fixed this line becomes `> alpha\n> Xbeta gamma\n` and
-    // the red is the tripwire saying so.
-    await expect.poll(() => markdown(page)).toBe("> alpha Xbeta gamma\n");
+    // break used to collapse to a space here — a separate, pre-existing defect and not the
+    // cursor's, which 1.16 pinned as the exact pane of the day (`> alpha Xbeta gamma\n`) with a
+    // comment saying this line becomes the expectation below when it is fixed. Task 1.25 fixed it
+    // (DECISIONS #review-1-r1 G3, `whitespace: "pre"` on the inline-content node specs), so the
+    // tripwire has fired and this is now the assertion it named.
+    await expect.poll(() => markdown(page)).toBe("> alpha\n> Xbeta gamma\n");
   });
 
   test("the translation is not an edit: one Undo takes the typed word back", async ({ page }) => {

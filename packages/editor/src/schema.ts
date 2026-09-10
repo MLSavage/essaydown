@@ -148,22 +148,52 @@ function startOf(dom: HTMLElement): number | null {
 }
 
 /**
- * The three node types whose content is inline text, and the one whitespace decision they share.
+ * The three node types whose content is inline text, and the two whitespace settings they share.
  *
  * mdast writes a Markdown **soft line break** — a paragraph wrapped over two source lines — as a
  * literal `\n` inside a `text` node, so it is a literal `\n` in the text node `toDOM` produces.
  * ProseMirror's DOM parser normalises `\n` to a space unless the context is "preserve whitespace,
- * fully", which is why a wrapped blockquote came back joined onto one line: the bytes were on the
- * clipboard and the parser dropped them. `"full"` is the setting that keeps them.
+ * fully", and there are **two** independent paths into that parser, each reading a different
+ * setting (DECISIONS #review-1-r1 G3):
+ *
+ * - The **clipboard** path. `prosemirror-view` builds a `DOMParser` from this schema, so a copied
+ *   or pasted `<p>` is matched against the `parseDOM` rules below and each rule's own
+ *   `preserveWhitespace` decides. That is {@link INLINE_WHITESPACE}, added by task 1.14 when a
+ *   wrapped blockquote came back joined onto one line.
+ * - The **typing** path. `prosemirror-view` reparses the DOM the browser just mutated
+ *   (`readDOMChange` → `parseBetween`) and does *not* go through a `parseDOM` rule for the block
+ *   the caret is in: it reads the node type's own `whitespace` property instead
+ *   (`preserveWhitespace: $from.parent.type.whitespace == "pre" ? "full" : true`, and the same
+ *   property again when it synthesises a parse rule for a node view). `true` preserves runs of
+ *   spaces but still rewrites every `\n` to a space, which is why typing a single character
+ *   anywhere in a wrapped paragraph rewrote all of its line breaks. {@link INLINE_PRE} is the
+ *   setting that path reads.
+ *
+ * Both are kept, and **only `whitespace: "pre"` is load-bearing** — verified in the browser by
+ * mutation, not reasoned about (task 1.25's journal records both runs). Deleting it turns exactly
+ * the three soft-break browser cases red (`editor-soft-line-breaks.spec.ts`'s two typing cases and
+ * `editor-cursor.spec.ts`'s blockquote case) while every headless suite stays green, because no
+ * headless suite drives `readDOMChange`. Deleting `preserveWhitespace` from the rules instead
+ * turns *nothing* behavioural red — 68 of 68 browser cases and 1928 of 1929 unit tests pass, and
+ * the one failure is `parse-dom.test.ts` reading the rule's own property — because `wsOptionsFor`
+ * (prosemirror-model) consults `type.whitespace == "pre"` whenever a rule leaves
+ * `preserveWhitespace` unset, so for these three types the two settings compute the same option
+ * bits. The rule-level setting is retained anyway: it states the policy at the rule a reader of
+ * the clipboard path actually lands on, it is what task 1.14's finding was written against, and a
+ * node type that ever loses `"pre"` for another reason must not silently take the clipboard path
+ * down with it.
  *
  * The cost, stated because it is real: whitespace in *foreign* HTML is no longer collapsed either,
  * so a web page's `<p>` pasted with its source indentation keeps that indentation as soft breaks
- * and runs of spaces — which render as one space in any Markdown reader, and whose leading and
- * trailing runs `trimBlockEnds` already strips on the way out (task 1.13). Byte fidelity for the
- * editor's own documents (PRD §6, invariant C) is worth that; silently rewriting the user's own
- * line breaks is not.
+ * and runs of spaces — which render as one space in any Markdown reader, and which
+ * {@link stripUnparsableWhitespace} strips on the way out at every boundary micromark strips it
+ * at (tasks 1.13 and 1.25). Byte fidelity for the editor's own documents (PRD §6, invariant C) is
+ * worth that; silently rewriting the user's own line breaks is not.
  */
 const INLINE_WHITESPACE = "full" as const;
+
+/** The typing-path half of {@link INLINE_WHITESPACE}; see that comment for which path reads it. */
+const INLINE_PRE = "pre" as const;
 
 /**
  * Node specs. Declaration order is only significant for `doc` (the first entry is the top node);
@@ -193,6 +223,7 @@ export const nodes: Record<string, NodeSpec> = {
   paragraph: {
     group: "block",
     content: "inline*",
+    whitespace: INLINE_PRE,
     toDOM: (): DOMOutputSpec => ["p", 0],
     parseDOM: [{ tag: "p", preserveWhitespace: INLINE_WHITESPACE }],
   },
@@ -202,6 +233,7 @@ export const nodes: Record<string, NodeSpec> = {
     content: "inline*",
     attrs: { depth: { default: 1 } },
     defining: true,
+    whitespace: INLINE_PRE,
     toDOM: (node): DOMOutputSpec => [`h${node.attrs.depth as number}`, 0],
     // One rule per depth: mdast's `depth` is 1–6 and the tag name is the only place it is written.
     parseDOM: [1, 2, 3, 4, 5, 6].map((depth) => ({
@@ -327,6 +359,7 @@ export const nodes: Record<string, NodeSpec> = {
   table_cell: {
     content: "inline*",
     isolating: true,
+    whitespace: INLINE_PRE,
     toDOM: (): DOMOutputSpec => ["td", 0],
     // `td` only, because `toDOM` writes `td` only: mdast has no header/body distinction, so the
     // schema has no second cell type for a `th` to invert to.
@@ -519,13 +552,13 @@ function blockToMdast(node: PMNode): RootContent {
     case n.paragraph:
       return {
         type: "paragraph",
-        children: inlineToMdast(trimBlockEnds(childrenOf(node))),
+        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node))),
       } satisfies Paragraph;
     case n.heading:
       return {
         type: "heading",
         depth: node.attrs.depth as Heading["depth"],
-        children: inlineToMdast(trimBlockEnds(childrenOf(node))),
+        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node))),
       } satisfies Heading;
     case n.blockquote:
       return {
@@ -570,7 +603,7 @@ function blockToMdast(node: PMNode): RootContent {
     case n.table_cell:
       return {
         type: "tableCell",
-        children: inlineToMdast(trimBlockEnds(childrenOf(node))),
+        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node))),
       } satisfies TableCell;
     case n.raw:
       return { type: "html", value: node.attrs.value as string } satisfies Html;
@@ -581,53 +614,80 @@ function blockToMdast(node: PMNode): RootContent {
 
 /**
  * The ASCII whitespace of CommonMark §2.1 — space, tab, line feed, line tabulation, form feed and
- * carriage return — which is the set micromark strips at the two ends of a paragraph, heading or
- * table cell. Written as the character class rather than as `\s` on purpose: `\s` also matches
- * the Unicode spaces (U+00A0 and the U+2000 block) that a Markdown file *does* keep, so trimming
- * with it would delete bytes `parse` preserves.
+ * carriage return — which is the set micromark strips at a block's two ends. Written as the
+ * character class rather than as `\s` on purpose: `\s` also matches the Unicode spaces (U+00A0 and
+ * the U+2000 block) that a Markdown file *does* keep, so trimming with it would delete bytes
+ * `parse` preserves.
  */
 const ASCII_WHITESPACE = /[\t\n\v\f\r ]+/;
 const LEADING_WHITESPACE = new RegExp(`^${ASCII_WHITESPACE.source}`);
 const TRAILING_WHITESPACE = new RegExp(`${ASCII_WHITESPACE.source}$`);
 
 /**
+ * A **line-ending run**: any run of ASCII whitespace that contains at least one line ending,
+ * matched maximally in both directions so that the whitespace on either side of the break is part
+ * of the match. Replacing it with a single `\n` is what discharges three of the boundaries in
+ * {@link stripUnparsableWhitespace}'s ownership rule at once — the space before a soft break, the
+ * space after it, and a whitespace-only line between two of them.
+ */
+const LINE_ENDING_RUN = /[\t\v\f ]*[\n\r][\t\n\v\f\r ]*/g;
+
+/**
  * Strip the whitespace `parse` never keeps, so that the tree leaving the editor is one some
- * Markdown file parses to (DECISIONS #review-1-r0 F1, PRD §6 portability).
+ * Markdown file parses to (DECISIONS #review-1-r0 F1, #review-1-r1 G4; PRD §6 portability).
  *
- * micromark drops the leading and trailing ASCII whitespace of a paragraph, heading or table cell,
- * but ProseMirror keeps every character typed into it, so a trailing space typed before Enter
- * survives into `format`, whose `unsafe` table encodes a space before a line ending as `&#x20;` —
+ * ProseMirror keeps every character typed into a paragraph, heading or table cell; micromark does
+ * not. Where the two disagree the serializer's `unsafe` table faithfully encodes the difference —
+ * a space before a line ending becomes a numeric character reference — so the editor's Markdown is
  * bytes no Markdown file contains and no round trip is a fixed point of. The strip therefore
  * belongs here, on the way out of the editor's tree, where the serializer, the copy button and the
  * store all read the same document; not in the serializer's `unsafe` table, which is right about
  * the trees it is given.
  *
- * Ownership rule for zero-width items: this trims the block's own two ends and nothing else — the
- * leading whitespace of the block's **first** inline node and the trailing whitespace of its
- * **last**, each only when that node is a text node outside `inline_code`. An atom (`image`,
- * `hard_break`, `raw_inline`) or an inline-code run sitting at an end owns that end and stops the
- * strip there, which is why a text run beside a `hard_break` keeps its spaces (a hard break
- * already serialises to bytes that parse back) and inline code keeps its literal value. A node
- * that is both first and last is trimmed at both ends. A run trimmed to nothing is dropped rather
- * than kept as a zero-length text node, which ProseMirror rejects; dropping it does not promote
- * its neighbour to the boundary, because both ends are chosen before either is trimmed. Blocks
- * whose content is not inline — `code_block`, `raw`, and the opaque `html`/`yaml` bytes — never
- * reach this function.
+ * **Ownership rule, stated once for the whole boundary family** (task 1.13 closed the block's two
+ * ends only; the rest is task 1.25). Whitespace belongs to the boundary it touches, and the
+ * boundaries are exactly the ones micromark normalises:
+ *
+ * - **Every line start** takes the ASCII whitespace after it. A block's first inline node starts a
+ *   line (CommonMark §4.8: a paragraph's leading whitespace is stripped); so does the position
+ *   after a `hard_break` (§6.7: "leading spaces at the beginning of the next line are ignored");
+ *   so does the position after a soft line break (§6.8).
+ * - **Every line end** gives up the ASCII whitespace before it (§6.8, the other half of the soft
+ *   break's rule). A **hard break is the exception**: it owns the whitespace *after* it and not
+ *   the whitespace before it, because `foo \` is exactly how the serializer spells a break after a
+ *   text run ending in a space, and that parses back to the same run.
+ * - **The block's end** takes the trailing whitespace of its last inline node.
+ * - A whitespace run holding **two or more line endings collapses to one `\n`**: those bytes spell
+ *   a blank line, a paragraph node cannot hold one, and splitting the block instead would mean
+ *   this function inventing block structure. Collapsing keeps the tree stable across the round
+ *   trip; the blank line is the thing no file could have produced here.
+ *
+ * Zero-width and opaque items. An atom (`image`, `hard_break`, `raw_inline`) or an `inline_code`
+ * run is opaque: it owns the whitespace inside it, stops the strip, and (`hard_break` aside) puts
+ * the scan mid-line. A run trimmed to nothing is dropped rather than kept as a zero-length text
+ * node, which ProseMirror rejects; dropping it leaves the line-boundary state as it found it,
+ * because emitting nothing neither starts nor ends a line, and it does not promote its neighbour
+ * to a **block** end, because the block's two ends are the incoming list's first and last entries,
+ * chosen before anything is trimmed. Blocks whose content is not inline — `code_block`, `raw`, and
+ * the opaque `html`/`yaml` bytes — never reach this function.
  */
-function trimBlockEnds(nodes: readonly PMNode[]): PMNode[] {
+function stripUnparsableWhitespace(nodes: readonly PMNode[]): PMNode[] {
   if (nodes.length === 0) return [];
   const last = nodes.length - 1;
   const out: PMNode[] = [];
+  let atLineStart = true;
   for (let i = 0; i < nodes.length; i += 1) {
     const node = nodes[i];
     if (!node.isText || schema.marks.inline_code.isInSet(node.marks) !== undefined) {
+      atLineStart = node.type === schema.nodes.hard_break;
       out.push(node);
       continue;
     }
-    let text = node.text as string;
-    if (i === 0) text = text.replace(LEADING_WHITESPACE, "");
+    let text = (node.text as string).replace(LINE_ENDING_RUN, "\n");
+    if (atLineStart) text = text.replace(LEADING_WHITESPACE, "");
     if (i === last) text = text.replace(TRAILING_WHITESPACE, "");
     if (text === "") continue;
+    atLineStart = text.endsWith("\n");
     out.push(text === node.text ? node : schema.text(text, node.marks));
   }
   return out;

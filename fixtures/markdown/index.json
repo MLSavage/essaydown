@@ -586,6 +586,26 @@
       5
     ]
   },
+  "soft-line-breaks.md": {
+    "nodeTypes": [
+      "blockquote",
+      "break",
+      "list",
+      "listItem",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 6,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      5,
+      8,
+      10,
+      12
+    ]
+  },
   "spanning-mark-emphasis.md": {
     "nodeTypes": [
       "emphasis",

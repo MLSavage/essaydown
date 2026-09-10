@@ -13,12 +13,21 @@ import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
  * so `format` encoded a trailing space typed before Enter as a numeric character reference, and
  * the editor's Markdown was not a fixed point of `parse`∘`format`.
  *
- * Two suites. The first is one test per guard in `trimBlockEnds` (schema.ts), enumerated from the
- * diff rather than from the acceptance: the two ends it strips, the three neighbours it must not
- * touch, the run it drops, and the third block type it runs on. The second is the corpus leg the
- * review's risk 1 named — every other round-trip leg in this repo is seeded from `parse(fixture)`,
- * so the corpus is closed under the parser and a tree only the editor can build is unreachable by
- * construction. This one seeds from the editor's own output instead.
+ * Two suites. The first is one test per guard in `stripUnparsableWhitespace` (schema.ts),
+ * enumerated from the diff rather than from the acceptance: the two ends it strips, the three
+ * neighbours it must not touch, the run it drops, and the third block type it runs on. The second
+ * is the corpus leg the review's risk 1 named — every other round-trip leg in this repo is seeded
+ * from `parse(fixture)`, so the corpus is closed under the parser and a tree only the editor can
+ * build is unreachable by construction. This one seeds from the editor's own output instead.
+ *
+ * Task 1.25 (DECISIONS #review-1-r1 G3 and G4) widened both. 1.13 closed the block's two ends
+ * only, and its own doc comment justified stopping at an atom with "a hard break already
+ * serialises to bytes that parse back" — true of the whitespace *before* a break and false of the
+ * whitespace *after* it, and equally false on both sides of a soft line break, which typing now
+ * preserves. The guards below are therefore one per **boundary micromark normalises**, enumerated
+ * from CommonMark rather than from the three reproductions, and every one of them asserts the
+ * serialised bytes (`format(root)`), not only the tree: a guard that asserts the tree while its
+ * siblings assert `format` is the one that pins a defect as correct (lesson [1.10.r1d]).
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -38,8 +47,29 @@ function mdastOf(doc: PMNode): Root {
   return pmToMdast({ doc, frontMatter: null });
 }
 
-describe("block-end whitespace, one test per guard", () => {
-  it("guard 1 (leading strip): the leading whitespace of a block's first text run is dropped", () => {
+/**
+ * A paragraph wrapped over four source lines, so that its three soft line breaks are a first, a
+ * middle and a last one — the three positions CLAUDE.md's slice rule asks for. `WRAPPED` is what
+ * every one of the six typed variants below has to serialise back to.
+ */
+const WRAPPED = "one\ntwo\nthree\nfour\n";
+
+/** A space typed at the end of the first, the middle and the last wrapped line. */
+const SOFT_BREAK_POSITIONS_BEFORE: readonly (readonly [string, string])[] = [
+  ["first break", "one \ntwo\nthree\nfour"],
+  ["middle break", "one\ntwo \nthree\nfour"],
+  ["last break", "one\ntwo\nthree \nfour"],
+];
+
+/** A space typed at the start of the line after the first, the middle and the last break. */
+const SOFT_BREAK_POSITIONS_AFTER: readonly (readonly [string, string])[] = [
+  ["first break", "one\n two\nthree\nfour"],
+  ["middle break", "one\ntwo\n three\nfour"],
+  ["last break", "one\ntwo\nthree\n four"],
+];
+
+describe("the whitespace boundaries micromark normalises, one guard per boundary", () => {
+  it("boundary 1 (block start): the leading whitespace of a block's first text run is dropped", () => {
     const root = mdastOf(paragraph(schema.text("  \they")));
     expect(root.children).toEqual([
       { type: "paragraph", children: [{ type: "text", value: "hey" }] },
@@ -47,7 +77,7 @@ describe("block-end whitespace, one test per guard", () => {
     expect(format(root)).toBe("hey\n");
   });
 
-  it("guard 2 (trailing strip): the trailing whitespace of a block's last text run is dropped", () => {
+  it("boundary 2 (block end): the trailing whitespace of a block's last text run is dropped", () => {
     const root = mdastOf(paragraph(schema.text("hey \t")));
     expect(root.children).toEqual([
       { type: "paragraph", children: [{ type: "text", value: "hey" }] },
@@ -56,7 +86,33 @@ describe("block-end whitespace, one test per guard", () => {
     expect(format(root)).not.toContain("&#x20;");
   });
 
-  it("guard 3 (break-adjacent untouched): a text run beside a hard break keeps its spaces", () => {
+  it("boundary 3 (before a hard break): the whitespace a hard break does not own is kept", () => {
+    // The half of 1.13's "a hard break already serialises to bytes that parse back" that is true:
+    // `foo \` is how the serializer spells a break after a text run ending in a space, and
+    // `parse` gives that space back. This is the absence case of boundary 4 — the same tree, the
+    // same function, the other side of the same atom — so it is asserted on the bytes too.
+    const root = mdastOf(
+      paragraph(schema.text("one "), schema.node("hard_break"), schema.text("two")),
+    );
+    expect(root.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: "one " },
+          { type: "break" },
+          { type: "text", value: "two" },
+        ],
+      },
+    ]);
+    expect(format(root)).toBe("one \\\ntwo\n");
+    expect(format(root)).not.toContain("&#x20;");
+    expect(format(parse(format(root)))).toBe(format(root));
+  });
+
+  it("boundary 4 (after a hard break): the leading whitespace of the continuation line is dropped", () => {
+    // CommonMark §6.7: "leading spaces at the beginning of the next line are ignored". Before this
+    // task the same tree serialised to a character reference (DECISIONS #review-1-r1 G4, Claude
+    // finding 2: hard-break.md with one space typed at the start of its second line).
     const root = mdastOf(
       paragraph(schema.text("one "), schema.node("hard_break"), schema.text(" two ")),
     );
@@ -66,13 +122,51 @@ describe("block-end whitespace, one test per guard", () => {
         children: [
           { type: "text", value: "one " },
           { type: "break" },
-          { type: "text", value: " two" },
+          { type: "text", value: "two" },
         ],
       },
     ]);
+    expect(format(root)).toBe("one \\\ntwo\n");
+    expect(format(root)).not.toContain("&#x20;");
   });
 
-  it("guard 4 (inline code untouched): an inline-code run at a block end keeps its literal bytes", () => {
+  it("boundary 5 (before a soft line break): the space at the end of a wrapped line is dropped, first, middle and last", () => {
+    // CommonMark §6.8: a soft line break removes the spaces at the end of the line and at the
+    // beginning of the next. The three positions are the ownership rule's own edge cases: the
+    // paragraph below wraps over four lines, so its first, middle and last breaks are distinct.
+    for (const [label, typed] of SOFT_BREAK_POSITIONS_BEFORE) {
+      const root = mdastOf(paragraph(schema.text(typed)));
+      expect(format(root), label).toBe(WRAPPED);
+      expect(format(root), label).not.toContain("&#x20;");
+      expect(format(parse(format(root))), label).toBe(WRAPPED);
+    }
+  });
+
+  it("boundary 6 (after a soft line break): the space at the start of a wrapped line is dropped, first, middle and last", () => {
+    for (const [label, typed] of SOFT_BREAK_POSITIONS_AFTER) {
+      const root = mdastOf(paragraph(schema.text(typed)));
+      expect(format(root), label).toBe(WRAPPED);
+      expect(format(root), label).not.toContain("&#x20;");
+      expect(format(parse(format(root))), label).toBe(WRAPPED);
+    }
+  });
+
+  it("boundary 7 (a whitespace-only line between two soft breaks): the run collapses to one break", () => {
+    // The decision the ownership rule states, made by the fixed point: those bytes spell a blank
+    // line, a paragraph node cannot hold one, and splitting the block would mean this function
+    // inventing block structure. Collapsing keeps one paragraph in and one paragraph out.
+    const root = mdastOf(paragraph(schema.text("one\n \t \ntwo")));
+    expect(root.children).toEqual([
+      { type: "paragraph", children: [{ type: "text", value: "one\ntwo" }] },
+    ]);
+    expect(format(root)).toBe("one\ntwo\n");
+    expect(format(root)).not.toContain("&#x20;");
+    // The block was not split: one paragraph before, one paragraph after the round trip.
+    expect(parse(format(root)).children).toHaveLength(1);
+    expect(format(parse(format(root)))).toBe(format(root));
+  });
+
+  it("boundary 8 (inline code is opaque): an inline-code run at a block end keeps its literal bytes", () => {
     const code = schema.marks.inline_code.create();
     const root = mdastOf(paragraph(schema.text(" x ", [code])));
     expect(root.children).toEqual([
@@ -80,7 +174,7 @@ describe("block-end whitespace, one test per guard", () => {
     ]);
   });
 
-  it("guard 5 (raw untouched): a raw_inline at a block end keeps its bytes and stops the strip", () => {
+  it("boundary 9 (a raw atom is opaque): a raw_inline at a block end keeps its bytes and stops the strip", () => {
     const raw = schema.node("raw_inline", { value: "<i> " });
     const inline = mdastOf(paragraph(schema.text("a "), raw));
     expect(inline.children).toEqual([
@@ -97,7 +191,7 @@ describe("block-end whitespace, one test per guard", () => {
     expect(block.children).toEqual([{ type: "html", value: "<div> \n" }]);
   });
 
-  it("guard 6 (empty run dropped): a run trimmed to nothing is dropped, not kept as an empty node", () => {
+  it("boundary 10 (a run trimmed to nothing): a run trimmed to nothing is dropped, not kept as an empty node", () => {
     const strong = schema.marks.strong.create();
     const root = mdastOf(paragraph(schema.text("  ", [strong]), schema.text("x")));
     expect(root.children).toEqual([
@@ -106,7 +200,7 @@ describe("block-end whitespace, one test per guard", () => {
     expect(format(root)).toBe("x\n");
   });
 
-  it("guard 7 (table cell): a table cell's own two ends are stripped like a paragraph's", () => {
+  it("boundary 11 (a table cell's own two ends): a table cell's own two ends are stripped like a paragraph's", () => {
     const cell = (text: string): PMNode => schema.node("table_cell", null, [schema.text(text)]);
     const root = mdastOf(
       schema.node("doc", null, [
@@ -150,6 +244,61 @@ function typeSpaceAtEveryBlockEnd(doc: PMNode): { doc: PMNode; blocks: number } 
   return { doc: tr.doc, blocks: ends.length };
 }
 
+/**
+ * The letters the inside-a-block leg types. One is picked per fixture: the first that does not
+ * occur in that fixture's canonical Markdown, so that "differs by exactly the inserted letters"
+ * can be asserted by deleting every occurrence of it from the output and comparing. The list ends
+ * in two non-ASCII letters for the fixtures (the essay) that use the whole Latin alphabet.
+ */
+const TYPED_LETTERS = ["Q", "Z", "X", "J", "K", "V", "W", "Y", "Ж", "Ω"];
+
+function letterFor(canonical: string): string {
+  const letter = TYPED_LETTERS.find((candidate) => !canonical.includes(candidate));
+  expect(letter, "no candidate letter is absent from this fixture's canonical form").toBeDefined();
+  return letter as string;
+}
+
+/** The three node types whose content is inline text; the only places a soft break can live. */
+const INLINE_CONTENT = new Set([
+  schema.nodes.paragraph,
+  schema.nodes.heading,
+  schema.nodes.table_cell,
+]);
+
+/**
+ * A ProseMirror transaction shaped like typing *inside* a block, which is the shape task 1.25
+ * repairs: one letter after the first character of every paragraph's first text run, and one at
+ * the start of the second line of every text run that holds a soft line break. `insertText` is the
+ * same call `typing.ts` makes for a typed character, and the insertions are applied back-to-front
+ * so each one leaves the positions still to come unmoved.
+ */
+function typeInsideEveryBlock(doc: PMNode, letter: string): { doc: PMNode; typed: number } {
+  const at: number[] = [];
+  doc.descendants((node, pos, parent) => {
+    if (node.type === schema.nodes.code_block || node.type === schema.nodes.raw) return false;
+    if (node.type === schema.nodes.paragraph) {
+      let first: number | null = null;
+      node.descendants((child, childPos) => {
+        if (first !== null) return false;
+        if (child.isText) first = pos + 1 + childPos;
+        return true;
+      });
+      // After the first character of the run, never before it: the position before it is the
+      // block start, which the other leg already types at.
+      if (first !== null) at.push((first as number) + 1);
+    }
+    if (node.isText && parent !== null && INLINE_CONTENT.has(parent.type)) {
+      const text = node.text as string;
+      for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1))
+        at.push(pos + i + 1);
+    }
+    return true;
+  });
+  let tr = EditorState.create({ doc }).tr;
+  for (const pos of [...at].sort((a, b) => b - a)) tr = tr.insertText(letter, pos);
+  return { doc: tr.doc, typed: at.length };
+}
+
 describe("editor fixed point over the corpus", () => {
   it("asserts one editor fixed point per fixture listed in the index", () => {
     // The count is the index's own length, never a literal (see schema-roundtrip.test.ts).
@@ -172,6 +321,26 @@ describe("editor fixed point over the corpus", () => {
       expect(out).not.toContain("&#x20;");
     });
 
+    it(`${name} is an editor fixed point after a letter is typed inside every block`, () => {
+      const canonical = format(parse(read(name)));
+      const letter = letterFor(canonical);
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+      const typed = typeInsideEveryBlock(doc, letter);
+
+      // Presence: the transaction really changed this document, wherever it has a run to change.
+      expect(typed.doc.eq(doc)).toBe(typed.typed === 0);
+
+      const out = format(pmToMdast({ doc: typed.doc, frontMatter }));
+      // Exactly the inserted letters: the letter is absent from `canonical` by construction, so
+      // every occurrence of it in `out` is one of them, and deleting them all has to give the
+      // canonical bytes back. A soft break rewritten to a space, or whitespace eaten at a
+      // boundary that does not own it, shows up here as a mismatch.
+      expect(out.split(letter).join("")).toBe(canonical);
+      expect(out.length - canonical.length).toBe(typed.typed);
+      expect(format(parse(out))).toBe(out);
+      expect(out).not.toContain("&#x20;");
+    });
+
     it(`${name} is an editor fixed point unchanged (the absence case)`, () => {
       const canonical = format(parse(read(name)));
       const out = format(pmToMdast(mdastToPM(parse(read(name)))));
@@ -180,6 +349,20 @@ describe("editor fixed point over the corpus", () => {
       expect(out).not.toContain("&#x20;");
     });
   }
+
+  it("at least one fixture in the index holds a soft line break the inside-a-block leg types into", () => {
+    // Without this, the leg above could be green because no fixture in the corpus wraps a
+    // paragraph — the reason `soft-line-breaks.md` was added by this task (1.15's pattern).
+    const wrapped = names.filter((name) => {
+      const root = parse(read(name)) as unknown as { type: string; children?: unknown[] };
+      const walk = (node: { type: string; value?: string; children?: unknown[] }): boolean =>
+        (node.type === "text" && (node.value as string).includes("\n")) ||
+        ((node.children ?? []) as (typeof node)[]).some(walk);
+      return walk(root as never);
+    });
+    expect(wrapped.length).toBeGreaterThan(0);
+    expect(wrapped).toContain("soft-line-breaks.md");
+  });
 
   it("at least one fixture in the index has a block the typing transaction can reach", () => {
     const reached = names.filter(
