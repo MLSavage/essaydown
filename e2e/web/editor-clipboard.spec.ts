@@ -208,8 +208,44 @@ test.describe("plain text pasted from outside the editor stays plain", () => {
  * root and reported "Copied Markdown" anyway — clipboard and status both lied about what was on
  * the clipboard. The fix is `copyMarkdown`'s first statement: flush the source binding before
  * reading the root, mirroring what `toggle` (DevEditor.tsx) already does before its own read.
+ *
+ * **What a copy case asserts, and what needs the real clipboard** (task 1.28, DECISIONS #021). A
+ * copy case asserts the string the app handed `navigator.clipboard.writeText`; a paste case of
+ * *foreign* content is the one that needs the real clipboard, because there the source has to be
+ * outside the editor — which is why the plain-text case above keeps the clipboard and its
+ * permission grant and the three cases below need neither. The three used to read the string back
+ * out of the OS clipboard after the app wrote it, and passed here, on ubuntu and on macos; on
+ * windows-latest they failed, because Chromium hands plain text to the Windows system
+ * clipboard with every line feed converted to a carriage return followed by a line feed, so the
+ * read returned a carriage return the app never wrote. The app wrote the right bytes and the
+ * assertion had encoded one platform's clipboard convention. `installWriteTextSpy` records the
+ * argument instead, so the assertion is byte-exact and independent of what any OS does with it —
+ * and the carriage return is named here in words rather than normalised away in an assertion,
+ * because a stray one the app itself one day writes must fail rather than be swallowed. The app's
+ * real path is still the thing exercised: flush → `format` → `writeText` → the "Copied Markdown"
+ * status, which `copyMarkdown` sets only after the write resolves.
  */
+
+/** The arguments of the `writeText` calls the app made, newest last, recorded on the window. */
+type WriteTextSpy = { calls: string[] };
+
+/**
+ * Replace `navigator.clipboard.writeText` before any of the page's own scripts run, so that what
+ * the app writes is recorded on the window instead of being handed to the OS clipboard.
+ */
+async function installWriteTextSpy(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const spy = { calls: [] as string[] };
+    (window as unknown as { __writeText: { calls: string[] } }).__writeText = spy;
+    navigator.clipboard.writeText = (text: string) => {
+      spy.calls.push(text);
+      return Promise.resolve();
+    };
+  });
+}
+
 async function openEditor(page: Page): Promise<void> {
+  await installWriteTextSpy(page);
   await page.goto("/dev/editor");
   await page.locator(".ProseMirror").click();
   await expect.poll(() => markdown(page)).toBe("");
@@ -221,49 +257,48 @@ async function toggleToSource(page: Page): Promise<void> {
   await page.locator(".cm-content").waitFor();
 }
 
+/** Click "Copy Markdown" and return the one string the app handed `writeText`. */
 async function clickCopyMarkdown(page: Page): Promise<string> {
   await page.getByTestId("copy-markdown").click();
   await expect(page.getByTestId("status")).toHaveText("Copied Markdown");
-  return page.evaluate(() => navigator.clipboard.readText());
+  const calls = await page.evaluate(
+    () => (window as unknown as { __writeText: WriteTextSpy }).__writeText.calls,
+  );
+  expect(calls).toHaveLength(1);
+  return calls[0];
 }
 
 test.describe("Copy Markdown flushes a pending source burst before it reads the store", () => {
   test("presence: copying inside the coalescing window includes the just-typed text, with no pause and no toggle", async ({
     page,
-    context,
   }) => {
-    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openEditor(page);
     await toggleToSource(page);
     // Well inside the 1 s coalescing window (PRD §6.5): typed and copied with no wait between.
     await page.keyboard.type("alpha", { delay: 10 });
-    const clipboard = await clickCopyMarkdown(page);
-    expect(clipboard).toBe("alpha\n");
+    const written = await clickCopyMarkdown(page);
+    expect(written).toBe("alpha\n");
   });
 
   test("absence: copying after the coalescing window has elapsed reads the same committed text", async ({
     page,
-    context,
   }) => {
-    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openEditor(page);
     await toggleToSource(page);
     await page.keyboard.type("beta", { delay: 10 });
     await page.waitForTimeout(1_500);
     await expect.poll(() => markdown(page)).toBe("beta\n");
-    const clipboard = await clickCopyMarkdown(page);
-    expect(clipboard).toBe("beta\n");
+    const written = await clickCopyMarkdown(page);
+    expect(written).toBe("beta\n");
   });
 
   test("the rendered view's copy is unchanged: every keystroke there is already committed, so an immediate copy needs no flush", async ({
     page,
-    context,
   }) => {
-    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openEditor(page);
     await page.keyboard.type("gamma", { delay: 10 });
     await expect.poll(() => markdown(page)).toBe("gamma\n");
-    const clipboard = await clickCopyMarkdown(page);
-    expect(clipboard).toBe("gamma\n");
+    const written = await clickCopyMarkdown(page);
+    expect(written).toBe("gamma\n");
   });
 });
