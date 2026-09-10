@@ -1441,16 +1441,84 @@
   ]
  },
  {
+  "id": "1.28",
+  "model": "opus",
+  "description": "Phase 1 verification-gate repair, test-only (repair after the 1.verify.r2h GATE-FAILED, ci.yml run 34499653269 at 6d9345c: ubuntu-latest and macos-latest green on every unit test and every e2e/web spec; windows-latest green on every unit test and on every e2e/web spec except three, all in `e2e/web/editor-clipboard.spec.ts` › `Copy Markdown flushes a pending source burst before it reads the store` — \"presence: copying inside the coalescing window includes the just-typed text, with no pause and no toggle\", \"absence: copying after the coalescing window has elapsed reads the same committed text\", \"the rendered view's copy is unchanged: every keystroke there is already committed, so an immediate copy needs no flush\" — each `expect(clipboard).toBe(\"<word>\\n\")` receiving `<word>` plus an invisible trailing character before the newline; the log is /logs/ci/1.verify.r2h/a1/workflow.log, step `test (windows-latest)` › `Playwright (e2e/web)`; DECISIONS #021). Principal reading, to be confirmed from that log before anything changes, never assumed: the three tests task 1.23 added read the OS clipboard back through `navigator.clipboard.readText()` after `copyMarkdown` (apps/desktop/src/dev/DevEditor.tsx) wrote it with `navigator.clipboard.writeText(text)`; on Windows, Chromium hands plain text to the system clipboard with LF converted to CRLF, so the read returns the written word followed by a carriage return and a newline where the test expects the newline alone. The app wrote the right bytes; the assertion encoded one platform's clipboard convention (the [plan.1.verifyh.r0] lesson: a test that passes on one OS by accident of platform is not a pass), and the spec's own doc comment already says why the OS clipboard is not what a copy case should go through (one shared resource across parallel workers on three OSes). Fix the tests, not `copyMarkdown`. Assert what the app handed the clipboard API, not what the OS did with it: install a spy before the page's scripts run (`page.addInitScript`, before `page.goto`) that replaces `navigator.clipboard.writeText` with a function recording its argument on the window and resolving, and have `clickCopyMarkdown` return the recorded string; the `\"Copied Markdown\"` status assertion stays, so the app's real path (flush → format → writeText → status) is still the thing exercised, and the `clipboard-read`/`clipboard-write` permission grant becomes unnecessary in these three tests (remove it there). Do not normalise the carriage return away in the assertion and do not branch on `process.platform`: the first hides a stray carriage return the app might one day write, the second encodes a platform list. The plain-text paste case (\"a paragraph takes the clipboard's characters, not the markup they spell\") keeps the real clipboard, because pasting foreign content is the case where the source has to be outside the editor; leave it and the `DataTransfer` round-trip cases untouched. State the rule once in the describe block's doc comment: a copy test asserts the string the app wrote; a paste test of foreign content is the one that needs the real clipboard; the carriage return is named in words there, never as an escape in code. Scope: e2e/web/editor-clipboard.spec.ts plus docs/lessons.md and the journal; no source edits, no config edits, no workflow edits, zero new dependencies (PRD §4). The spec is a file of passed task 1.23, not its record (DECISIONS #016); the repair is authorised by this task.",
+  "acceptance": "Reproduction first, recorded in the journal: before the change, `grep -c 'navigator.clipboard.readText' e2e/web/editor-clipboard.spec.ts` is non-zero and each of the three named tests reads the OS clipboard through it; the three Playwright diffs from /logs/ci/1.verify.r2h/a1/workflow.log (step `test (windows-latest)` › `Playwright (e2e/web)`) are quoted in the journal as the reproduction, because this Linux container cannot run Windows. After the change, in e2e/web/editor-clipboard.spec.ts: `grep -c 'navigator.clipboard.readText'` is zero; `grep -c 'addInitScript'` is non-zero; `grep -c 'navigator.clipboard.writeText'` is non-zero (the spy names the function it replaces, and the foreign-paste case still writes the real clipboard); `grep -c 'process.platform'` is zero; `grep -c '\\\\r'` is zero (the carriage return is named in words in the doc comment, never normalised in code); `grep -cE '\\\\.(skip|only)\\\\(|runIf|skipIf'` is zero. The three tests are still able to fail for G1: with `sourceBinding.current?.flush();` removed from `copyMarkdown` in a scratch edit (never staged; restored with `git checkout -- apps/desktop/src/dev/DevEditor.tsx` before the commit, `git status` clean of it), the presence case is red and the absence and rendered-view cases stay green, recorded in the journal with the three test names; and the recorded string is asserted byte-exact (`toBe(\"alpha\\n\")` and its two siblings, no normalisation). Every e2e/web spec green in the container (`pnpm --filter @essaydown/e2e-web exec playwright install chromium` first, lessons 1.3/1.4/1.12), including the three named tests; `pnpm lint && pnpm test && cargo test` green; `npx prettier --check e2e/web/editor-clipboard.spec.ts` clean; `git diff --stat` against the branch base touches only e2e/web/editor-clipboard.spec.ts, docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change. Honest statement: this container is Linux; the spy makes the assertion independent of any OS clipboard convention, but the only proof of a Windows pass is the `1.verify.r2.g1h` gate green on ubuntu, macos and windows, which this task cannot observe and must not claim.",
+  "dependencies": [
+   "1.verify.r2h"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r2.g1",
+  "model": "sonnet",
+  "description": "Phase 1 verification for review attempt r2, repair 1 of 1.verify.r2 after the 1.verify.r2h GATE-FAILED (RUNNER-SPEC §2 rewrite rule (a), §3, §5.5; DECISIONS #021): freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. The promote-lessons step and the CLAUDE.md/AGENTS.md procedure change carried by 1.verify.r2 are already integrated at 6d9345c and are not repeated; `ralph/check-agent-rules.sh` must still exit 0.",
+  "acceptance": "pnpm lint (which includes `node scripts/check-deps.mjs`), pnpm test, cargo test green in the container; every e2e/web spec green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change and touches only docs/lessons.md and the journal; `ralph/check-agent-rules.sh` exits 0.",
+  "dependencies": [
+   "1.28"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r2.g1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r2.g1h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r2.g1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "1.verify.r2.g1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r2.g1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "description": "CI gate for 1.verify.r2.g1: scripts/gate.sh 1.verify.r2.g1h pushes integrated_sha of 1.verify.r2.g1 to ci/1.verify.r2.g1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"playwright-report\"] into /logs/ci/1.verify.r2.g1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r2.g1h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "dependencies": [
+   "1.verify.r2.g1"
+  ]
+ },
+ {
   "id": "1.10.r2a",
   "model": "claude-opus",
   "execution": "reviewer",
   "reviewer": "claude",
   "reviewSet": "1.10",
   "reviewAttempt": "r2",
-  "description": "Review attempt r2, claude reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired.",
+  "description": "Review attempt r2, claude reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2.g1h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired.",
   "acceptance": "/logs/reviews/1/r2/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "1.verify.r2h"
+   "1.verify.r2.g1h"
   ],
   "phase": "1",
   "targetBranch": "phase/1"
@@ -1462,10 +1530,10 @@
   "reviewer": "sol",
   "reviewSet": "1.10",
   "reviewAttempt": "r2",
-  "description": "Review attempt r2, sol reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired.",
+  "description": "Review attempt r2, sol reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2.g1h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired.",
   "acceptance": "/logs/reviews/1/r2/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "1.verify.r2h"
+   "1.verify.r2.g1h"
   ],
   "phase": "1",
   "targetBranch": "phase/1"
@@ -1477,10 +1545,10 @@
   "reviewer": "grok",
   "reviewSet": "1.10",
   "reviewAttempt": "r2",
-  "description": "Review attempt r2, grok reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired. Grok-specific (DECISIONS #review-1-r0 reviewer-shape record; #review-1-r1 shared-severity count): Grok reads the tree and /logs only and cites /logs/ci/1.verify.r2h/accepted/ for the cold build; for each r1 finding of Claude and Sol that Grok did not raise or rated lower (G1 in particular, rated nit against a blocker), state whether a read-only review could have found it and why the severity differed; and state explicitly the verdict Grok gives if any r1 blocker or required finding is not discharged in the tree.",
+  "description": "Review attempt r2, grok reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2.g1h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired. Grok-specific (DECISIONS #review-1-r0 reviewer-shape record; #review-1-r1 shared-severity count): Grok reads the tree and /logs only and cites /logs/ci/1.verify.r2.g1h/accepted/ for the cold build; for each r1 finding of Claude and Sol that Grok did not raise or rated lower (G1 in particular, rated nit against a blocker), state whether a read-only review could have found it and why the severity differed; and state explicitly the verdict Grok gives if any r1 blocker or required finding is not discharged in the tree.",
   "acceptance": "/logs/reviews/1/r2/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "1.verify.r2h"
+   "1.verify.r2.g1h"
   ],
   "phase": "1",
   "targetBranch": "phase/1"
