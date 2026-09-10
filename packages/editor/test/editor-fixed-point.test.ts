@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Root } from "mdast";
 import type { Node as PMNode } from "prosemirror-model";
-import { EditorState } from "prosemirror-state";
 import { describe, expect, it } from "vitest";
 import { format } from "../../core/src/format.js";
 import { parse } from "../../core/src/parse.js";
 import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
+import { letterFor, typeInsideEveryBlock, typeSpaceAtEveryBlockEnd } from "./typing-legs.js";
 
 /**
  * Task 1.13 (DECISIONS #review-1-r0 F1): the editor's tree kept the whitespace micromark strips,
@@ -225,79 +225,6 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
     expect(format(root)).toBe("## H\n");
   });
 });
-
-/**
- * A ProseMirror transaction shaped like typing: a space appended at the end of every paragraph and
- * every heading, applied back-to-front so that each insertion leaves the positions still to come
- * unmoved. `insertText` is the same call `typing.ts` makes for a typed character.
- */
-function typeSpaceAtEveryBlockEnd(doc: PMNode): { doc: PMNode; blocks: number } {
-  const ends: number[] = [];
-  doc.descendants((node, pos) => {
-    if (node.type === schema.nodes.paragraph || node.type === schema.nodes.heading) {
-      ends.push(pos + 1 + node.content.size);
-    }
-    return true;
-  });
-  let tr = EditorState.create({ doc }).tr;
-  for (const pos of [...ends].reverse()) tr = tr.insertText(" ", pos);
-  return { doc: tr.doc, blocks: ends.length };
-}
-
-/**
- * The letters the inside-a-block leg types. One is picked per fixture: the first that does not
- * occur in that fixture's canonical Markdown, so that "differs by exactly the inserted letters"
- * can be asserted by deleting every occurrence of it from the output and comparing. The list ends
- * in two non-ASCII letters for the fixtures (the essay) that use the whole Latin alphabet.
- */
-const TYPED_LETTERS = ["Q", "Z", "X", "J", "K", "V", "W", "Y", "Ж", "Ω"];
-
-function letterFor(canonical: string): string {
-  const letter = TYPED_LETTERS.find((candidate) => !canonical.includes(candidate));
-  expect(letter, "no candidate letter is absent from this fixture's canonical form").toBeDefined();
-  return letter as string;
-}
-
-/** The three node types whose content is inline text; the only places a soft break can live. */
-const INLINE_CONTENT = new Set([
-  schema.nodes.paragraph,
-  schema.nodes.heading,
-  schema.nodes.table_cell,
-]);
-
-/**
- * A ProseMirror transaction shaped like typing *inside* a block, which is the shape task 1.25
- * repairs: one letter after the first character of every paragraph's first text run, and one at
- * the start of the second line of every text run that holds a soft line break. `insertText` is the
- * same call `typing.ts` makes for a typed character, and the insertions are applied back-to-front
- * so each one leaves the positions still to come unmoved.
- */
-function typeInsideEveryBlock(doc: PMNode, letter: string): { doc: PMNode; typed: number } {
-  const at: number[] = [];
-  doc.descendants((node, pos, parent) => {
-    if (node.type === schema.nodes.code_block || node.type === schema.nodes.raw) return false;
-    if (node.type === schema.nodes.paragraph) {
-      let first: number | null = null;
-      node.descendants((child, childPos) => {
-        if (first !== null) return false;
-        if (child.isText) first = pos + 1 + childPos;
-        return true;
-      });
-      // After the first character of the run, never before it: the position before it is the
-      // block start, which the other leg already types at.
-      if (first !== null) at.push((first as number) + 1);
-    }
-    if (node.isText && parent !== null && INLINE_CONTENT.has(parent.type)) {
-      const text = node.text as string;
-      for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1))
-        at.push(pos + i + 1);
-    }
-    return true;
-  });
-  let tr = EditorState.create({ doc }).tr;
-  for (const pos of [...at].sort((a, b) => b - a)) tr = tr.insertText(letter, pos);
-  return { doc: tr.doc, typed: at.length };
-}
 
 describe("editor fixed point over the corpus", () => {
   it("asserts one editor fixed point per fixture listed in the index", () => {
