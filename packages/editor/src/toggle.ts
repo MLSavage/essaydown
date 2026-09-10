@@ -570,9 +570,25 @@ function timerSchedule(run: () => void, ms: number): () => void {
  * In between, the CodeMirror buffer is what the user sees and it is already authoritative (above),
  * so a pending commit changes nothing on screen. What it does change is that the typed text is not
  * in the store yet, so anything that reads the store instead of the buffer flushes first:
- * {@link SourceBinding.flush} for a toggle, {@link SourceBinding.destroy} for an unmount. A pull
- * goes the other way — an undo, a redo, a loaded fixture supersede what was typed, so the pending
- * commit is dropped rather than written over the snapshot that has just arrived.
+ * {@link SourceBinding.flush} for a toggle, for Copy Markdown (DECISIONS #review-1-r1 G1) and for
+ * an Undo or a Redo from the source view (G2; `store.ts`'s `beforeHistory`),
+ * {@link SourceBinding.destroy} for an unmount. A pull goes the other way — an undo, a redo, a
+ * loaded fixture supersede what was typed, so the pending commit is dropped rather than written
+ * over the snapshot that has just arrived. A history command is both at once, which is why it
+ * flushes *before* it moves history: the burst becomes the entry the Undo then steps back over,
+ * rather than being dropped by the pull the Undo causes.
+ *
+ * **The grouping rule, once (DECISIONS #review-1-r1 G2).** The chain of keystrokes that becomes
+ * one commit is the chain that became one coalesced undo entry before task 1.17 deferred the
+ * commit — whether the commit is fired by the timer or by a flush. That holds because the commit
+ * carries the burst's *own* keystroke time (the moment of its latest {@link SourceBinding.change},
+ * recorded there) and not the moment the commit ran: `push` merges on the distance between the
+ * present entry's `at` and the incoming one's, so with keystroke times on both sides the grouping
+ * is a property of what the user typed and of nothing else. Stamping `now()` at commit time broke
+ * it in both directions — a flush a quarter-second after the previous commit merged a burst the
+ * user began 1.2 s later into the previous entry (so one Undo removed both), and a flush partway
+ * through a burst followed by more typing inside the same window opened a second entry for one
+ * burst (task 1.17's own lesson).
  */
 export function bindCodeMirror(
   store: DocumentStore,
@@ -586,6 +602,11 @@ export function bindCodeMirror(
   let shownText = "";
   /** The text typed since the last commit, and the cancel of the commit scheduled for it. */
   let pending: string | null = null;
+  /**
+   * When the pending text's latest keystroke landed — the `at` its commit carries, per the
+   * grouping rule above. Meaningless while `pending` is `null`, and read only beside it.
+   */
+  let pendingAt = 0;
   let cancel: (() => void) | null = null;
 
   /** Forget the pending text and unschedule its commit. */
@@ -597,13 +618,14 @@ export function bindCodeMirror(
 
   const commitPending = (): void => {
     const text = pending;
+    const at = pendingAt;
     drop();
     if (text === null) return;
     const { document, commit } = store.getState();
     const root = parse(text);
     shown = root;
     shownText = text;
-    commit(root, document.sidecar, { coalesceKey, at: now() });
+    commit(root, document.sidecar, { coalesceKey, at });
   };
 
   const pull = (root: Root): void => {
@@ -629,6 +651,8 @@ export function bindCodeMirror(
       // an echo would leave the pending commit to write the deleted character back.
       if (text === (pending ?? shownText)) return;
       pending = text;
+      // The keystroke's own time, not the commit's: see the grouping rule in the module comment.
+      pendingAt = now();
       if (cancel !== null) cancel();
       cancel = schedule(commitPending, store.getState().stack.coalesceWindowMs);
     },

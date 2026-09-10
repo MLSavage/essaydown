@@ -252,9 +252,30 @@ export function storePlugins(store: DocumentStore): Plugin[] {
   return [proseMirrorKeymap(undoKeymap(store))];
 }
 
-/** The same two chords for the source view. */
-export function undoKeyBindings(store: DocumentStore): KeyBinding[] {
+/**
+ * The same two chords for the source view, with the seam that settles a pending source burst
+ * before history moves (DECISIONS #review-1-r1 G2).
+ *
+ * The source view commits on the burst boundary (task 1.17's `bindCodeMirror`), so a chord pressed
+ * inside the window runs against history that does not contain what is on screen — and the pull
+ * the undo then causes *drops* the pending text, which is how Sol's reproduction (b) lost ` second`
+ * for good. `beforeHistory` is called first by every one of the three bindings, so there is one
+ * seam for all of them and no command can be added later that skips it.
+ *
+ * **Why a hook here and not a keymap installed by the binding.** The alternative was for
+ * `bindCodeMirror` to install this keymap itself, which reads better but cannot be built: a
+ * CodeMirror view's extensions are fixed when the view is constructed, and the binding is
+ * constructed *from* the view (it needs `view.state`), so a binding that owned the keymap would
+ * have to reconfigure a live view through a compartment — machinery added to fix machinery — and
+ * it would widen `BoundSourceView` from the two members that keep the binding headlessly testable
+ * to a real `EditorView`. The hook keeps the dependency pointing one way: the keymap knows only
+ * "settle whatever is pending", never that a source binding exists. It is optional because the
+ * chords are meaningful without one (a view with no deferred commit has nothing to settle), and
+ * `DevEditor` passes the binding's `flush`.
+ */
+export function undoKeyBindings(store: DocumentStore, beforeHistory?: () => void): KeyBinding[] {
   const run = (action: "undo" | "redo") => (): boolean => {
+    beforeHistory?.();
     store.getState()[action]();
     return true;
   };
@@ -266,6 +287,6 @@ export function undoKeyBindings(store: DocumentStore): KeyBinding[] {
 }
 
 /** {@link undoKeyBindings} as a CodeMirror extension, to sit beside `sourceExtensions()`. */
-export function sourceUndoKeymap(store: DocumentStore): Extension {
-  return codeMirrorKeymap.of(undoKeyBindings(store));
+export function sourceUndoKeymap(store: DocumentStore, beforeHistory?: () => void): Extension {
+  return codeMirrorKeymap.of(undoKeyBindings(store, beforeHistory));
 }

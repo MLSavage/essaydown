@@ -158,7 +158,11 @@ export default function DevEditor() {
         extensions: [
           ...sourceExtensions(),
           sourceToggleKeymap(toggle),
-          sourceUndoKeymap(store),
+          // The binding is built from the view below, so the hook reads it at press time rather
+          // than closing over it now — the same shape as the update listener two lines down.
+          // Undo and Redo settle the pending burst before they move history (G2); without it the
+          // chord runs on committed history and the pull it causes drops what was typed.
+          sourceUndoKeymap(store, () => binding?.flush()),
           SourceEditorView.updateListener.of((update) => {
             if (update.docChanged) binding?.change(update.state.doc.toString());
           }),

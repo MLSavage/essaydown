@@ -266,4 +266,64 @@ test.describe("source toggle on /dev/editor", () => {
     await page.keyboard.press("ControlOrMeta+Shift+Z");
     await expect.poll(() => markdown(page)).toBe("first second\n");
   });
+
+  /**
+   * Sol's two reproductions from the r1 review (DECISIONS #review-1-r1 G2), as real chords in a
+   * real browser. Both press Undo *inside* the coalescing window, which is the case the chord test
+   * above deliberately steps around by putting 1.5 s between its bursts: the source view commits
+   * on the burst boundary (task 1.17), so a chord pressed inside the window used to run against
+   * history that did not contain what was on screen, and the pull it caused then dropped the burst.
+   *
+   * Each press is followed by an assertion on both halves — the Markdown pane (the store) and the
+   * CodeMirror surface (the buffer) — because the defect showed as the two disagreeing.
+   * `packages/editor/test/toggle.test.ts`'s five cases pin the grouping arithmetic where the clock
+   * is injected; these two prove the wiring in the product, chord to keymap to binding to store.
+   */
+  test("reproduction (a): Undo inside the first burst empties the surface", async ({ page }) => {
+    await openEditor(page);
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("source");
+    await page.locator(".cm-content").waitFor();
+
+    await page.keyboard.type("first", { delay: 10 });
+    await expect(page.locator(".cm-content")).toHaveText("first");
+    await page.keyboard.press("ControlOrMeta+z");
+
+    // The Undo settled the burst and then stepped back over it, so both halves are empty. Before
+    // the fix the surface still read "first": the Undo found an empty history and did nothing.
+    await expect(page.locator(".cm-content")).toHaveText("");
+    await expect.poll(() => markdown(page)).toBe("");
+
+    // And it stays empty: the burst timer has nothing left to commit a window later.
+    await page.waitForTimeout(1_500);
+    await expect(page.locator(".cm-content")).toHaveText("");
+    expect(await markdown(page)).toBe("");
+  });
+
+  test("reproduction (b): Undo inside the second burst keeps the first, and Redo restores it", async ({
+    page,
+  }) => {
+    await openEditor(page);
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("source");
+    await page.locator(".cm-content").waitFor();
+
+    await page.keyboard.type("first", { delay: 10 });
+    // Sol's 1.2 s: long enough for the first burst's own timer to fire (one window) and for the
+    // next keystroke to be a second burst. Waited rather than polled, so the second burst starts
+    // where the reproduction starts it — a quarter-second after the first burst's commit ran,
+    // which is the distance that used to merge the two into one undo entry.
+    await page.waitForTimeout(1_200);
+    await expect.poll(() => markdown(page)).toBe("first\n");
+
+    await page.keyboard.type(" second", { delay: 10 });
+    await page.keyboard.press("ControlOrMeta+z");
+
+    await expect(page.locator(".cm-content")).toHaveText("first");
+    await expect.poll(() => markdown(page)).toBe("first\n");
+
+    await page.keyboard.press("ControlOrMeta+Shift+Z");
+    await expect(page.locator(".cm-content")).toHaveText("first second");
+    await expect.poll(() => markdown(page)).toBe("first second\n");
+  });
 });

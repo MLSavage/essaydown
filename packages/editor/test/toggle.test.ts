@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Root } from "mdast";
 import {
   COALESCE_WINDOW_MS,
+  canRedo,
   canUndo,
   emptySidecar,
   format,
@@ -12,9 +13,15 @@ import {
   type Sidecar,
 } from "@essaydown/core";
 import { EditorState as CMState, type TransactionSpec } from "@codemirror/state";
-import { EditorState, TextSelection } from "prosemirror-state";
+import { EditorState, Selection, TextSelection } from "prosemirror-state";
 import { mdastToPM, schema } from "../src/schema.js";
-import { createDocumentStore, type DocumentStore } from "../src/store.js";
+import {
+  bindProseMirror,
+  createDocumentStore,
+  undoKeyBindings,
+  type BoundView,
+  type DocumentStore,
+} from "../src/store.js";
 import {
   SOURCE_KEY,
   TOGGLE_KEY,
@@ -110,6 +117,24 @@ class FakeSourceView implements BoundSourceView {
   text(): string {
     return this.state.doc.toString();
   }
+}
+
+/**
+ * A stand-in for ProseMirror's `EditorView` holding only what `BoundView` names, so case 5 below
+ * can run the same script through the rendered binding. `store.test.ts` has its own, richer copy;
+ * this one exists because the comparison belongs beside the source-view case it is about.
+ */
+class FakeRenderedView implements BoundView {
+  state = EditorState.create({ schema });
+
+  updateState(state: EditorState): void {
+    this.state = state;
+  }
+}
+
+/** The transaction that types `text` at the end of `state`'s document. */
+function typeAtEnd(state: EditorState, text: string) {
+  return state.tr.insertText(text, Selection.atEnd(state.doc).from);
 }
 
 function storeFor(markdown: string): DocumentStore {
@@ -385,7 +410,11 @@ describe("bindCodeMirror", () => {
 
     expect(format(store.getState().document.root)).toBe("hello\n");
     expect(store.getState().stack.openKey).toBe(SOURCE_KEY);
-    expect(store.getState().stack.entries.at(-1)?.at).toBe(COALESCE_WINDOW_MS);
+    // The keystroke's time, not the commit's: `change` ran at 0 and the timer fired a window
+    // later, and the entry records the former (DECISIONS #review-1-r1 G2; the grouping rule in
+    // `bindCodeMirror`'s doc comment, pinned by cases 3 and 4 below). Before G2 this read
+    // `COALESCE_WINDOW_MS`, the moment the deferred commit ran.
+    expect(store.getState().stack.entries.at(-1)?.at).toBe(0);
     binding.destroy();
   });
 
@@ -636,6 +665,181 @@ describe("bindCodeMirror commits on the burst boundary", () => {
     expect(roots).toHaveLength(1);
     expect(committed(store)).toBe("loaded\n");
     expect(clock.waiting).toBe(0);
+  });
+});
+
+/**
+ * Undo and Redo from the source view, with a burst still pending (DECISIONS #review-1-r1 G2; Sol
+ * finding 2). Two causes, one case per test, each named in the journal:
+ *
+ * 1. a history command ran against committed history while the burst was still in the CodeMirror
+ *    buffer, and the pull the command caused then *dropped* that burst — `undoKeyBindings`'
+ *    `beforeHistory` seam settles it first;
+ * 2. the deferred commit stamped `at: now()` when it fired rather than the burst's own keystroke
+ *    time, so a flushed burst grouped by when the store was read instead of by what was typed.
+ *
+ * Both are timing, so every case drives {@link FakeClock}: the acceptance is about which side of
+ * the coalescing window a keystroke, a flush and a commit fall on, which a wall clock cannot pin.
+ * `e2e/web/editor-toggle.spec.ts` presses the two reproductions as real chords in a real browser.
+ */
+describe("a source-view history command settles the pending burst first", () => {
+  /**
+   * A source view bound to a fresh store, plus the two chords wired the way `DevEditor` wires
+   * them: {@link undoKeyBindings} with the binding's `flush` as its `beforeHistory` hook.
+   */
+  function boundWithHistory(markdown = "") {
+    const clock = new FakeClock();
+    const store = createDocumentStore(parse(markdown), SIDECAR, { at: 0 });
+    const view = new FakeSourceView();
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
+    const [undoBinding, redoBinding] = undoKeyBindings(store, () => binding.flush());
+    const press = (key: (typeof undoBinding)["run"]): void => {
+      // CodeMirror hands the command its view; these two read only the store and the hook.
+      key?.(null as never);
+    };
+    /**
+     * A keystroke as the view really delivers one: the buffer changes, and `DevEditor`'s update
+     * listener hands the new text to the binding. Both halves matter here — the surface is what
+     * these cases assert, and it is the buffer, not the store, that holds it mid-burst.
+     */
+    const type = (text: string): void => {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+      binding.change(view.text());
+    };
+    return {
+      clock,
+      store,
+      view,
+      binding,
+      type,
+      undo: () => press(undoBinding.run),
+      redo: () => press(redoBinding.run),
+      markdown: () => format(store.getState().document.root),
+      entries: () => store.getState().stack.entries.length,
+    };
+  }
+
+  it("case 1: a fresh history and an Undo inside the window empties the surface", () => {
+    const { clock, view, type, undo, markdown, store } = boundWithHistory();
+
+    type("first\n");
+    // The keystrokes are inside the window: nothing is committed yet, and the buffer holds them.
+    expect(markdown()).toBe("");
+    expect(view.text()).toBe("first\n");
+    undo();
+
+    // The burst was committed by the hook and then undone, so the store is back at the seed and
+    // the pull rewrote the surface. Without the hook the Undo would have found an empty history,
+    // changed nothing, and left "first" on screen for the timer to commit afterwards.
+    expect(markdown()).toBe("");
+    expect(view.text()).toBe("");
+    expect(clock.waiting).toBe(0);
+    clock.advance(COALESCE_WINDOW_MS);
+    expect(markdown()).toBe("");
+    expect(view.text()).toBe("");
+    // The Undo was real, so the burst it settled is on the redo side.
+    expect(canRedo(store.getState().stack)).toBe(true);
+  });
+
+  it("case 2: Undo inside a second burst removes only that burst, and Redo restores it", () => {
+    const { clock, view, type, undo, redo, markdown, entries } = boundWithHistory();
+
+    type("first\n");
+    clock.advance(COALESCE_WINDOW_MS);
+    expect(markdown()).toBe("first\n");
+
+    // More than a window after the first burst's keystrokes, which is what makes the second burst
+    // its own undo entry — Sol's reproduction (b) types it 1.2 s later.
+    clock.advance(200);
+    type("first second\n");
+    expect(view.text()).toBe("first second\n");
+    undo();
+
+    expect(entries()).toBe(3);
+    expect(markdown()).toBe("first\n");
+    expect(view.text()).toBe("first\n");
+
+    redo();
+    expect(markdown()).toBe("first second\n");
+    expect(view.text()).toBe("first second\n");
+  });
+
+  it("case 3: a flush inside a burst and more typing inside the window is one undo entry", () => {
+    const { clock, binding, type, markdown, entries } = boundWithHistory();
+
+    type("wo\n");
+    clock.advance(100);
+    // A Copy Markdown, a toggle or a history command partway through the burst.
+    binding.flush();
+    expect(entries()).toBe(2);
+
+    clock.advance(100);
+    type("word\n");
+    clock.advance(COALESCE_WINDOW_MS);
+
+    // One burst, one entry: the flushed commit carries the keystroke at 0 and the timed one the
+    // keystroke at 200, so they are 200 ms apart and merge. Stamped with `now()` they would have
+    // been 100 ms and 1200 ms — 1.1 s apart — and one burst would have become two undo steps.
+    expect(entries()).toBe(2);
+    expect(markdown()).toBe("word\n");
+  });
+
+  it("case 4: two bursts more than a window apart are two entries, flushed or timed", () => {
+    for (const ending of ["timed", "flushed"] as const) {
+      const { clock, binding, type, markdown, entries, store } = boundWithHistory();
+
+      type("first\n");
+      clock.advance(COALESCE_WINDOW_MS);
+      expect(entries()).toBe(2);
+
+      clock.advance(200);
+      type("first second\n");
+      if (ending === "timed") clock.advance(COALESCE_WINDOW_MS);
+      else binding.flush();
+
+      // The user typed the second burst 1.2 s after the first, so it is a second step whichever
+      // way its commit fired; with `at: now()` the flushed ending landed 0.25 s after the timed
+      // commit of the first burst and merged into it, which is how one Undo removed both.
+      expect(entries(), ending).toBe(3);
+      expect(markdown(), ending).toBe("first second\n");
+      expect(store.getState().stack.entries.at(-2)?.state.root).toBe(
+        store.getState().stack.entries[1].state.root,
+      );
+    }
+  });
+
+  it("case 5: a pending edit after an Undo is its own entry and Redo is gone, as when rendered", () => {
+    const { clock, type, undo, markdown, store } = boundWithHistory();
+
+    type("first\n");
+    clock.advance(COALESCE_WINDOW_MS);
+    undo();
+    expect(canRedo(store.getState().stack)).toBe(true);
+
+    type("other\n");
+    clock.advance(COALESCE_WINDOW_MS);
+
+    expect(markdown()).toBe("other\n");
+    expect(canRedo(store.getState().stack)).toBe(false);
+    expect(store.getState().stack.entries).toHaveLength(2);
+
+    // "As in the rendered view" is asserted, not asserted-by-comment: the same script through
+    // `bindProseMirror`, whose commit is synchronous and whose chord needs no flush, ends with the
+    // same stack shape. `undo()` here is what the rendered keymap's command calls.
+    const renderedStore = createDocumentStore(parse(""), SIDECAR, { at: 0 });
+    const renderedView = new FakeRenderedView();
+    const renderedClock = new FakeClock();
+    const rendered = bindProseMirror(renderedStore, renderedView, { now: renderedClock.now });
+    rendered.dispatch(typeAtEnd(renderedView.state, "first"));
+    renderedStore.getState().undo();
+    expect(canRedo(renderedStore.getState().stack)).toBe(true);
+    renderedClock.advance(COALESCE_WINDOW_MS);
+    rendered.dispatch(typeAtEnd(renderedView.state, "other"));
+
+    expect(format(renderedStore.getState().document.root)).toBe("other\n");
+    expect(canRedo(renderedStore.getState().stack)).toBe(false);
+    expect(renderedStore.getState().stack.entries).toHaveLength(2);
+    rendered.destroy();
   });
 });
 

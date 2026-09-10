@@ -448,6 +448,40 @@ describe("undoKeyBindings (source view)", () => {
     const state = CMState.create({ doc: "a", extensions: [sourceUndoKeymap(store)] });
     expect(state.doc.toString()).toBe("a");
   });
+
+  /**
+   * The seam of DECISIONS #review-1-r1 G2. What it is *for* — settling the source view's pending
+   * burst before history moves — is `toggle.test.ts`'s, where the binding and the clock are; what
+   * is asserted here is the contract every one of the three bindings owes it: the hook runs, and
+   * it runs *before* the store action, so the burst is on the stack for the undo to step over
+   * rather than arriving after it.
+   */
+  it("runs beforeHistory ahead of the store action, on each of the three bindings", () => {
+    for (const index of [0, 1, 2]) {
+      const store = createDocumentStore(parse("a\n"), SIDECAR);
+      const order: string[] = [];
+      store.getState().commit(parse("b\n"), SIDECAR);
+      const bindings = undoKeyBindings(store, () => {
+        order.push(`hook:${format(store.getState().document.root)}`);
+      });
+      const unsubscribe = store.subscribe((state) => {
+        order.push(`store:${format(state.document.root)}`);
+      });
+      expect(bindings[index].run?.(null as never)).toBe(true);
+      unsubscribe();
+      // The undo binding moves history and the two redo bindings do not (there is nothing to redo
+      // here), so the hook is the one entry both shapes share, and it is always the first.
+      expect(order[0], `binding ${index}`).toBe("hook:b\n");
+    }
+  });
+
+  it("is optional: the three bindings work with no hook wired", () => {
+    const store = createDocumentStore(parse("a\n"), SIDECAR);
+    store.getState().commit(parse("b\n"), SIDECAR);
+    const [undoBinding] = undoKeyBindings(store);
+    expect(() => undoBinding.run?.(null as never)).not.toThrow();
+    expect(format(store.getState().document.root)).toBe("a\n");
+  });
 });
 
 /** Kept out of the way of the suite above: `vi` is imported for this one assertion. */
