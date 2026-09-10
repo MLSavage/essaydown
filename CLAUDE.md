@@ -20,10 +20,11 @@ You are one agent in a Ralph loop on Essay Down, a Tauri 2 + React Markdown essa
 ## Every iteration
 
 1. `git status`; commit a dirty tree first as `wip(<id>): recovery of uncommitted changes`. Never rebase; the runner rebases once, at integration.
-2. Implement, then verify every acceptance sentence. From task 0.1 onward `pnpm lint && pnpm test && cargo test` must be green (root `Cargo.toml` is a workspace so `cargo test` runs from the root). Never `.skip()` a test to get green; file the gap in the journal instead.
-3. Append one entry to `docs/progress/journal-main.md` (template in `docs/progress.md`; never a commit SHA; never edit `docs/progress.md`, it is generated). Append to `docs/lessons.md` (`[<id>] <ISO> LESSON: <root cause> → <do instead>`) when you learned something; never edit an old line.
-4. Commit `wip(<id>): …` — every iteration, including failed ones. After 5 tool calls debugging one problem: clean break (notes to lessons + journal, commit, stop without DONE).
-5. Print `<promise>DONE <id></promise>` only when acceptance is fully met and the suite is green. The runner squashes your branch into one `task(<id>): …` commit and re-runs the suite on the candidate before the phase branch moves.
+2. Before implementing, append a stub journal entry to `docs/progress/journal-main.md` — `- [<id>] <ISO> Task: <the task's first sentence>. Status: In progress.` — and commit it as `wip(<id>): journal stub`, so an attempt cut off at the turn cap leaves a checkpoint the runner reads as a journal entry instead of nothing (a capped attempt still counts toward the three; RUNNER-SPEC §4.3).
+3. Implement, then verify every acceptance sentence. From task 0.1 onward `pnpm lint && pnpm test && cargo test` must be green (root `Cargo.toml` is a workspace so `cargo test` runs from the root). Never `.skip()` a test to get green; file the gap in the journal instead.
+4. Complete your own stub in place, using the template in `docs/progress.md` (never a commit SHA; never edit `docs/progress.md`, it is generated; never touch another task's line — the integrated commit appends exactly one line per attempt). Append to `docs/lessons.md` (`[<id>] <ISO> LESSON: <root cause> → <do instead>`) when you learned something; never edit an old line.
+5. Commit `wip(<id>): …` — every iteration, including failed ones. After 5 tool calls debugging one problem: clean break (notes to lessons + journal, commit, stop without DONE).
+6. Print `<promise>DONE <id></promise>` only when acceptance is fully met and the suite is green. The runner squashes your branch into one `task(<id>): …` commit and re-runs the suite on the candidate before the phase branch moves.
 
 ## Code rules (PRD §4, §6, §9; BUILD-DEFAULTS §9)
 
@@ -40,6 +41,7 @@ You are one agent in a Ralph loop on Essay Down, a Tauri 2 + React Markdown essa
 - Code that partitions a string or a node list into adjacent half-open slices states its ownership rule for zero-width items once, in the doc comment, and tests the first, middle and last positions.
 - A fix that adds several guards has one test per guard, enumerated from the diff rather than from the acceptance sentences, and the journal names the test that discharges each guard; a rule promoted into this file names, in the promoting task's journal entry, the test that discharges each of its clauses.
 - Every round-trip family (parser ↔ serializer, mdast ↔ ProseMirror, the position map) has one corpus leg seeded from the writing surface's own output (a ProseMirror doc changed by a typing-shaped transaction, a mode operation's result), not only from parse(fixture); the test title names the leg, and the editor's output is asserted to be a fixed point of parse∘format.
+- Every reader of the document store that is not an editing surface (copy, undo/redo, toggle, unmount, save, export) settles the pending source burst before it reads, and a new reader's test is an action inside the coalescing window; a read that can lag the buffer by a window is a stale-read defect, not a timing quirk.
 
 ## Runner facts you rely on (DECISIONS #009, #012)
 
