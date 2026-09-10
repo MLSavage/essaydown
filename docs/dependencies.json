@@ -1,5 +1,5 @@
 {
-  "_note": "Allowlist for scripts/check-deps.mjs (DECISIONS #review-1-r0 F8): every direct npm/cargo dependency in the workspace names the PRD §4 row or DECISIONS id that admits it, so the rule is enforced at the existing pnpm lint bar instead of caught at review. `serde_json` and `tauri-build` are the standard Tauri 2 build-time and JSON-serialisation companions of the `tauri`/`serde` crates the Rust crates row already names; PRD §4 has no individual sentence for them yet, so they are cited at the closest row that already covers the Tauri 2 Rust surface rather than left undeclared.",
+  "_note": "Allowlist for scripts/check-deps.mjs (DECISIONS #review-1-r0 F8): every direct npm/cargo dependency in the workspace names the PRD §4 row or DECISIONS id that admits it, so the rule is enforced at the existing pnpm lint bar instead of caught at review. `serde_json` and `tauri-build` are the standard Tauri 2 build-time and JSON-serialisation companions of the `tauri`/`serde` crates the Rust crates row already names; PRD §4 names both since DECISIONS #review-1-r1 G12 (`serde_json` in the Rust crates row, `tauri-build` in the Shell row), so each citation is now to a row that names the package.",
   "npm": {
     "@codemirror/lang-markdown": "PRD §4 Source editor row",
     "@codemirror/language": "PRD §4 Source editor row",

@@ -1325,13 +1325,190 @@
   "targetBranch": "phase/1"
  },
  {
+  "id": "1.23",
+  "model": "sonnet",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r1 G1 — Claude finding 1 blocker, Sol finding 1 required, Grok finding 3; a regression introduced by task 1.17, which is passed and is not edited): `copyMarkdown` in apps/desktop/src/dev/DevEditor.tsx formats `store.getState().document.root` without `sourceBinding.current?.flush()`, so while a source-view burst is pending (1.17 commits the buffer one coalescing window after the last keystroke) the button copies the last committed root and reports \"Copied Markdown\" — Claude: load `alpha\\n`, Cmd+/, type `BETA`, click Copy → clipboard `alpha\\n`; 1.5 s later → `alpha\\nBETA\\n`; Sol's `/report/probes.cjs` the same with `base`/`fresh`. The markdown pane lags for the same window, so the visible cross-check is stale too, and Michael's 1.9 record says he works with that pane always visible. `toggle` (DevEditor.tsx:102) and the unmount flush; the copy button is the reader 1.17's acceptance did not enumerate. Do three things. (1) Enumerate every reader of the store outside the two bindings from the code, not from the task text — `grep -n \"getState()\" apps/desktop/src packages/editor/src` — and list each site in the journal with whether it settles the pending source burst first, so the next reader (Phase 2 autosave, the sidecar writer) starts from the list; the source-view Undo/Redo readers are G2 and belong to task 1.24 — list them, do not fix them here. (2) `copyMarkdown` flushes the source binding before it reads the root (its first statement); the status text is written only after the clipboard write succeeds, as today. (3) Playwright, in e2e/web/editor-clipboard.spec.ts or a new spec: the presence case toggles to source, types inside the window, clicks Copy Markdown at once, and asserts the clipboard equals the typed document with no pause and no toggle; the absence case makes the same copy after the window has elapsed and reads the same string; the rendered-view copy is unchanged. Scope: apps/desktop/src/dev/DevEditor.tsx (the one function), e2e/web/**, docs/lessons.md, the journal. Zero new dependencies (PRD §4). A defect found outside this scope gets a docs/V1.1-BACKLOG.md line with a revisit trigger and a hard stop in this task's commit, never only a lesson or a test comment (DECISIONS #review-1-r1).",
+  "acceptance": "The journal lists every `getState()` reader outside `bindProseMirror`/`bindCodeMirror` with its flush status; the presence case (copy inside the burst window) is green and is asserted to be able to fail (the flush removed in a scratch edit turns exactly that case red — recorded, reverted before the commit); the absence case and the existing clipboard corpus are green; `pnpm lint && pnpm test && cargo test` green; every e2e/web spec green in the container; `git diff --stat` against the branch base touches only apps/desktop/src/dev/DevEditor.tsx, e2e/web/**, docs/V1.1-BACKLOG.md (only if a line is added), docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.10.r1d"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.24",
+  "model": "opus",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r1 G2 — Sol finding 2 required; the sibling of G1 in the seam task 1.17 opened): the source view's Undo and Redo (`undoKeyBindings`, packages/editor/src/store.ts) run on the store's committed history while the burst being typed is still pending in `bindCodeMirror` (packages/editor/src/toggle.ts), and the binding's `pull` drops the pending text when the undone root arrives. Sol's `/report/cursor-undo.cjs`, two reproductions: (a) fresh route, type `first` in source, Undo at once → the surface still reads `first` and the timer commits it afterwards, so the Undo did nothing; (b) type `first`, wait 1.2 s, type ` second`, Undo then Redo at once → `first\\n`, never `first second\\n` — the pending ` second` is lost for good. Two causes; fix both. First, a history command settles the pending burst before it moves history: flush the binding, then undo or redo, from one seam (the binding installs the source view's undo keymap itself, or `sourceUndoKeymap` takes a `beforeHistory` hook the DevEditor wires to the binding's `flush` — choose, and say why in the doc comment). Second, the deferred commit's `at` is the burst's own keystroke time, recorded in `change`, not `now()` at the moment the timer or a flush fires: with `at: now()` a flush 0.25 s after the previous commit coalesces a burst the user typed 1.2 s after the previous one into the previous entry (which is why (b) removed `first` too), and a copy or toggle flush followed by more typing opens a second undo entry for one burst (1.17's own lesson names this). State the grouping rule once in `bindCodeMirror`'s doc comment: the chain of keystrokes that becomes one commit is the chain that became one coalesced entry before 1.17, whether the commit is timed or flushed. Tests with the injected clock (`now` and `schedule` options of `bindCodeMirror`), one per case, named in the journal: fresh history + Undo inside the window empties the surface; a completed burst, a second burst after more than the window, Undo removes only the second and Redo restores it; a flush inside a burst followed by more typing inside the window yields one undo entry, not two; two bursts separated by more than the window yield two entries whether the second is flushed or timed; a pending edit after an Undo is committed on its own and Redo is then unavailable, as in the rendered view. Playwright in e2e/web/editor-toggle.spec.ts (the 1.21 source-view chord test is the model): the two reproductions above as real chords inside the window, asserting the markdown pane and the surface after each press. Scope: packages/editor/src/toggle.ts, packages/editor/src/store.ts, apps/desktop/src/dev/DevEditor.tsx (wiring only), packages/editor/test/**, e2e/web/**, docs/lessons.md, the journal. Zero new dependencies (PRD §4). A defect found outside this scope gets a docs/V1.1-BACKLOG.md line with a revisit trigger and a hard stop in this task's commit, never only a lesson or a test comment (DECISIONS #review-1-r1).",
+  "acceptance": "One unit test per case above, green, each named in the journal against its case; the existing 1.6/1.7/1.17 undo, toggle and burst suites unchanged in meaning and green (a changed expectation is explained in the journal against the grouping rule); the two Playwright reproductions green and asserted able to fail (the flush before history removed in a scratch edit turns them red — recorded, reverted before the commit); `pnpm lint && pnpm test && cargo test` green; every e2e/web spec green in the container; `git diff --stat` against the branch base touches only the scope files, docs/V1.1-BACKLOG.md (only if a line is added), docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.23"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.25",
+  "model": "opus",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r1 G3 — Claude finding 3, Sol finding 3 required, Grok finding 2 — and G4 — Claude finding 2; one class: whitespace micromark normalises that the editor's tree keeps, the F1 family that task 1.13 closed at the block's two ends only). G3: typing anywhere in a paragraph that holds a Markdown soft line break rewrites every line break in it to a space — `alpha\\nbeta gamma\\n\\nsecond para\\n`, caret at the end of the first paragraph, `X` → `alpha beta gammaX\\n\\nsecond para\\n` (Claude); `alpha\\nbeta\\n` + `X` → `alpha betaX\\n` (Sol); `> alpha\\n> beta gamma` + `X` before `beta` → `> alpha Xbeta gamma\\n` (Grok; e2e/web/editor-cursor.spec.ts:89 asserts this as the expected pane). Known since 1.16 (docs/lessons.md [1.16]) and never disposed. Cause: the schema's `preserveWhitespace: \"full\"` on the parseDOM rules (the `INLINE_WHITESPACE` decision, packages/editor/src/schema.ts:151-166) governs the clipboard parse only; prosemirror-view's DOM-change parse (`readDOMChange`, domchange.ts) derives its whitespace mode from the parent node type's `whitespace` property, and `paragraph`, `heading` and `table_cell` say nothing, so the `\\n` in the text node is normalised to a space on the first keystroke. The canonical formatter preserves soft breaks (`format(parse(\"alpha\\nbeta gamma\\n\"))` is byte-identical), so this is the editor rewriting the user's own line layout (PRD §6, invariant C). Fix: `whitespace: \"pre\"` on the three inline-content node specs so both parse paths keep the `\\n` (verify in the browser which of the two settings is still needed and say so in the doc comment, rewritten to name the typing path); a soft line break stays a `\\n` inside a `text` node, as mdast writes it — no new node type. G4: the strip 1.13 added (`trimBlockEnds`) stops at any atom, and its doc comment justifies stopping with \"a hard break already serialises to bytes that parse back\", which is true before the break and false after it: micromark strips the leading whitespace of the continuation line (CommonMark §6.7), so a space typed at the start of the line after a hard break is again a tree no file parses to and `format` writes `&#x20;` — load fixtures/markdown/hard-break.md, caret at the start of the second line, type one space → `First line of the paragraph\\\\\\n&#x20;Second line after a hard break.\\n` (Claude; guard 3 of editor-fixed-point.test.ts asserts the tree and never `format`, so it pins the defect as correct). With soft breaks now surviving typing, the same rule applies on both sides of every `\\n` inside a text run (CommonMark §6.8: spaces at the end of a line and at the start of the next are removed). Enumerate the boundaries from micromark's rules, not from the three reproductions — block start and end (kept from 1.13), after a hard break, before and after each soft line break, a whitespace-only line between two soft breaks (a blank line, hence a paragraph break, in any Markdown file: decide by the fixed point, splitting the block or collapsing the run, and state the decision) — and give each one a guard that asserts the serialised bytes (`format(root)` and `not.toContain(\"&#x20;\")`), first, middle and last positions for the soft-break case; restate the ownership rule once in the doc comment (each soft break owns the whitespace on both its sides; a hard break owns the whitespace after it; the block owns its two ends); inline code, code blocks, `raw` and the opaque bytes stay untouched. Then the corpus legs: if no fixture in fixtures/markdown/index.json holds an ordinary paragraph, a blockquote and a list item each wrapped over two source lines and a hard break followed by an indented continuation line, add `soft-line-breaks.md` (LF, agent-written prose, never a personal text) with its `.canonical.md` and index entry (1.15's pattern); a second `editor fixed point` leg in packages/editor/test/editor-fixed-point.test.ts, titled for typing *inside* a block — for every fixture, insert one letter after the first character of every paragraph's first text run and at the start of the second line of every text run that holds a soft break, and assert `format(pmToMdast(doc))` is a parse∘format fixed point and differs from `format(parse(x))` by exactly the inserted letters; the existing block-end leg unchanged. Playwright on /dev/editor: `alpha\\nbeta gamma` + `X` at the end reads `alpha\\nbeta gammaX\\n`; editor-cursor.spec.ts:89 becomes `> alpha\\n> Xbeta gamma\\n` (the tripwire the 1.16 comment named); a space typed at the end of the first line of a wrapped paragraph and a space typed at the start of the continuation line after a hard break each serialise without `&#x20;`; the absence case (a paragraph with no soft break) is unchanged. Scope: packages/editor/src/schema.ts, packages/editor/test/**, e2e/web/**, fixtures/markdown/** (additive only), docs/lessons.md, the journal. Zero new dependencies (PRD §4). A defect found outside this scope gets a docs/V1.1-BACKLOG.md line with a revisit trigger and a hard stop in this task's commit, never only a lesson or a test comment (DECISIONS #review-1-r1).",
+  "acceptance": "One guard test per boundary enumerated above, each asserting `format` bytes, listed in the journal; both `editor fixed point` legs green for every fixture in fixtures/markdown/index.json (count from the index, never a literal) and the new leg asserted able to fail (the strip disabled by a test-local shim goes red — recorded, not committed); the fixture, if added, has its index entry and its canonical file and passes the Phase 0 corpus suites (invariants A, B, C, positions, sidecar); the four Playwright cases green, with `grep -rn '&#x20;' e2e/web packages/editor/test` naming only assertions of absence; the schema-roundtrip, roundtrip, parse-dom and clipboard suites green; `pnpm lint && pnpm test && cargo test` green; every e2e/web spec green in the container; `git diff --stat` against the branch base touches only the scope files, docs/V1.1-BACKLOG.md (only if a line is added), docs/lessons.md and docs/progress/journal-main.md; no manifest or lockfile change.",
+  "dependencies": [
+   "1.24"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.26",
+  "model": "sonnet",
+  "description": "Phase 1 review fix, test-only (DECISIONS #review-1-r1 G5 — Grok finding 1 required, Claude finding 5; G8 — Grok finding 4; and G7's comment — Claude finding 4). (a) `undoKeymap` (packages/editor/src/store.ts, the rendered view) still has no test that reads its own key list: deleting the `Mod-Z` entry leaves every unit test and every e2e green, because `prosemirror-keymap`'s keyCode fallback answers `Shift-Mod-z` with the same command (Claude repeated 1.21's mutation at r1: 1845/1845 and 59/59 stayed green). 1.21 recorded the sibling as a lesson; a lesson line is not a disposition. Add, beside the source view's `undoKeyBindings` \"binds the same three names\" test in packages/editor/test/store.test.ts, one test asserting that `Object.keys(undoKeymap(store)).sort()` equals the sorted list of names `undoKeyBindings(store)` binds (one list for both views, read from the table, never a literal); repeat the mutation (delete the `Mod-Z` entry from `undoKeymap` only) and record in the journal that exactly this test goes red and no other, reverting before the commit. (b) e2e/web/editor-clipboard.spec.ts:99 asserts `checked === Object.keys(index).length` where `checked` counts a loop over `Object.keys(index).sort()` — `x === x`, the class 1.21 removed from schema-roundtrip.test.ts under F9(c): collect the names the loop actually loaded and compare that list to `names`. (c) vitest.config.ts:14's coverage `include` is `packages/*/src/**` only, so `apps/desktop/src/**` (the dev routes, where r0's F3 and F4 and r1's G1 landed) is measured at zero and reported as nothing: add one comment above the glob stating what it deliberately excludes and which suite covers it instead (the e2e/web Playwright specs), so \"not measured\" is a decision in the file; the include itself changes at Phase 2 planning (backlog line, hard stop 2.verify). No source file. Scope: packages/editor/test/store.test.ts, e2e/web/editor-clipboard.spec.ts, vitest.config.ts (a comment only; no threshold, no glob change), docs/lessons.md, the journal. Zero new dependencies (PRD §4). A defect found outside this scope gets a docs/V1.1-BACKLOG.md line with a revisit trigger and a hard stop in this task's commit, never only a lesson or a test comment (DECISIONS #review-1-r1).",
+  "acceptance": "The `undoKeymap` key-list test is present and green and the journal records the mutation (which single test went red); the clipboard spec's count assertion compares the loaded names to `names` and is green; `git diff vitest.config.ts` is comment lines only; `pnpm lint && pnpm test && cargo test` green (coverage thresholds unchanged and holding); every e2e/web spec green in the container; `git diff --stat` against the branch base touches only the four scope files, docs/V1.1-BACKLOG.md (only if a line is added) and docs/progress/journal-main.md; no source, manifest or lockfile change.",
+  "dependencies": [
+   "1.25"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.27",
+  "model": "opus",
+  "description": "Phase 1 review fix, test-only (DECISIONS #review-1-r1 G6 — Sol finding 4 required): the rule task 1.verify.r1 promoted into CLAUDE.md/AGENTS.md names three round-trip families — parser ↔ serializer, mdast ↔ ProseMirror, the position map — and the journal discharged it with 1.13's `editor fixed point` leg, which exercises the first two and never calls `formatWithMap`, `nodeAt` or `cursorMap`; packages/core/test/positions-corpus.test.ts seeds every case from `parse(sourceOf(name))`. Add the position-map leg over editor output, in packages/editor/test (the editor depends on core, never the reverse), titled for the leg: for every fixture in fixtures/markdown/index.json, `doc = mdastToPM(parse(x))`, apply the typing-shaped transactions the existing legs use (the block-end space of 1.13 and the in-block letter of 1.25 — reuse their helpers, do not copy them), `root2 = pmToMdast(doc2)`, `{ text, map } = formatWithMap(root2)`, and assert: `text === format(root2)` and `format(parse(text)) === text`; when `text` equals `format(parse(x))` (the block-end leg, whose space is stripped) the map deep-equals `formatWithMap(parse(x)).map`; every paragraph's mapped `startLine` equals index.json's `paragraphStartLines` for the in-block leg too (a letter adds no line); 200 seeded `nodeAt(map, l, c)` positions return a node whose range contains (l, c) or null only on a blank line (the 1.2 clause, now over editor-seeded roots); and, for the in-block leg, `cursorMap(root2, doc2).toSource(pos)` at the position after each inserted letter names the line and column where `text` holds that letter (the map's consumer, seeded from the editor). One negative case proves the leg can fail (a hand-built doc whose map is checked against a deliberately shifted line). Scope: packages/editor/test/**, docs/lessons.md, the journal; no source file — if the leg finds a defect, stop, record it in the journal and lessons with a docs/V1.1-BACKLOG.md line carrying a revisit trigger and a hard stop, and do not fix it (the reconciliation decides). Zero new dependencies (PRD §4).",
+  "acceptance": "The editor-output position-map leg is green for every fixture listed in the index (count from the index, never a literal), its title names the leg and the family, the journal names it as the test that discharges the position-map clause of the promoted rule, and the negative case is green; `pnpm lint && pnpm test && cargo test` green; `git diff --stat` against the branch base touches only packages/editor/test/**, docs/V1.1-BACKLOG.md (only if a line is added), docs/lessons.md and docs/progress/journal-main.md; no source, manifest or lockfile change.",
+  "dependencies": [
+   "1.26"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r2",
+  "model": "sonnet",
+  "description": "Phase 1 verification for review attempt r2 (RUNNER-SPEC §3, §5.5): freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. `promote-lessons` is a manual step carried by this task's text (DECISIONS #review-1-r1): append this line, verbatim, to the `## Code rules` list of both CLAUDE.md and AGENTS.md (identical below line 1; `ralph/check-agent-rules.sh` must stay green): `- Every reader of the document store that is not an editing surface (copy, undo/redo, toggle, unmount, save, export) settles the pending source burst before it reads, and a new reader's test is an action inside the coalescing window; a read that can lag the buffer by a window is a stale-read defect, not a timing quirk.` The journal names the tests that discharge the clause (1.23's copy-inside-the-window case and 1.24's undo-inside-the-window cases). Second, the procedure change Michael decided at #review-1-r1 (nine of ten failed first attempts in Phase 1 were `NO-JOURNAL` at the turn cap, each costing one of three attempts and a manual restart): in the `## Every iteration` list of both files, replace step 2 and step 3 with these three steps, verbatim, renumbering the list so it reads 1–6: `2. Before implementing, append a stub journal entry to `docs/progress/journal-main.md` — `- [<id>] <ISO> Task: <the task's first sentence>. Status: In progress.` — and commit it as `wip(<id>): journal stub`, so an attempt cut off at the turn cap leaves a checkpoint the runner reads as a journal entry instead of nothing (a capped attempt still counts toward the three; RUNNER-SPEC §4.3).`, `3. Implement, then verify every acceptance sentence. From task 0.1 onward `pnpm lint && pnpm test && cargo test` must be green (root `Cargo.toml` is a workspace so `cargo test` runs from the root). Never `.skip()` a test to get green; file the gap in the journal instead.`, `4. Complete your own stub in place, using the template in `docs/progress.md` (never a commit SHA; never edit `docs/progress.md`, it is generated; never touch another task's line — the integrated commit appends exactly one line per attempt). Append to `docs/lessons.md` (`[<id>] <ISO> LESSON: <root cause> → <do instead>`) when you learned something; never edit an old line.`; the former steps 4 and 5 become 5 and 6 unchanged. The journal names `ralph/check-agent-rules.sh` and `tests/agent-rules.test.ts` as the tests that discharge the identical-files clause.",
+  "acceptance": "pnpm lint (which includes `node scripts/check-deps.mjs`), pnpm test, cargo test green in the container; every e2e/web spec green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change and touches only CLAUDE.md, AGENTS.md, docs/lessons.md and the journal; `ralph/check-agent-rules.sh` exits 0; `tests/agent-rules.test.ts` passes.",
+  "dependencies": [
+   "1.27"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r2h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r2h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "1.verify.r2",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "description": "CI gate for 1.verify.r2: scripts/gate.sh 1.verify.r2h pushes integrated_sha of 1.verify.r2 to ci/1.verify.r2/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"playwright-report\"] into /logs/ci/1.verify.r2/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r2h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "dependencies": [
+   "1.verify.r2"
+  ]
+ },
+ {
+  "id": "1.10.r2a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r2",
+  "description": "Review attempt r2, claude reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired.",
+  "acceptance": "/logs/reviews/1/r2/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r2h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r2b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r2",
+  "description": "Review attempt r2, sol reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired.",
+  "acceptance": "/logs/reviews/1/r2/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r2h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r2c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r2",
+  "description": "Review attempt r2, grok reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r2 (after the r1 FAIL, DECISIONS #review-1-r1). Phase checks as r1: typing latency p95 with 10k words on /dev/editor under the 1.17 protocol (e2e/web/latency.spec.ts doc comment), reported with the protocol named and the isolated single-worker run stated separately from any contended or CI number — the 16 ms judgement is the reviewer's, from the numbers, not CI's; all tests and every e2e/web spec green on 3 OSes (from /logs/ci/1.verify.r2h/accepted/, three OS directories in both artifacts); fresh-clone cold build. r2-specific checks: each r1 finding's disposition in DECISIONS #review-1-r1 (G1–G12) verified against the tree (fixed, deferred with a backlog line, or recorded), and each r0 disposition (F1–F16) re-confirmed; Copy Markdown and the source view's Undo/Redo probed in a browser inside the coalescing window (1.23, 1.24); typing inside a wrapped paragraph, inside a wrapped blockquote and after a hard break probed in a browser (1.25), and the `&#x20;` family searched for beyond the three r1 reproductions; the position-map leg of 1.27 read for which functions it actually calls; the `undoKeymap` key-list test of 1.26 read against the mutation 1.21 and Claude recorded; `pnpm why @codemirror/commands` and `node scripts/check-deps.mjs` run in the cold build; docs/V1.1-BACKLOG.md read for any revisit trigger that has fired. Grok-specific (DECISIONS #review-1-r0 reviewer-shape record; #review-1-r1 shared-severity count): Grok reads the tree and /logs only and cites /logs/ci/1.verify.r2h/accepted/ for the cold build; for each r1 finding of Claude and Sol that Grok did not raise or rated lower (G1 in particular, rated nit against a blocker), state whether a read-only review could have found it and why the severity differed; and state explicitly the verdict Grok gives if any r1 blocker or required finding is not discharged in the tree.",
+  "acceptance": "/logs/reviews/1/r2/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r2h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r2d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r2",
+  "description": "Reconciliation of review attempt r2 for review set 1.10 (phase 1): copy the three reports to docs/reviews/phase-1-r2-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md, write DECISIONS.md#review-1-r2 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 1.verify.r3 and 1.10.r3a/b/c/d in the same planning commit (RUNNER-SPEC §5.4).",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "1.10.r2a",
+   "1.10.r2b",
+   "1.10.r2c"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
   "id": "1.close",
   "model": "opus",
   "execution": "runner",
   "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/1 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/2; then finalise .evidence/closes and the next phase base record.",
   "acceptance": "main == reconciliation_sha of the newest Phase 1 review attempt (verdict PASS); suite green on that commit; branch phase/2 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
   "dependencies": [
-   "1.10.r1d"
+   "1.10.r2d"
   ],
   "nextPhase": "2",
   "nextBranch": "phase/2",

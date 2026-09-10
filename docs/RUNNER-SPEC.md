@@ -111,7 +111,7 @@ Bootstrap validates the external checkout at `externalRepoPath` is clean, that `
 
 ## 10. Summaries, journals, lessons
 
-`/logs/state/summary.md` (outside git): ≤ 6-line current state + last 5 journal entries + open gates and plan requests, regenerated after every integration. `docs/progress.md` (tracked): regenerated only in reconciliation commits. One journal, `docs/progress/journal-main.md`: append-only, never pruned, never carries its own commit SHA. `docs/lessons.md` is append-only with `merge=union`; nothing else is union-merged.
+`/logs/state/summary.md` (outside git): ≤ 6-line current state + last 5 journal entries + open gates and plan requests, regenerated after every integration. `docs/progress.md` (tracked): regenerated only in reconciliation commits. One journal, `docs/progress/journal-main.md`: append-only, never pruned, never carries its own commit SHA. A task stubs its own entry before implementing and completes that stub in place before integration (DECISIONS #review-1-r1, promoted via `1.verify.r2`); the integrated commit appends exactly one line per attempt, and the stub is what the stop-check's journal count reads when an attempt is cut off at the turn cap. `docs/lessons.md` is append-only with `merge=union`; nothing else is union-merged.
 
 ## 11. Loop parameters, stop signals, entry points
 
