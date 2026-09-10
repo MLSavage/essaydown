@@ -204,6 +204,11 @@ export default function DevEditor() {
   );
 
   const copyMarkdown = useCallback(async (): Promise<void> => {
+    // The source view commits on the burst boundary (task 1.17); reading the store first would
+    // copy the last committed root and miss whatever is still only in the CodeMirror buffer
+    // (DECISIONS #review-1-r1 G1). `flush` is a no-op in rendered mode (`sourceBinding.current`
+    // is null there) and idempotent if nothing is pending.
+    sourceBinding.current?.flush();
     const text = format(store.getState().document.root);
     try {
       await navigator.clipboard.writeText(text);

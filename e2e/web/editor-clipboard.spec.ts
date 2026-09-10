@@ -197,3 +197,70 @@ test.describe("plain text pasted from outside the editor stays plain", () => {
     expect(await page.locator(".ProseMirror em").count()).toBe(0);
   });
 });
+
+/**
+ * Task 1.23 (DECISIONS #review-1-r1 G1, a regression from task 1.17): "Copy Markdown" formatted
+ * `store.getState().document.root` directly, so while a source-view burst was still pending (1.17
+ * commits it one coalescing window after the last keystroke) the button copied the last committed
+ * root and reported "Copied Markdown" anyway — clipboard and status both lied about what was on
+ * the clipboard. The fix is `copyMarkdown`'s first statement: flush the source binding before
+ * reading the root, mirroring what `toggle` (DevEditor.tsx) already does before its own read.
+ */
+async function openEditor(page: Page): Promise<void> {
+  await page.goto("/dev/editor");
+  await page.locator(".ProseMirror").click();
+  await expect.poll(() => markdown(page)).toBe("");
+}
+
+async function toggleToSource(page: Page): Promise<void> {
+  await page.keyboard.press("ControlOrMeta+/");
+  await expect(page.getByTestId("mode")).toHaveText("source");
+  await page.locator(".cm-content").waitFor();
+}
+
+async function clickCopyMarkdown(page: Page): Promise<string> {
+  await page.getByTestId("copy-markdown").click();
+  await expect(page.getByTestId("status")).toHaveText("Copied Markdown");
+  return page.evaluate(() => navigator.clipboard.readText());
+}
+
+test.describe("Copy Markdown flushes a pending source burst before it reads the store", () => {
+  test("presence: copying inside the coalescing window includes the just-typed text, with no pause and no toggle", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openEditor(page);
+    await toggleToSource(page);
+    // Well inside the 1 s coalescing window (PRD §6.5): typed and copied with no wait between.
+    await page.keyboard.type("alpha", { delay: 10 });
+    const clipboard = await clickCopyMarkdown(page);
+    expect(clipboard).toBe("alpha\n");
+  });
+
+  test("absence: copying after the coalescing window has elapsed reads the same committed text", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openEditor(page);
+    await toggleToSource(page);
+    await page.keyboard.type("beta", { delay: 10 });
+    await page.waitForTimeout(1_500);
+    await expect.poll(() => markdown(page)).toBe("beta\n");
+    const clipboard = await clickCopyMarkdown(page);
+    expect(clipboard).toBe("beta\n");
+  });
+
+  test("the rendered view's copy is unchanged: every keystroke there is already committed, so an immediate copy needs no flush", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openEditor(page);
+    await page.keyboard.type("gamma", { delay: 10 });
+    await expect.poll(() => markdown(page)).toBe("gamma\n");
+    const clipboard = await clickCopyMarkdown(page);
+    expect(clipboard).toBe("gamma\n");
+  });
+});
