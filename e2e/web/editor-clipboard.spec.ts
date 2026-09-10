@@ -80,7 +80,10 @@ test.describe("the editor's own copy → paste over the corpus", () => {
   test("every fixture in index.json is byte-identical before and after", async ({ page }) => {
     await page.goto("/dev/editor");
     const mismatches: string[] = [];
-    let checked = 0;
+    // Collects what the loop actually loaded, so the coverage assertion after it is a claim about
+    // the loop's own execution, not `checked === names.length` — which held for any for-of loop
+    // over `names` that never threw, whatever it did inside (task 1.21 F9c's class; G8).
+    const checkedNames: string[] = [];
     for (const name of names) {
       const before = canonicalOf(name);
       await load(page, name, readFileSync(`${FIXTURES}/${name}`, "utf8"));
@@ -92,11 +95,11 @@ test.describe("the editor's own copy → paste over the corpus", () => {
       await expect.poll(() => markdown(page), { message: name }).toBe(before);
       const after = await markdown(page);
       if (after !== before) mismatches.push(name);
-      checked += 1;
+      checkedNames.push(name);
     }
     expect(mismatches).toEqual([]);
-    // The count comes from the index, never from a literal written here.
-    expect(checked).toBe(Object.keys(index).length);
+    // The list comes from what the loop actually loaded, never a count copied from the index.
+    expect(checkedNames).toEqual(names);
   });
 });
 

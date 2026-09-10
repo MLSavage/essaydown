@@ -11,6 +11,10 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: [["text", { skipFull: false }], "html"],
+      // Deliberately excludes apps/desktop/src/** (the dev routes): that surface is covered by
+      // the e2e/web Playwright specs, not this vitest run, so its coverage reads as unmeasured
+      // here rather than as zero against a threshold (DECISIONS #review-1-r1 G7). The include
+      // itself widens at Phase 2 planning (docs/V1.1-BACKLOG.md, hard stop 2.verify).
       include: ["packages/*/src/**/*.{ts,tsx}"],
       thresholds: {
         perFile: true,

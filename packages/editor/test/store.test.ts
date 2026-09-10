@@ -13,6 +13,7 @@ import {
   createFormatCache,
   sourceUndoKeymap,
   undoKeyBindings,
+  undoKeymap,
   type BoundView,
 } from "../src/store.js";
 
@@ -427,6 +428,21 @@ describe("undoKeyBindings (source view)", () => {
     const bindings = undoKeyBindings(store);
     expect(bindings.map((binding) => binding.key)).toEqual(["Mod-z", "Mod-Z", "Shift-Mod-z"]);
     expect(bindings.every((binding) => binding.preventDefault === true)).toBe(true);
+  });
+
+  /**
+   * `undoKeymap` (rendered view) had no test reading its own key list: deleting its `Mod-Z` entry
+   * left every event-dispatch test green, rendered and source alike, because `prosemirror-keymap`'s
+   * keyCode fallback answers `Shift-Mod-z` with the same command (DECISIONS #review-1-r1 G5, lesson
+   * 1.21). One list read from the table for both views, never a literal, closes the sibling gap.
+   */
+  it("undoKeymap (rendered view) binds the same names as undoKeyBindings (source view)", () => {
+    const store = createDocumentStore(parse("a\n"), SIDECAR);
+    const renderedNames = Object.keys(undoKeymap(store)).sort();
+    const sourceNames = undoKeyBindings(store)
+      .map((binding) => binding.key)
+      .sort();
+    expect(renderedNames).toEqual(sourceNames);
   });
 
   it("runs undo and redo at the store", () => {
