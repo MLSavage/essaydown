@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Root } from "mdast";
-import type { Node as PMNode } from "prosemirror-model";
+import type { Mark as PMMark, Node as PMNode } from "prosemirror-model";
 import { describe, expect, it } from "vitest";
 import { format } from "../../core/src/format.js";
 import { parse } from "../../core/src/parse.js";
@@ -11,6 +11,7 @@ import {
   letterFor,
   typeInsideEveryBlock,
   typeSpaceAtEveryBlockEnd,
+  typeSpaceInsideEveryMarkedRun,
 } from "./typing-legs.js";
 
 /**
@@ -42,6 +43,17 @@ import {
  * and on `heading`, plus the cell clause; the corpus gains a leg titled for **deletion**, because
  * both typing legs only ever `insertText` and a tree that needs a deletion to build was outside
  * every one of them (Claude's lesson 2).
+ *
+ * Task 1.30 (DECISIONS #review-1-r2 H8) adds the boundary the r1 backlog had deferred as
+ * unreachable, and which one keystroke reaches: a space typed with the caret inside a mark, at
+ * the end of an emphasised word, so that `emphasis[text("b ")]` — a tree no file parses to,
+ * CommonMark §6.2's closing delimiter not being right-flanking after whitespace — reached the
+ * serializer, which spelled the space as a numeric character reference (Sol's `a *b* c`). The fourth
+ * suite is one guard
+ * per edge the flanking rules name (leading, trailing, both, whitespace-only) for each of the
+ * three flanking marks, the trailing edge in the first, middle and last positions of the block,
+ * plus the nested case, the link absence case and the clauses read from the diff; the corpus
+ * gains a leg titled for the **mark edge**, which types the space inside every marked run.
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -446,6 +458,305 @@ describe("the block's end and an atom (task 1.29): one guard per position, on pa
   });
 });
 
+/** The three flanking marks, named as the guards name them, with the delimiter each is written with. */
+const FLANKING: readonly (readonly [string, PMMark, string])[] = [
+  ["emphasis", schema.marks.emphasis.create(), "*"],
+  ["strong", schema.marks.strong.create(), "**"],
+  ["strikethrough", schema.marks.delete.create(), "~~"],
+];
+
+/** The mdast wrapper each flanking mark becomes, for the tree assertions. */
+function wrapped(
+  name: string,
+  value: string,
+): { type: string; children: { type: string; value: string }[] } {
+  const type = name === "strikethrough" ? "delete" : name;
+  return { type, children: [{ type: "text", value }] };
+}
+
+describe("the mark edge (task 1.30): one guard per edge of CommonMark §6.2's flanking rules, per flanking mark", () => {
+  for (const [name, mark, d] of FLANKING) {
+    it(`${name}, leading edge: the whitespace after the opening delimiter moves before the mark`, () => {
+      // §6.2: an opening delimiter run is left-flanking only if not followed by whitespace, so
+      // `${d} b${d}` never parses to a mark holding " b"; the space is the neighbour's.
+      const root = mdastOf(
+        paragraph(schema.text("a"), schema.text(" b", [mark]), schema.text(" c")),
+      );
+      expect(root.children).toEqual([
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", value: "a " },
+            wrapped(name, "b"),
+            { type: "text", value: " c" },
+          ],
+        },
+      ]);
+      expectBytes(root, `a ${d}b${d} c\n`);
+    });
+
+    it(`${name}, trailing edge: the whitespace before the closing delimiter moves after the mark — first, middle and last in the block`, () => {
+      // §6.2: a closing delimiter run is right-flanking only if not preceded by whitespace. The
+      // marked run first in the block, in the middle of it, and last in it — where the moved
+      // space is the block's end's, and dropped.
+      const first = mdastOf(paragraph(schema.text("b ", [mark]), schema.text("c")));
+      expect(first.children).toEqual([
+        { type: "paragraph", children: [wrapped(name, "b"), { type: "text", value: " c" }] },
+      ]);
+      expectBytes(first, `${d}b${d} c\n`, "first");
+
+      const middle = mdastOf(
+        paragraph(schema.text("a "), schema.text("b ", [mark]), schema.text("c")),
+      );
+      expect(middle.children).toEqual([
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", value: "a " },
+            wrapped(name, "b"),
+            { type: "text", value: " c" },
+          ],
+        },
+      ]);
+      expectBytes(middle, `a ${d}b${d} c\n`, "middle");
+
+      const last = mdastOf(paragraph(schema.text("a "), schema.text("b ", [mark])));
+      expect(last.children).toEqual([
+        { type: "paragraph", children: [{ type: "text", value: "a " }, wrapped(name, "b")] },
+      ]);
+      expectBytes(last, `a ${d}b${d}\n`, "last");
+    });
+
+    it(`${name}, both edges: each side's whitespace goes to its own neighbour`, () => {
+      const root = mdastOf(
+        paragraph(schema.text("a"), schema.text(" b ", [mark]), schema.text("c")),
+      );
+      expect(root.children).toEqual([
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", value: "a " },
+            wrapped(name, "b"),
+            { type: "text", value: " c" },
+          ],
+        },
+      ]);
+      expectBytes(root, `a ${d}b${d} c\n`);
+    });
+
+    it(`${name}, whitespace-only: a marked run that is only whitespace loses the mark and merges with its neighbours`, () => {
+      const root = mdastOf(paragraph(schema.text("a"), schema.text(" ", [mark]), schema.text("c")));
+      expect(root.children).toEqual([
+        { type: "paragraph", children: [{ type: "text", value: "a c" }] },
+      ]);
+      expectBytes(root, "a c\n");
+      // …and at the block's start it is then boundary 1's, dropped.
+      const start = mdastOf(paragraph(schema.text(" ", [mark]), schema.text("c")));
+      expect(start.children).toEqual([
+        { type: "paragraph", children: [{ type: "text", value: "c" }] },
+      ]);
+      expectBytes(start, "c\n");
+    });
+  }
+
+  it("nested (strong inside emphasis), whitespace at the shared edge: the space leaves every mark whose edge it touches", () => {
+    const em = schema.marks.emphasis.create();
+    const strong = schema.marks.strong.create();
+    // Both runs end at the same node: the space is outside both.
+    const shared = mdastOf(
+      paragraph(schema.text("a "), schema.text("b ", [em, strong]), schema.text("c")),
+    );
+    expect(shared.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: "a " },
+          {
+            type: "strong",
+            children: [{ type: "emphasis", children: [{ type: "text", value: "b" }] }],
+          },
+          { type: "text", value: " c" },
+        ],
+      },
+    ]);
+    expectBytes(shared, "a ***b*** c\n", "shared edge");
+    // Only the inner run ends there: the space leaves `strong` and stays inside `emphasis`.
+    const inner = mdastOf(
+      paragraph(
+        schema.text("x ", [em]),
+        schema.text("b ", [em, strong]),
+        schema.text("y", [em]),
+        schema.text(" c"),
+      ),
+    );
+    expect(inner.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "emphasis",
+            children: [
+              { type: "text", value: "x " },
+              { type: "strong", children: [{ type: "text", value: "b" }] },
+              { type: "text", value: " y" },
+            ],
+          },
+          { type: "text", value: " c" },
+        ],
+      },
+    ]);
+    expectBytes(inner, "*x **b** y* c\n", "inner edge");
+  });
+
+  it("link (the absence case): a link's text keeps its edge whitespace, because `[b ](u)` is a link", () => {
+    const link = schema.marks.link.create({ url: "u", title: null });
+    const root = mdastOf(
+      paragraph(schema.text("a "), schema.text(" b ", [link]), schema.text("c")),
+    );
+    expect(root.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: "a " },
+          { type: "link", url: "u", title: null, children: [{ type: "text", value: " b " }] },
+          { type: "text", value: "c" },
+        ],
+      },
+    ]);
+    expectBytes(root, "a [ b ](u)c\n");
+  });
+
+  it("clause: the moved whitespace keeps every mark other than the one whose edge it left — emphasis inside a link", () => {
+    const link = schema.marks.link.create({ url: "u", title: null });
+    const em = schema.marks.emphasis.create();
+    const root = mdastOf(paragraph(schema.text("b ", [link, em]), schema.text("c", [link])));
+    expect(root.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "link",
+            url: "u",
+            title: null,
+            children: [
+              { type: "emphasis", children: [{ type: "text", value: "b" }] },
+              { type: "text", value: " c" },
+            ],
+          },
+        ],
+      },
+    ]);
+    expectBytes(root, "[*b* c](u)\n");
+  });
+
+  it("clause: the edge scan stops at an opaque node — an inline-code run or an atom at the run's edge keeps what is inside it", () => {
+    const em = schema.marks.emphasis.create();
+    const code = schema.marks.inline_code.create();
+    // Inline code first in the run: its own spaces are its own, and the scan does not pass it to
+    // reach `b`'s leading space; the trailing edge is still the run's last node.
+    const withCode = mdastOf(
+      paragraph(schema.text(" x ", [code, em]), schema.text("b ", [em]), schema.text("c")),
+    );
+    expect(withCode.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "emphasis",
+            children: [
+              { type: "inlineCode", value: " x " },
+              { type: "text", value: "b" },
+            ],
+          },
+          { type: "text", value: " c" },
+        ],
+      },
+    ]);
+    expect(format(parse(format(withCode)))).toBe(format(withCode));
+    expect(format(withCode)).not.toContain("&#x20;");
+    // An image first in the run: the space after it is inside the run, not at its edge.
+    const image = schema.node("image", { url: "a.png", alt: "", title: null }, undefined, [em]);
+    const withImage = mdastOf(paragraph(image, schema.text(" b", [em]), schema.text(" c")));
+    expect(withImage.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "emphasis",
+            children: [
+              { type: "image", url: "a.png", alt: "", title: null },
+              { type: "text", value: " b" },
+            ],
+          },
+          { type: "text", value: " c" },
+        ],
+      },
+    ]);
+    expectBytes(withImage, "*![](a.png) b* c\n");
+  });
+
+  it("clause: the class is ASCII whitespace — a tab moves like a space, and the moved whitespace then falls under the line rules", () => {
+    const em = schema.marks.emphasis.create();
+    const tab = mdastOf(paragraph(schema.text("a "), schema.text("b\t", [em]), schema.text("c")));
+    expect(tab.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: "a " },
+          { type: "emphasis", children: [{ type: "text", value: "b" }] },
+          { type: "text", value: "\tc" },
+        ],
+      },
+    ]);
+    expectBytes(tab, "a *b*\tc\n", "tab");
+    // A space moved to sit before a soft line break is boundary 5's, dropped with the run.
+    const soft = mdastOf(paragraph(schema.text("b ", [em]), schema.text("\nc")));
+    expect(soft.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          { type: "emphasis", children: [{ type: "text", value: "b" }] },
+          { type: "text", value: "\nc" },
+        ],
+      },
+    ]);
+    expectBytes(soft, "*b*\nc\n", "before a soft break");
+  });
+
+  it("clause: the rule runs on a heading and on a table cell as it does on a paragraph", () => {
+    const em = schema.marks.emphasis.create();
+    expectBytes(
+      mdastOf(heading(schema.text("a "), schema.text("b ", [em]), schema.text("c"))),
+      "## a *b* c\n",
+      "heading",
+    );
+    expectBytes(
+      mdastOf(cell(schema.text("a "), schema.text("b ", [em]), schema.text("c"))),
+      "| a *b* c |\n| ------- |\n",
+      "cell",
+    );
+  });
+
+  it("the leg's seed is Sol's shape: a space typed at the end of `b` in `a *b* c` lands inside the mark", () => {
+    // The corpus leg below types with `insertText` at the end of every marked text node; this
+    // pins what that produces on the reproduction itself (the tree, before the strip), so the
+    // leg is known to build the shape the finding is about and not a space after the mark.
+    const { doc } = mdastToPM(parse("a *b* c\n"));
+    const typed = typeSpaceInsideEveryMarkedRun(doc);
+    expect(typed.runs).toBe(1);
+    expect(typed.doc.toJSON()).toEqual(
+      paragraph(
+        schema.text("a "),
+        schema.text("b ", [schema.marks.emphasis.create()]),
+        schema.text(" c"),
+      ).toJSON(),
+    );
+    const out = format(pmToMdast({ doc: typed.doc, frontMatter: null }));
+    expect(out).toBe("a *b*  c\n");
+    expect(out).not.toContain("&#x20;");
+  });
+});
+
 describe("editor fixed point over the corpus", () => {
   it("asserts one editor fixed point per fixture listed in the index", () => {
     // The count is the index's own length, never a literal (see schema-roundtrip.test.ts).
@@ -515,7 +826,37 @@ describe("editor fixed point over the corpus", () => {
       expect(out).not.toContain("&#x20;");
       expect(out).not.toContain("&#xA;");
     });
+
+    it(`${name} is an editor fixed point after a space is typed inside every marked run, at its end (the mark edge)`, () => {
+      const canonical = format(parse(read(name)));
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+      const typed = typeSpaceInsideEveryMarkedRun(doc);
+
+      // Presence: the transaction really changed this document, wherever it has a marked run.
+      expect(typed.doc.eq(doc)).toBe(typed.runs === 0);
+
+      const out = format(pmToMdast({ doc: typed.doc, frontMatter }));
+      // Before this task, every space typed inside a mark was written as a character reference
+      // (and, for strikethrough, the tildes stopped being a delimiter at all).
+      expect(format(parse(out))).toBe(out);
+      expect(out).not.toContain("&#x20;");
+      // Only spaces differ: the moved space is now after (or before) the mark, or dropped at a
+      // boundary that does not keep one, and nothing else about the bytes — the delimiters, the
+      // escapes, the mark's own text — has moved.
+      expect(out.split(" ").join("")).toBe(canonical.split(" ").join(""));
+      expect(out.length).toBeGreaterThanOrEqual(canonical.length);
+      expect(out.length - canonical.length).toBeLessThanOrEqual(typed.runs);
+    });
   }
+
+  it("at least one fixture in the index holds a marked run the mark-edge leg types into", () => {
+    // Without this, the mark-edge leg could be green because no fixture in the corpus carries
+    // emphasis, strong or strikethrough for it to type inside.
+    const reached = names.filter(
+      (name) => typeSpaceInsideEveryMarkedRun(mdastToPM(parse(read(name))).doc).runs > 0,
+    );
+    expect(reached.length).toBeGreaterThan(0);
+  });
 
   it("at least one fixture in the index holds a hard break the deletion leg leaves last in its block", () => {
     // Without this, the deletion leg could be green because no fixture in the corpus has a hard

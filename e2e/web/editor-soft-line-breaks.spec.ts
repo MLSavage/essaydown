@@ -16,7 +16,8 @@ import { expect, test, type Page } from "@playwright/test";
  * G4: with soft breaks now surviving typing, the whitespace micromark strips has more boundaries
  * than the block's two ends task 1.13 closed — the start of the line after a hard break
  * (CommonMark §6.7) and both sides of every soft break (§6.8). A space typed at one of those used
- * to reach `format`, whose `unsafe` table encodes a space before a line ending as `&#x20;`.
+ * to reach `format`, whose `unsafe` table encodes a space before a line ending as a numeric
+ * character reference.
  *
  * Caret placement is by counted `ArrowRight`/`ArrowLeft` from a document end, never by `Home`/
  * `End`: a soft break is a literal `\n` inside a text node and the rendered view wraps it as
@@ -108,7 +109,8 @@ test.describe("a soft line break survives typing, and the whitespace around it n
     await page.keyboard.type(" ", { delay: 10 });
 
     // CommonMark §6.7 ignores the leading spaces of the continuation line. Before this task the
-    // same keystroke gave `\\\n&#x20;Second line after a hard break.\n`.
+    // same keystroke gave the backslash, the line ending, a numeric character reference for the
+    // space, then `Second line after a hard break.`.
     await expect
       .poll(() => markdown(page))
       .toBe("First line of the paragraph\\\nSecond line after a hard break.\n");

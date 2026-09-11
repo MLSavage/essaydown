@@ -4,7 +4,7 @@ import { expect } from "vitest";
 import { schema } from "../src/schema.js";
 
 /**
- * The keystroke-shaped transactions the editor-seeded round-trip legs share: two that type, and
+ * The keystroke-shaped transactions the editor-seeded round-trip legs share: three that type, and
  * one that deletes.
  *
  * Task 1.13 wrote the block-end space and task 1.25 the in-block letter, both inside
@@ -14,7 +14,9 @@ import { schema } from "../src/schema.js";
  * thing. So the transactions live here and are imported by both suites rather than copied into
  * the second one, where a later fix to one would silently leave the other typing something else.
  * Task 1.29 (DECISIONS #review-1-r2 H1) adds the deletion, {@link deleteAtEveryBlockEnd}, beside
- * them: the trees a parser cannot produce are usually reached by taking something away.
+ * them: the trees a parser cannot produce are usually reached by taking something away. Task 1.30
+ * (DECISIONS #review-1-r2 H8) adds {@link typeSpaceInsideEveryMarkedRun}: a space typed with the
+ * caret inside a mark, at the end of an emphasised word, the one-keystroke route to the mark edge.
  */
 
 /** {@link typeSpaceAtEveryBlockEnd}'s result: the changed document, and how many blocks it typed in. */
@@ -183,4 +185,39 @@ export function deleteAtEveryBlockEnd(doc: PMNode): DeletionLeg {
   });
   for (const [from, to] of [...lastChars].reverse()) tr = tr.delete(from, to);
   return { doc: tr.doc, afterBreaks: continuations.length, lastChars: lastChars.length };
+}
+
+/**
+ * {@link typeSpaceInsideEveryMarkedRun}'s result: the changed document and how many marked text
+ * nodes it typed a space at the end of.
+ */
+export interface MarkEdgeLeg {
+  doc: PMNode;
+  runs: number;
+}
+
+/** The marks whose delimiters must flank their content: the ones the mark-edge clause is for. */
+const FLANKING_MARKS = [schema.marks.emphasis, schema.marks.strong, schema.marks.delete];
+
+/**
+ * A ProseMirror transaction shaped like typing a space with the caret *inside a mark* — the shape
+ * task 1.30 repairs (DECISIONS #review-1-r2 H8, Sol's reproduction: `a *b* c`, the caret after
+ * `b`, one space): at the end of every text node carrying `emphasis`, `strong` or `delete`, in a
+ * paragraph, heading or table cell, one space is inserted by `insertText`, the same call
+ * `typing.ts` makes for a typed character. At the end of a text node `insertText` gives the new
+ * text that node's marks (all three flanking marks are inclusive, so a caret there sits inside
+ * them), which is why the space lands inside the mark and not after it. The insertions are
+ * applied back-to-front so that each one leaves the positions still to come unmoved.
+ */
+export function typeSpaceInsideEveryMarkedRun(doc: PMNode): MarkEdgeLeg {
+  const ends: number[] = [];
+  doc.descendants((node, pos, parent) => {
+    if (!node.isText || parent === null || !INLINE_CONTENT.has(parent.type)) return true;
+    if (FLANKING_MARKS.some((mark) => mark.isInSet(node.marks) !== undefined))
+      ends.push(pos + node.nodeSize);
+    return true;
+  });
+  let tr = EditorState.create({ doc }).tr;
+  for (const pos of [...ends].reverse()) tr = tr.insertText(" ", pos);
+  return { doc: tr.doc, runs: ends.length };
 }

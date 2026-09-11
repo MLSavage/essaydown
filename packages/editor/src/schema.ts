@@ -24,10 +24,12 @@ import type {
   Yaml,
 } from "mdast";
 import {
+  Fragment,
   Schema,
   type DOMOutputSpec,
   type Mark as PMMark,
   type MarkSpec,
+  type MarkType,
   type Node as PMNode,
   type NodeSpec,
 } from "prosemirror-model";
@@ -652,8 +654,8 @@ const CELL_LINE_ENDING = " ";
 
 /**
  * Strip the whitespace `parse` never keeps, so that the tree leaving the editor is one some
- * Markdown file parses to (DECISIONS #review-1-r0 F1, #review-1-r1 G4, #review-1-r2 H1/H5/H6; PRD
- * §6 portability).
+ * Markdown file parses to (DECISIONS #review-1-r0 F1, #review-1-r1 G4, #review-1-r2 H1/H5/H6/H8;
+ * PRD §6 portability).
  *
  * ProseMirror keeps every character typed into a paragraph, heading or table cell; micromark does
  * not. Where the two disagree the serializer's `unsafe` table faithfully encodes the difference —
@@ -665,9 +667,28 @@ const CELL_LINE_ENDING = " ";
  *
  * **Ownership rule, stated once for the whole boundary family** (task 1.13 closed the block's two
  * ends only; task 1.25 the line boundaries inside it; task 1.29 the atom at the block's end and
- * the cell). Whitespace belongs to the boundary it touches, and the boundaries are exactly the
- * ones micromark normalises:
+ * the cell; task 1.30 the mark edge). Whitespace belongs to the boundary it touches, and the
+ * boundaries are exactly the ones micromark normalises:
  *
+ * - **The outer edge of an `emphasis`, `strong` or `delete` run** gives up the ASCII whitespace
+ *   inside it: it belongs **outside** the mark (task 1.30, DECISIONS #review-1-r2 H8). A run's
+ *   leading whitespace moves before the mark and its trailing whitespace after it, merged into
+ *   the neighbour whose marks it now shares where there is one — `text("a "), em("b "),
+ *   text("c")` becomes `text("a "), em("b"), text(" c")` — and a run that is whitespace-only
+ *   simply loses the mark. CommonMark §6.2 is why: a closing delimiter run must be
+ *   right-flanking, which it is not when preceded by whitespace, and an opening one left-flanking,
+ *   which it is not when followed by whitespace (GFM's `~~` is under the same rule), so
+ *   `emphasis[text("b ")]` is a tree no Markdown file parses to, and the serializer, right about
+ *   that, spells the space as a numeric character reference (`&#x20;`, the byte family of F1) —
+ *   or, for `delete`, writes the tildes as they are and the strikethrough is lost on the way
+ *   back. A caret at the end of an emphasised word sits inside the mark, so one space typed there
+ *   is the one-keystroke route. Nested marks give up the whitespace from every mark whose edge it
+ *   touches: `em+strong("b ")` before unmarked text hands its space to both. A **link's** text
+ *   keeps its whitespace (`[b ](u)` is a link; `link` is not a flanking mark), which is also why
+ *   the moved whitespace keeps every mark other than the one whose edge it left, and inline code
+ *   stays opaque. This clause runs **first**, on the incoming list, so that the whitespace it
+ *   moves then falls under the line and block rules below like any other — a space moved to the
+ *   block's end is the block's end's, and dropped.
  * - **Every line start** takes the ASCII whitespace after it. A block's first inline node starts a
  *   line (CommonMark §4.8: a paragraph's leading whitespace is stripped); so does the position
  *   after a `hard_break` (§6.7: "leading spaces at the beginning of the next line are ignored");
@@ -698,7 +719,8 @@ const CELL_LINE_ENDING = " ";
  *   above, unchanged.
  *
  * Zero-width and opaque items. An atom (`image`, `hard_break`, `raw_inline`) or an `inline_code`
- * run is opaque: it owns the whitespace inside it, stops the strip, and (`hard_break` aside) puts
+ * run is opaque: it owns the whitespace inside it, stops the strip (the mark-edge scan included:
+ * a marked run that begins or ends at one keeps what is inside), and (`hard_break` aside) puts
  * the scan mid-line. A run trimmed to nothing is dropped rather than kept as a zero-length text
  * node, which ProseMirror rejects; dropping it leaves the line-boundary state as it found it,
  * because emitting nothing neither starts nor ends a line. The block's *start* is therefore the
@@ -715,7 +737,7 @@ const CELL_LINE_ENDING = " ";
 function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string): PMNode[] {
   const out: PMNode[] = [];
   let atLineStart = true;
-  for (const node of nodes) {
+  for (const node of unmarkEdgeWhitespace(nodes)) {
     if (!node.isText || schema.marks.inline_code.isInSet(node.marks) !== undefined) {
       atLineStart = node.type === schema.nodes.hard_break;
       out.push(node);
@@ -743,6 +765,101 @@ function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string)
       continue;
     }
     if (text !== last.text) out[out.length - 1] = schema.text(text, last.marks);
+    break;
+  }
+  return out;
+}
+
+/**
+ * The marks whose delimiters have to flank their content (CommonMark §6.2 for `*`/`_`, GFM for
+ * `~~`), in the order the mark-edge clause of {@link stripUnparsableWhitespace} visits them. The
+ * order does not change the result — each pass removes only its own mark, never adds one, and a
+ * split it makes leaves the other marks' runs exactly where they were — it only fixes which
+ * pass does the splitting when two runs share an edge.
+ */
+const FLANKING_MARKS: readonly MarkType[] = [
+  schema.marks.emphasis,
+  schema.marks.strong,
+  schema.marks.delete,
+];
+
+/** A text run the strip may split or trim: text that is not inline code (which is opaque). */
+function isStrippable(node: PMNode): boolean {
+  return node.isText && schema.marks.inline_code.isInSet(node.marks) === undefined;
+}
+
+/**
+ * The mark-edge clause of {@link stripUnparsableWhitespace}'s ownership rule: for every maximal
+ * run of every flanking mark, the ASCII whitespace at the run's outer edge leaves the mark.
+ *
+ * A run is `[i, j)` over the list as it stands when that mark's pass reaches it: `i` the first
+ * node carrying the mark, `j` the first node after it that does not (the same half-open cut as
+ * {@link inlineToMdast}). Its leading edge is scanned from `i` forward and its trailing edge from
+ * `j - 1` back, each scan stepping over whitespace-only runs (which lose the mark whole), then
+ * splitting the first run with content into its edge whitespace, unmarked, and the rest, and
+ * stopping there — or at an atom or an inline-code run, which is opaque. The whole list is then
+ * rejoined the way ProseMirror joins it (`Fragment.fromArray`: adjacent text with the same marks
+ * becomes one node), so a moved space and its unmarked neighbour are one run for the line and
+ * block rules that follow. First, middle and last positions of a run in the block are cut by the
+ * same rule; `editor-fixed-point.test.ts` asserts each.
+ */
+function unmarkEdgeWhitespace(nodes: readonly PMNode[]): PMNode[] {
+  let out = [...nodes];
+  for (const mark of FLANKING_MARKS) {
+    let i = 0;
+    while (i < out.length) {
+      if (mark.isInSet(out[i].marks) === undefined) {
+        i += 1;
+        continue;
+      }
+      let j = i + 1;
+      while (j < out.length && mark.isInSet(out[j].marks) !== undefined) j += 1;
+      const run = giveUpEdges(out.slice(i, j), mark);
+      out = [...out.slice(0, i), ...run, ...out.slice(j)];
+      i += run.length;
+    }
+  }
+  return [...Fragment.fromArray(out).content];
+}
+
+/** One run of `mark`, its edge whitespace given up on both sides (see {@link unmarkEdgeWhitespace}). */
+function giveUpEdges(run: readonly PMNode[], mark: MarkType): PMNode[] {
+  const out = [...run];
+  const without = (node: PMNode): readonly PMMark[] => mark.removeFromSet(node.marks);
+  for (let k = 0; k < out.length; k += 1) {
+    const node = out[k];
+    if (!isStrippable(node)) break;
+    const text = node.text as string;
+    const edge = LEADING_WHITESPACE.exec(text);
+    if (edge === null) break;
+    if (edge[0].length === text.length) {
+      out[k] = node.mark(without(node));
+      continue;
+    }
+    out.splice(
+      k,
+      1,
+      schema.text(edge[0], without(node)),
+      schema.text(text.slice(edge[0].length), node.marks),
+    );
+    break;
+  }
+  for (let k = out.length - 1; k >= 0; k -= 1) {
+    const node = out[k];
+    if (!isStrippable(node)) break;
+    const text = node.text as string;
+    const edge = TRAILING_WHITESPACE.exec(text);
+    if (edge === null) break;
+    if (edge[0].length === text.length) {
+      out[k] = node.mark(without(node));
+      continue;
+    }
+    out.splice(
+      k,
+      1,
+      schema.text(text.slice(0, -edge[0].length), node.marks),
+      schema.text(edge[0], without(node)),
+    );
     break;
   }
   return out;
