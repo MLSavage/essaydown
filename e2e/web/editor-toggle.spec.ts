@@ -326,4 +326,47 @@ test.describe("source toggle on /dev/editor", () => {
     await expect(page.locator(".cm-content")).toHaveText("first second");
     await expect.poll(() => markdown(page)).toBe("first second\n");
   });
+
+  /**
+   * Sol's r2 reproduction (task 1.31, DECISIONS #review-1-r2 H2), the case (b) above does not
+   * reach: a flush *inside* a burst whose continuation then outlasts one window. `a`, Copy
+   * Markdown (which flushes, G1), the caret back in the source view, `bcdef` at 300 ms per
+   * character — every adjacent gap under the window, the whole continuation longer than one —
+   * and Undo at once. Before the fix the flushed continuation carried only its *latest* keystroke
+   * (1.3 s after `a`'s) and became a second entry, so the Undo left `a`; continuity is decided
+   * from the continuation's *first* keystroke now (`push`'s `from`), the burst is one entry, and
+   * one Undo takes all of it back. `packages/editor/test/toggle.test.ts`'s task 1.31 cases pin
+   * the arithmetic where the clock is injected; this proves the wiring, chord to binding to store.
+   */
+  test("reproduction (c): a Copy inside the burst, then a continuation longer than the window at 300 ms per key — one Undo empties the surface", async ({
+    page,
+  }) => {
+    await openEditor(page);
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("source");
+    await page.locator(".cm-content").waitFor();
+
+    await page.keyboard.type("a", { delay: 10 });
+    await expect(page.locator(".cm-content")).toHaveText("a");
+    // The Copy flushes the pending `a` into the store (whether or not the browser lets the write
+    // through — the status is not what this case is about), so the continuation is a new segment.
+    await page.getByTestId("copy-markdown").click();
+    await expect.poll(() => markdown(page)).toBe("a\n");
+
+    // The caret back at the end of the source view, and the continuation at Sol's pace: its first
+    // keystroke lands well inside the window after `a`, its last well outside it.
+    await page.locator(".cm-content").click();
+    await page.keyboard.press("End");
+    await page.keyboard.type("bcdef", { delay: 300 });
+    await expect(page.locator(".cm-content")).toHaveText("abcdef");
+    await page.keyboard.press("ControlOrMeta+z");
+
+    // One burst, one entry: both halves are empty, not `a`.
+    await expect(page.locator(".cm-content")).toHaveText("");
+    await expect.poll(() => markdown(page)).toBe("");
+
+    await page.keyboard.press("ControlOrMeta+Shift+Z");
+    await expect(page.locator(".cm-content")).toHaveText("abcdef");
+    await expect.poll(() => markdown(page)).toBe("abcdef\n");
+  });
 });

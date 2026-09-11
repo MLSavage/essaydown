@@ -28,6 +28,17 @@ import { expect, test, type Page } from "@playwright/test";
  * assertion below therefore reads `pane` for the rendered view and `surface` for the source view:
  * in each case the metric that is on the keystroke path *for that view*.
  *
+ * - `commit` (the source view only; task 1.31, DECISIONS #review-1-r1 G9): the deferred commit at
+ *   the burst boundary — the timer callback that parses the whole buffer, pushes the snapshot and
+ *   has the pane re-rendered — measured from the start of that callback to the first mutation of
+ *   the Markdown pane after the burst's last press. The callback's start is taken by a wrapper
+ *   the harness puts around `window.setTimeout` (the binding's timer is a plain `setTimeout`, and
+ *   the pane's re-render lands in the microtask right after the callback, so the latest timer
+ *   callback to start before a pane mutation is the commit that caused it). One sample per burst:
+ *   the measured run's own boundary and {@link COMMIT_BURSTS} − 1 more bursts of one press each,
+ *   every one waited to its commit. Evidence only — it is printed and attached like the other two
+ *   lines and no assertion reads it; its first consumer is Phase 2's autosave.
+ *
  * **What is asserted, and what is only reported.** The assertion is a relationship between two
  * document sizes, never a magnitude (CLAUDE.md): p95 at {@link LARGE} words is at most
  * {@link MAX_GROWTH}× p95 at {@link SMALL} words. The document is 10× larger, the rendered
@@ -57,12 +68,26 @@ const PRESSES = 120;
 /** The factor of the doc comment: 10× the document, an O(document) path, one runner's noise. */
 const MAX_GROWTH = 25;
 
+/** Source-view burst boundaries measured for the `commit` line: the run's own and four more. */
+const COMMIT_BURSTS = 5;
+
 /** One measured configuration: which view, and how big the document is. */
 type View = "rendered" | "source";
 
 interface Samples {
   readonly pane: number[];
   readonly surface: number[];
+  /** Empty for the rendered view, whose per-keystroke commit is what `pane` already measures. */
+  readonly commit: number[];
+}
+
+/** What the in-page harness records: `performance.now()` at every keydown, mutation and timer. */
+interface Record {
+  keys: number[];
+  pane: number[];
+  surface: number[];
+  /** When each `setTimeout` callback started; the deferred source commit is one of them. */
+  timers: number[];
 }
 
 /**
@@ -173,19 +198,21 @@ async function putCaretMidDocument(page: Page, view: View): Promise<void> {
 }
 
 /**
- * Install the in-page harness: one `keydown` listener and two `MutationObserver`s, all recording
- * `performance.now()` into three arrays. Attribution happens afterwards, in Node — a press's
- * latency is the first mutation recorded between its keydown and the next one — so nothing waits
- * on a timeout per press and a mutation that arrives after the run (the deferred source commit)
- * belongs to no press at all.
+ * Install the in-page harness: one `keydown` listener, two `MutationObserver`s and a wrapper
+ * around `window.setTimeout`, all recording `performance.now()` into four arrays. Attribution
+ * happens afterwards, in Node — a press's latency is the first mutation recorded between its
+ * keydown and the next one — so nothing waits on a timeout per press, and a mutation that arrives
+ * after the run (the deferred source commit) belongs to no press: it belongs to the burst, and is
+ * the `commit` line's sample (see the header).
  */
 async function installHarness(page: Page, view: View): Promise<void> {
   await page.evaluate(
     (selector: string) => {
-      const record: { keys: number[]; pane: number[]; surface: number[] } = {
+      const record: { keys: number[]; pane: number[]; surface: number[]; timers: number[] } = {
         keys: [],
         pane: [],
         surface: [],
+        timers: [],
       };
       const pane = document.querySelector('[data-testid="markdown"]');
       const surface = document.querySelector(selector);
@@ -200,6 +227,17 @@ async function installHarness(page: Page, view: View): Promise<void> {
       const options = { childList: true, subtree: true, characterData: true };
       new MutationObserver(() => record.pane.push(performance.now())).observe(pane, options);
       new MutationObserver(() => record.surface.push(performance.now())).observe(surface, options);
+      // The wrapper returns the native handle, so `clearTimeout` (the binding's cancel on every
+      // further keystroke) keeps working; only function handlers are wrapped, which the binding's
+      // timer is.
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+        typeof handler === "function"
+          ? nativeSetTimeout(() => {
+              record.timers.push(performance.now());
+              handler(...args);
+            }, timeout)
+          : nativeSetTimeout(handler, timeout)) as typeof window.setTimeout;
       (window as unknown as { __latency: typeof record }).__latency = record;
     },
     view === "rendered" ? ".ProseMirror" : ".cm-content",
@@ -226,13 +264,37 @@ async function press(page: Page, count: number): Promise<void> {
   }
 }
 
-/** Attribute every recorded mutation to the press it followed, discarding the warm-ups. */
-async function collect(page: Page): Promise<Samples> {
-  const record = await page.evaluate(
-    () =>
-      (window as unknown as { __latency: { keys: number[]; pane: number[]; surface: number[] } })
-        .__latency,
-  );
+/** Whether the pane has mutated since the latest keydown: the deferred source commit has run. */
+function settled(page: Page): Promise<unknown> {
+  return page.waitForFunction(() => {
+    const record = (window as unknown as { __latency: { keys: number[]; pane: number[] } })
+      .__latency;
+    const last = record.keys[record.keys.length - 1];
+    return last !== undefined && record.pane.some((at) => at >= last);
+  });
+}
+
+/**
+ * The source view's burst boundaries (task 1.31; DECISIONS #review-1-r1 G9): wait for the
+ * measured run's own deferred commit, then `bursts - 1` more bursts of one press each, every one
+ * waited to its commit, so the `commit` line has one sample per burst. These presses come after
+ * the measured ones and `collect` stops before them.
+ */
+async function commitBursts(page: Page, bursts: number): Promise<void> {
+  await settled(page);
+  for (let n = 1; n < bursts; n += 1) {
+    await page.keyboard.press(LETTERS[n % LETTERS.length]);
+    await settled(page);
+  }
+}
+
+/**
+ * Attribute every recorded mutation to the press it followed, discarding the warm-ups. Read
+ * straight after the presses, before the source view's deferred commit has fired, so that commit
+ * is attributed to no press (the source `pane` line reads `n=0` by design; see the header).
+ */
+async function collect(page: Page): Promise<Omit<Samples, "commit">> {
+  const record = await page.evaluate(() => (window as unknown as { __latency: Record }).__latency);
   const first = (times: number[], from: number, until: number): number | null => {
     const at = times.find((time) => time >= from && time < until);
     return at === undefined ? null : at - from;
@@ -248,6 +310,25 @@ async function collect(page: Page): Promise<Samples> {
     if (surfaceLatency !== null) surface.push(surfaceLatency);
   }
   return { pane, surface };
+}
+
+/**
+ * The `commit` samples, read after {@link commitBursts}: for each burst boundary from the last
+ * measured press on, the first pane mutation after the boundary's press, attributed to the latest
+ * timer callback to start before it — the deferred commit — with the distance as the sample.
+ */
+async function collectCommits(page: Page, measured: number): Promise<number[]> {
+  const record = await page.evaluate(() => (window as unknown as { __latency: Record }).__latency);
+  const commit: number[] = [];
+  for (let index = measured - 1; index < record.keys.length; index += 1) {
+    const from = record.keys[index];
+    const until = record.keys[index + 1] ?? Number.POSITIVE_INFINITY;
+    const mutation = record.pane.find((time) => time >= from && time < until);
+    if (mutation === undefined) continue;
+    const started = record.timers.filter((time) => time <= mutation).at(-1);
+    if (started !== undefined) commit.push(mutation - started);
+  }
+  return commit;
 }
 
 /** The `p`th percentile of `values` (nearest rank), or `null` when there is nothing to report. */
@@ -270,16 +351,25 @@ async function measure(page: Page, view: View, words: number): Promise<Samples> 
   await putCaretMidDocument(page, view);
   await installHarness(page, view);
   await press(page, WARM_UPS + PRESSES);
-  const samples = await collect(page);
+  const measured = await collect(page);
+  let commit: number[] = [];
+  if (view === "source") {
+    await commitBursts(page, COMMIT_BURSTS);
+    commit = await collectCommits(page, WARM_UPS + PRESSES);
+  }
+  const samples: Samples = { ...measured, commit };
 
-  const line = (metric: keyof Samples): string =>
+  const line = (metric: keyof Samples, of: string): string =>
     `${view} ${words} words ${metric}: p50 ${show(percentile(samples[metric], 50))}, p95 ${show(
       percentile(samples[metric], 95),
-    )} (n=${samples[metric].length} of ${PRESSES})`;
-  for (const metric of ["pane", "surface"] as const) {
+    )} (n=${samples[metric].length} ${of})`;
+  const lines = [line("pane", `of ${PRESSES}`), line("surface", `of ${PRESSES}`)];
+  // The third line is the source view's alone: the burst boundary is where its commit runs.
+  if (view === "source") lines.push(line("commit", "bursts"));
+  for (const text of lines) {
     // The numbers are this spec's product, for the 1.10.r1 reviewers (see the header).
-    console.log(line(metric));
-    test.info().annotations.push({ type: "latency", description: line(metric) });
+    console.log(text);
+    test.info().annotations.push({ type: "latency", description: text });
   }
   return samples;
 }

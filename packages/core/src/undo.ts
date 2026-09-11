@@ -79,9 +79,19 @@ export interface PushOptions {
   /**
    * When the mutation was committed (ms). The clock is injected so the stack stays pure and its
    * tests are not timing-dependent; `Date.now()` is only the default for a caller that has no
-   * better time to hand.
+   * better time to hand. For a batch of keystrokes committed together this is the **latest** of
+   * them, and it is what the entry keeps for the next push's comparison.
    */
   readonly at?: number;
+  /**
+   * The **earliest** keystroke of the batch (ms), when the mutation is one commit standing for
+   * several (the source view's deferred burst, task 1.17). Continuity with the present entry is
+   * decided from `from`, not `at`: a batch is continuous with the entry before it when its first
+   * keystroke is within the window of that entry's last, however long the batch itself runs
+   * (task 1.31, DECISIONS #review-1-r2 H2). Defaults to `at`, which is the right value for a
+   * caller that commits every keystroke on its own (the rendered view) or a mode mutation.
+   */
+  readonly from?: number;
 }
 
 function validate(cap: number, coalesceWindowMs: number): void {
@@ -142,9 +152,13 @@ export function endCoalescing(stack: UndoStack): UndoStack {
  * Push a committed mutation.
  *
  * The push merges into the present entry — one undo step instead of two — when it carries a key,
- * that key is the open group's, and it lands no more than `coalesceWindowMs` after the group's
- * latest push. The window slides: §6.5 merges transactions "within 1 s of each other", so an
- * unbroken typing burst stays one step however long it runs, and one second of silence closes it.
+ * that key is the open group's, and its earliest keystroke (`from`, which is `at` unless the push
+ * stands for a batch) lands no more than `coalesceWindowMs` after the group's latest keystroke
+ * (the present entry's `at`). The window slides: §6.5 merges transactions "within 1 s of each
+ * other", so an unbroken typing burst stays one step however long it runs, and one second of
+ * silence closes it. Continuity is a property of *adjacent* keystrokes: a batch whose keystrokes
+ * span more than a window is still one step with the entry before it when its first keystroke is
+ * inside the window, and the entry then keeps the batch's last keystroke for the next comparison.
  * A key can only ever merge into a group that is still open, and an undo, a redo or an
  * {@link endCoalescing} closes it, so a push never reaches back past one of those.
  *
@@ -160,11 +174,12 @@ export function push(
 ): UndoStack {
   const coalesceKey = options.coalesceKey ?? null;
   const at = options.at ?? Date.now();
+  const from = options.from ?? at;
   const present = stack.entries[stack.index];
   const entry: UndoEntry = { state: { root, sidecar }, coalesceKey, at };
 
   // A clock that went backwards starts a new step rather than merging into an entry it precedes.
-  const withinWindow = at >= present.at && at - present.at <= stack.coalesceWindowMs;
+  const withinWindow = from >= present.at && from - present.at <= stack.coalesceWindowMs;
   if (coalesceKey !== null && stack.openKey === coalesceKey && withinWindow) {
     // `openKey` is only ever non-null on the newest entry, so there is no redo tail to discard.
     const entries = stack.entries.slice();

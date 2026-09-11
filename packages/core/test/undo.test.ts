@@ -157,6 +157,72 @@ describe("coalescing (§6.5: transactions within 1 s of each other merge)", () =
     expect(stack.entries[1].at).toBe(3600);
   });
 
+  describe("a batch's earliest keystroke, `from` (task 1.31, DECISIONS #review-1-r2 H2)", () => {
+    // A batch standing for several keystrokes: the source view's deferred burst commits once for
+    // a segment whose first keystroke is at 300 and whose last is at 1_600. Continuity with the
+    // present entry is decided from `from`, and the entry keeps `at`.
+    it("presence: merges when `from` is inside the window although `at` is outside it", () => {
+      let stack = createUndoStack(doc(""), empty, { at: 0 });
+      stack = push(stack, doc("a"), empty, { coalesceKey: "source", at: 242 });
+      stack = push(stack, doc("abcdef"), empty, { coalesceKey: "source", at: 1543, from: 308 });
+
+      expect(stack.entries).toHaveLength(2);
+      expect(format(current(stack).root)).toBe("abcdef\n");
+      // The merged entry keeps the batch's *latest* keystroke for the next comparison...
+      expect(stack.entries[1].at).toBe(1543);
+      // ...so a push a window after that latest keystroke still merges, and one past it splits.
+      const continued = push(stack, doc("abcdefg"), empty, { coalesceKey: "source", at: 2543 });
+      expect(continued.entries).toHaveLength(2);
+      const paused = push(stack, doc("abcdefg"), empty, { coalesceKey: "source", at: 2544 });
+      expect(paused.entries).toHaveLength(3);
+    });
+
+    it("absence: `from` omitted behaves as before — `at` alone decides, and outside the window it splits", () => {
+      let stack = createUndoStack(doc(""), empty, { at: 0 });
+      stack = push(stack, doc("a"), empty, { coalesceKey: "source", at: 242 });
+      stack = push(stack, doc("abcdef"), empty, { coalesceKey: "source", at: 1543 });
+
+      expect(stack.entries).toHaveLength(3);
+      expect(stack.entries[2].at).toBe(1543);
+    });
+
+    it("absence: `from` outside the window splits, whatever `at` says", () => {
+      let stack = createUndoStack(doc(""), empty, { at: 0 });
+      stack = push(stack, doc("a"), empty, { coalesceKey: "source", at: 242 });
+      stack = push(stack, doc("abcdef"), empty, {
+        coalesceKey: "source",
+        at: 1543,
+        from: 242 + COALESCE_WINDOW_MS + 1,
+      });
+
+      expect(stack.entries).toHaveLength(3);
+    });
+
+    it("a `from` equal to `at` is the default: the two spellings build the same stack", () => {
+      const explicit = push(createUndoStack(doc("a"), empty, { at: 0 }), doc("ab"), empty, {
+        coalesceKey: "typing",
+        at: 500,
+        from: 500,
+      });
+      const implicit = push(createUndoStack(doc("a"), empty, { at: 0 }), doc("ab"), empty, {
+        coalesceKey: "typing",
+        at: 500,
+      });
+      expect(explicit.entries.map((entry) => entry.at)).toEqual(
+        implicit.entries.map((entry) => entry.at),
+      );
+      expect(explicit.entries).toHaveLength(implicit.entries.length);
+    });
+
+    it("a `from` before the present entry (a clock that went backwards) starts a new step", () => {
+      let stack = createUndoStack(doc(""), empty, { at: 0 });
+      stack = push(stack, doc("a"), empty, { coalesceKey: "source", at: 500 });
+      stack = push(stack, doc("ab"), empty, { coalesceKey: "source", at: 600, from: 499 });
+
+      expect(stack.entries).toHaveLength(3);
+    });
+  });
+
   it("never merges pushes that carry no key, however close together", () => {
     let stack = createUndoStack(doc("a"), empty, { at: 0 });
     stack = push(stack, doc("ab"), empty, { at: 0 });

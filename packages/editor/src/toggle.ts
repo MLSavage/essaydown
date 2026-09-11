@@ -578,17 +578,26 @@ function timerSchedule(run: () => void, ms: number): () => void {
  * flushes *before* it moves history: the burst becomes the entry the Undo then steps back over,
  * rather than being dropped by the pull the Undo causes.
  *
- * **The grouping rule, once (DECISIONS #review-1-r1 G2).** The chain of keystrokes that becomes
- * one commit is the chain that became one coalesced undo entry before task 1.17 deferred the
- * commit — whether the commit is fired by the timer or by a flush. That holds because the commit
- * carries the burst's *own* keystroke time (the moment of its latest {@link SourceBinding.change},
- * recorded there) and not the moment the commit ran: `push` merges on the distance between the
- * present entry's `at` and the incoming one's, so with keystroke times on both sides the grouping
- * is a property of what the user typed and of nothing else. Stamping `now()` at commit time broke
- * it in both directions — a flush a quarter-second after the previous commit merged a burst the
- * user began 1.2 s later into the previous entry (so one Undo removed both), and a flush partway
- * through a burst followed by more typing inside the same window opened a second entry for one
- * burst (task 1.17's own lesson).
+ * **The grouping rule, once (DECISIONS #review-1-r1 G2; #review-1-r2 H2).** Continuity is a
+ * property of *adjacent keystrokes*: two keystrokes belong to one undo step when they are no more
+ * than a window apart, so the chain of keystrokes that becomes one undo entry is the chain in
+ * which every adjacent gap is inside the window — the chain that became one coalesced entry
+ * before task 1.17 deferred the commit — whether the commits along it are fired by the timer or
+ * by a flush, and however many commits the chain is cut into. A pending segment therefore carries
+ * **both** its own keystroke times: the first (recorded when the segment opens) and the latest
+ * (recorded on every {@link SourceBinding.change}), never the moment the commit ran. The commit
+ * hands them to `push` as `from` and `at`: the segment is continuous with the previous entry when
+ * its *first* keystroke is within the window of that entry's *last*, however long the segment runs,
+ * and the entry then keeps the segment's last keystroke for the next comparison. Two ways of
+ * getting this wrong, both seen: stamping `now()` at commit time (task 1.17's own lesson — a flush
+ * a quarter-second after the previous commit merged a burst the user began 1.2 s later into the
+ * previous entry, and a flush partway through a burst followed by more typing inside the window
+ * opened a second entry for one burst), and carrying only the segment's *latest* keystroke (H2 —
+ * a flush inside a burst whose continuation outlasted one window compared the previous entry's
+ * last keystroke with the continuation's last keystroke, 1.3 s apart, and split one burst into
+ * two steps although no adjacent gap was over 314 ms). Explicit closure is untouched by any of
+ * this: a toggle's `endCoalescing` and a history command's `beforeHistory` flush still end the
+ * group, so the edit after either is its own step.
  */
 export function bindCodeMirror(
   store: DocumentStore,
@@ -603,9 +612,11 @@ export function bindCodeMirror(
   /** The text typed since the last commit, and the cancel of the commit scheduled for it. */
   let pending: string | null = null;
   /**
-   * When the pending text's latest keystroke landed — the `at` its commit carries, per the
-   * grouping rule above. Meaningless while `pending` is `null`, and read only beside it.
+   * When the pending segment's first keystroke landed and when its latest did — the `from` and the
+   * `at` its commit carries, per the grouping rule above. Meaningless while `pending` is `null`,
+   * and read only beside it.
    */
+  let pendingFrom = 0;
   let pendingAt = 0;
   let cancel: (() => void) | null = null;
 
@@ -618,6 +629,7 @@ export function bindCodeMirror(
 
   const commitPending = (): void => {
     const text = pending;
+    const from = pendingFrom;
     const at = pendingAt;
     drop();
     if (text === null) return;
@@ -625,7 +637,7 @@ export function bindCodeMirror(
     const root = parse(text);
     shown = root;
     shownText = text;
-    commit(root, document.sidecar, { coalesceKey, at });
+    commit(root, document.sidecar, { coalesceKey, at, from });
   };
 
   const pull = (root: Root): void => {
@@ -650,9 +662,13 @@ export function bindCodeMirror(
       // deleting it again inside one window is a change back to `shownText`, and taking that for
       // an echo would leave the pending commit to write the deleted character back.
       if (text === (pending ?? shownText)) return;
+      // The keystrokes' own times, not the commit's: see the grouping rule in the module comment.
+      // The first keystroke opens the segment and is what continuity is decided from; the latest
+      // is what the entry keeps.
+      const at = now();
+      if (pending === null) pendingFrom = at;
       pending = text;
-      // The keystroke's own time, not the commit's: see the grouping rule in the module comment.
-      pendingAt = now();
+      pendingAt = at;
       if (cancel !== null) cancel();
       cancel = schedule(commitPending, store.getState().stack.coalesceWindowMs);
     },

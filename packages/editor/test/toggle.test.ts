@@ -843,6 +843,181 @@ describe("a source-view history command settles the pending burst first", () => 
   });
 });
 
+/* ------------------------------ a flush inside a longer continuation (task 1.31) ---------- */
+
+describe("a flush inside a continuation that outlasts the window (task 1.31, DECISIONS #review-1-r2 H2)", () => {
+  /**
+   * The 1.24 harness again — a source view bound to a fresh store, the chords wired with the
+   * binding's `flush` as `beforeHistory`, one clock for the timer and the keystroke times — kept
+   * beside these cases so the five above stay exactly as task 1.24 wrote them.
+   */
+  function boundWithHistory(markdown = "") {
+    const clock = new FakeClock();
+    const store = createDocumentStore(parse(markdown), SIDECAR, { at: 0 });
+    const view = new FakeSourceView();
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
+    const [undoBinding, redoBinding] = undoKeyBindings(store, () => binding.flush());
+    const press = (key: (typeof undoBinding)["run"]): void => {
+      key?.(null as never);
+    };
+    const type = (text: string): void => {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+      binding.change(view.text());
+    };
+    return {
+      clock,
+      store,
+      view,
+      binding,
+      type,
+      undo: () => press(undoBinding.run),
+      redo: () => press(redoBinding.run),
+      markdown: () => format(store.getState().document.root),
+      entries: () => store.getState().stack.entries.length,
+    };
+  }
+
+  /**
+   * Sol's continuation: `bcdef` at `gap` ms per character after `a`, every adjacent gap under the
+   * window and the whole run longer than one. Sol's own keystroke times were 242, 308, 612, 924,
+   * 1237, 1543 ms — a first gap of 66 ms and then 300-odd — so the two commits' keystrokes were
+   * 1.3 s apart while no adjacent pair was over 314 ms.
+   */
+  const CONTINUATION = ["ab", "abc", "abcd", "abcde", "abcdef"];
+  const GAP = 300;
+  const LONGER_THAN_A_WINDOW = GAP * (CONTINUATION.length - 1);
+
+  it("case (a): a commit, then a continuation longer than the window with every adjacent gap under it, ending by the timer — one undo entry", () => {
+    const { clock, binding, type, markdown, entries, store } = boundWithHistory();
+    expect(LONGER_THAN_A_WINDOW).toBeGreaterThan(COALESCE_WINDOW_MS);
+
+    type("a");
+    clock.advance(66);
+    // A Copy Markdown partway through the burst: the first segment is committed here.
+    binding.flush();
+    expect(entries()).toBe(2);
+    expect(store.getState().stack.entries[1].at).toBe(0);
+
+    for (const text of CONTINUATION) {
+      type(text);
+      clock.advance(GAP);
+    }
+    // The continuation's own timer fires one window after its last keystroke.
+    clock.advance(COALESCE_WINDOW_MS - GAP);
+    expect(clock.waiting).toBe(0);
+
+    // One burst, one entry: the continuation's first keystroke (66 ms) is inside the window of
+    // the flushed entry's last (0 ms), so it merges although its own last keystroke is 1.3 s on;
+    // and the merged entry keeps that last keystroke for the next comparison.
+    expect(entries()).toBe(2);
+    expect(markdown()).toBe("abcdef\n");
+    expect(store.getState().stack.entries[1].at).toBe(66 + LONGER_THAN_A_WINDOW);
+  });
+
+  it("case (b): the same continuation ending by a flush (Undo pressed at once) — one entry, so the Undo empties the surface", () => {
+    const { clock, binding, type, undo, redo, view, markdown, entries } = boundWithHistory();
+
+    type("a");
+    clock.advance(66);
+    binding.flush();
+    expect(entries()).toBe(2);
+
+    for (const text of CONTINUATION) {
+      type(text);
+      clock.advance(GAP);
+    }
+    expect(view.text()).toBe("abcdef");
+    // Sol's chord: Undo at once. `beforeHistory` flushes, and the flushed commit carries the
+    // continuation's first keystroke as `from`, so it merges into the entry `a` made...
+    undo();
+
+    // ...and one Undo takes the whole burst back: both halves are empty, not `a`.
+    expect(entries()).toBe(2);
+    expect(markdown()).toBe("");
+    expect(view.text()).toBe("");
+    expect(clock.waiting).toBe(0);
+
+    redo();
+    expect(markdown()).toBe("abcdef\n");
+    // The pull after a Redo writes the canonical form, newline and all, as 1.24's case 2 shows.
+    expect(view.text()).toBe("abcdef\n");
+  });
+
+  it("case (c): a continuation whose first keystroke lands more than a window after the previous commit — two entries, timed or flushed (the genuine-gap absence case)", () => {
+    for (const ending of ["timed", "flushed"] as const) {
+      const { clock, binding, type, markdown, entries, store } = boundWithHistory();
+
+      type("a");
+      binding.flush();
+      expect(entries(), ending).toBe(2);
+
+      // The user paused: the continuation's first keystroke is one millisecond past the window.
+      clock.advance(COALESCE_WINDOW_MS + 1);
+      for (const text of CONTINUATION) {
+        type(text);
+        clock.advance(GAP);
+      }
+      if (ending === "timed") clock.advance(COALESCE_WINDOW_MS);
+      else binding.flush();
+
+      expect(entries(), ending).toBe(3);
+      expect(markdown(), ending).toBe("abcdef\n");
+      expect(format(store.getState().stack.entries[1].state.root), ending).toBe("a\n");
+    }
+  });
+
+  it("case (d): the rendered view is unchanged — it commits every keystroke on its own, so `from` is `at` and the grouping is the sliding window it always was", () => {
+    // Presence: a burst longer than the window with every adjacent gap under it is one entry.
+    const store = createDocumentStore(parse(""), SIDECAR, { at: 0 });
+    const view = new FakeRenderedView();
+    const clock = new FakeClock();
+    const rendered = bindProseMirror(store, view, { now: clock.now });
+    for (const letter of "abcdef") {
+      rendered.dispatch(typeAtEnd(view.state, letter));
+      clock.advance(GAP);
+    }
+    expect(clock.time).toBeGreaterThan(COALESCE_WINDOW_MS);
+    expect(store.getState().stack.entries).toHaveLength(2);
+    expect(format(store.getState().document.root)).toBe("abcdef\n");
+
+    // Absence: a keystroke a window and a millisecond after the previous one is a second entry.
+    clock.advance(COALESCE_WINDOW_MS + 1 - GAP);
+    rendered.dispatch(typeAtEnd(view.state, "g"));
+    expect(store.getState().stack.entries).toHaveLength(3);
+    rendered.destroy();
+  });
+
+  it("the commit carries the segment's first keystroke as `from` and its latest as `at`, and a new segment after a flush opens at its own first keystroke", () => {
+    const clock = new FakeClock();
+    const store = createDocumentStore(parse(""), SIDECAR, { at: 0 });
+    const view = new FakeSourceView();
+    const commits: { at: number | undefined; from: number | undefined }[] = [];
+    const commit = store.getState().commit;
+    store.setState({
+      commit: (root, sidecar, options) => {
+        commits.push({ at: options?.at, from: options?.from });
+        commit(root, sidecar, options);
+      },
+    });
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
+
+    clock.advance(242);
+    binding.change("a");
+    clock.advance(66);
+    binding.flush();
+    binding.change("ab");
+    clock.advance(GAP);
+    binding.change("abc");
+    clock.advance(GAP);
+    binding.flush();
+
+    expect(commits).toEqual([
+      { at: 242, from: 242 },
+      { at: 308 + GAP, from: 308 },
+    ]);
+  });
+});
+
 /* ------------------------------------------------ the platform behind `Mod-` (task 1.11) --- */
 
 /** The modifier a keydown event carries; on any one platform exactly one of the two is `Mod-`. */
