@@ -493,7 +493,10 @@ function unsupported(type: string): never {
  * the trip: mdast never produces it, ProseMirror requires it wherever `block+` has nothing to hold
  * (an empty document, an empty list item). {@link blocksToPM} inserts it and
  * {@link blocksToMdast} drops it again, which is what makes `- ` and a front-matter-only file
- * round-trip to their own bytes.
+ * round-trip to their own bytes. A paragraph {@link stripUnparsableWhitespace} empties — one
+ * holding only whitespace, or only a trailing hard break (task 1.29) — is the same node by the
+ * time it is dropped: between two other blocks the serializer would write it as an extra blank
+ * line, which `parse` reads as nothing, so dropping it is what keeps that trip a fixed point.
  */
 function blocksToPM(children: readonly RootContent[]): PMNode[] {
   const blocks = children.map(blockToPM);
@@ -503,8 +506,9 @@ function blocksToPM(children: readonly RootContent[]): PMNode[] {
 function blocksToMdast(node: PMNode): RootContent[] {
   const out: RootContent[] = [];
   node.forEach((child) => {
-    if (child.type === schema.nodes.paragraph && child.content.size === 0) return;
-    out.push(blockToMdast(child));
+    const block = blockToMdast(child);
+    if (block.type === "paragraph" && block.children.length === 0) return;
+    out.push(block);
   });
   return out;
 }
@@ -552,13 +556,13 @@ function blockToMdast(node: PMNode): RootContent {
     case n.paragraph:
       return {
         type: "paragraph",
-        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node))),
+        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node), LINE_ENDING)),
       } satisfies Paragraph;
     case n.heading:
       return {
         type: "heading",
         depth: node.attrs.depth as Heading["depth"],
-        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node))),
+        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node), LINE_ENDING)),
       } satisfies Heading;
     case n.blockquote:
       return {
@@ -603,7 +607,7 @@ function blockToMdast(node: PMNode): RootContent {
     case n.table_cell:
       return {
         type: "tableCell",
-        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node))),
+        children: inlineToMdast(stripUnparsableWhitespace(childrenOf(node), CELL_LINE_ENDING)),
       } satisfies TableCell;
     case n.raw:
       return { type: "html", value: node.attrs.value as string } satisfies Html;
@@ -626,15 +630,30 @@ const TRAILING_WHITESPACE = new RegExp(`${ASCII_WHITESPACE.source}$`);
 /**
  * A **line-ending run**: any run of ASCII whitespace that contains at least one line ending,
  * matched maximally in both directions so that the whitespace on either side of the break is part
- * of the match. Replacing it with a single `\n` is what discharges three of the boundaries in
+ * of the match. Replacing it with the block's one line ending ({@link LINE_ENDING} or
+ * {@link CELL_LINE_ENDING}) is what discharges three of the boundaries in
  * {@link stripUnparsableWhitespace}'s ownership rule at once — the space before a soft break, the
  * space after it, and a whitespace-only line between two of them.
  */
 const LINE_ENDING_RUN = /[\t\v\f ]*[\n\r][\t\n\v\f\r ]*/g;
 
+/** What a line-ending run collapses to in a paragraph or heading: one soft line break. */
+const LINE_ENDING = "\n";
+
+/**
+ * What a line-ending run collapses to in a table cell: one space (task 1.29, DECISIONS
+ * #review-1-r2 H6). A GFM cell cannot hold a line ending — the row is the line, so the ending
+ * would end the row — and the serializer, which is right about that, spells one as `&#xA;`, bytes
+ * no cell a Markdown file parses to has ever held. A space is what the same characters mean to a
+ * reader of the rendered table (the cell's text wraps as ordinary whitespace), and it is the
+ * only whitespace a cell can carry across the trip.
+ */
+const CELL_LINE_ENDING = " ";
+
 /**
  * Strip the whitespace `parse` never keeps, so that the tree leaving the editor is one some
- * Markdown file parses to (DECISIONS #review-1-r0 F1, #review-1-r1 G4; PRD §6 portability).
+ * Markdown file parses to (DECISIONS #review-1-r0 F1, #review-1-r1 G4, #review-1-r2 H1/H5/H6; PRD
+ * §6 portability).
  *
  * ProseMirror keeps every character typed into a paragraph, heading or table cell; micromark does
  * not. Where the two disagree the serializer's `unsafe` table faithfully encodes the difference —
@@ -645,8 +664,9 @@ const LINE_ENDING_RUN = /[\t\v\f ]*[\n\r][\t\n\v\f\r ]*/g;
  * the trees it is given.
  *
  * **Ownership rule, stated once for the whole boundary family** (task 1.13 closed the block's two
- * ends only; the rest is task 1.25). Whitespace belongs to the boundary it touches, and the
- * boundaries are exactly the ones micromark normalises:
+ * ends only; task 1.25 the line boundaries inside it; task 1.29 the atom at the block's end and
+ * the cell). Whitespace belongs to the boundary it touches, and the boundaries are exactly the
+ * ones micromark normalises:
  *
  * - **Every line start** takes the ASCII whitespace after it. A block's first inline node starts a
  *   line (CommonMark §4.8: a paragraph's leading whitespace is stripped); so does the position
@@ -656,39 +676,74 @@ const LINE_ENDING_RUN = /[\t\v\f ]*[\n\r][\t\n\v\f\r ]*/g;
  *   break's rule). A **hard break is the exception**: it owns the whitespace *after* it and not
  *   the whitespace before it, because `foo \` is exactly how the serializer spells a break after a
  *   text run ending in a space, and that parses back to the same run.
- * - **The block's end** takes the trailing whitespace of its last inline node.
- * - A whitespace run holding **two or more line endings collapses to one `\n`**: those bytes spell
- *   a blank line, a paragraph node cannot hold one, and splitting the block instead would mean
- *   this function inventing block structure. Collapsing keeps the tree stable across the round
- *   trip; the blank line is the thing no file could have produced here.
+ * - **The block's end** takes the trailing whitespace of its last inline node **and drops a
+ *   trailing `hard_break`**, repeatedly, until the last node is neither a whitespace-only run nor
+ *   a break. A break with nothing after it is not a line break: the serializer spells it as a
+ *   backslash before the block's own line ending, and §6.7 reads a backslash at a paragraph's end
+ *   as a literal backslash (a heading's is worse — `H\` on its own line reparses as a paragraph,
+ *   the block type lost). So it is dropped the way a run trimmed to nothing is dropped, and the
+ *   node before it becomes the last node: the whitespace the break did not own is now the
+ *   block's end's, and goes with it. A block that is only breaks and whitespace becomes an empty
+ *   block, whose fixed point is the one it already has: an empty `paragraph` is dropped by
+ *   {@link blocksToMdast} exactly as one ProseMirror already holds empty is, so it has no bytes
+ *   at all; an empty `heading` is written by `format` as its marker alone (`##`), which `parse`
+ *   reads back as the same empty heading.
+ * - A whitespace run holding **two or more line endings collapses to one line ending**: those
+ *   bytes spell a blank line, a paragraph node cannot hold one, and splitting the block instead
+ *   would mean this function inventing block structure. Collapsing keeps the tree stable across
+ *   the round trip; the blank line is the thing no file could have produced here.
+ * - **Inside a table cell** every line-ending run collapses to one *space* rather than to `\n`
+ *   ({@link CELL_LINE_ENDING}): a GFM row ends at its line ending, so a cell cannot hold one and
+ *   the serializer would spell it as `&#xA;`. The cell's own two ends are the block's two ends
+ *   above, unchanged.
  *
  * Zero-width and opaque items. An atom (`image`, `hard_break`, `raw_inline`) or an `inline_code`
  * run is opaque: it owns the whitespace inside it, stops the strip, and (`hard_break` aside) puts
  * the scan mid-line. A run trimmed to nothing is dropped rather than kept as a zero-length text
  * node, which ProseMirror rejects; dropping it leaves the line-boundary state as it found it,
- * because emitting nothing neither starts nor ends a line, and it does not promote its neighbour
- * to a **block** end, because the block's two ends are the incoming list's first and last entries,
- * chosen before anything is trimmed. Blocks whose content is not inline — `code_block`, `raw`, and
- * the opaque `html`/`yaml` bytes — never reach this function.
+ * because emitting nothing neither starts nor ends a line. The block's *start* is therefore the
+ * first node that survives the strip (a dropped run leaves `atLineStart` as it was), and the
+ * block's *end* is the last node that survives it (the end-of-block loop below takes the
+ * trailing whitespace of whichever node is last once the breaks and empty runs before it are
+ * gone) — so a whitespace-only run at either end promotes its neighbour to that end, which is
+ * what an atom or an inline-code run at the end then stops. Blocks whose content is not inline —
+ * `code_block`, `raw`, and the opaque `html`/`yaml` bytes — never reach this function.
+ *
+ * @param lineEnding what a line-ending run collapses to: {@link LINE_ENDING} in a paragraph or
+ *   heading, {@link CELL_LINE_ENDING} in a table cell.
  */
-function stripUnparsableWhitespace(nodes: readonly PMNode[]): PMNode[] {
-  if (nodes.length === 0) return [];
-  const last = nodes.length - 1;
+function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string): PMNode[] {
   const out: PMNode[] = [];
   let atLineStart = true;
-  for (let i = 0; i < nodes.length; i += 1) {
-    const node = nodes[i];
+  for (const node of nodes) {
     if (!node.isText || schema.marks.inline_code.isInSet(node.marks) !== undefined) {
       atLineStart = node.type === schema.nodes.hard_break;
       out.push(node);
       continue;
     }
-    let text = (node.text as string).replace(LINE_ENDING_RUN, "\n");
+    let text = (node.text as string).replace(LINE_ENDING_RUN, lineEnding);
     if (atLineStart) text = text.replace(LEADING_WHITESPACE, "");
-    if (i === last) text = text.replace(TRAILING_WHITESPACE, "");
     if (text === "") continue;
     atLineStart = text.endsWith("\n");
     out.push(text === node.text ? node : schema.text(text, node.marks));
+  }
+  // The block's end: drop trailing breaks and whitespace-only runs, and take the trailing
+  // whitespace of the run that is last once they are gone, until the last node is neither.
+  for (;;) {
+    const last = out[out.length - 1];
+    if (last === undefined) break;
+    if (last.type === schema.nodes.hard_break) {
+      out.pop();
+      continue;
+    }
+    if (!last.isText || schema.marks.inline_code.isInSet(last.marks) !== undefined) break;
+    const text = (last.text as string).replace(TRAILING_WHITESPACE, "");
+    if (text === "") {
+      out.pop();
+      continue;
+    }
+    if (text !== last.text) out[out.length - 1] = schema.text(text, last.marks);
+    break;
   }
   return out;
 }

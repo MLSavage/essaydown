@@ -4,7 +4,8 @@ import { expect } from "vitest";
 import { schema } from "../src/schema.js";
 
 /**
- * The two typing-shaped transactions the editor-seeded round-trip legs share.
+ * The keystroke-shaped transactions the editor-seeded round-trip legs share: two that type, and
+ * one that deletes.
  *
  * Task 1.13 wrote the block-end space and task 1.25 the in-block letter, both inside
  * `editor-fixed-point.test.ts`. Task 1.27 (DECISIONS #review-1-r1 G6) adds a third leg — the
@@ -12,6 +13,8 @@ import { schema } from "../src/schema.js";
  * seeded from *the writing surface's own output*, which only holds if all of them type the same
  * thing. So the transactions live here and are imported by both suites rather than copied into
  * the second one, where a later fix to one would silently leave the other typing something else.
+ * Task 1.29 (DECISIONS #review-1-r2 H1) adds the deletion, {@link deleteAtEveryBlockEnd}, beside
+ * them: the trees a parser cannot produce are usually reached by taking something away.
  */
 
 /** {@link typeSpaceAtEveryBlockEnd}'s result: the changed document, and how many blocks it typed in. */
@@ -110,4 +113,74 @@ export function typeInsideEveryBlock(doc: PMNode, letter: string): InsideBlockLe
     typed: ascending.length,
     positions: ascending.map((pos, index) => pos + index),
   };
+}
+
+/**
+ * {@link deleteAtEveryBlockEnd}'s result: the changed document, how many continuations after a
+ * hard break it deleted, and how many last characters of a block's last text run it deleted.
+ */
+export interface DeletionLeg {
+  doc: PMNode;
+  afterBreaks: number;
+  lastChars: number;
+}
+
+/**
+ * A ProseMirror transaction shaped like *deleting* — the shape task 1.29 repairs (DECISIONS
+ * #review-1-r2 H1, Claude's lesson 2): a corpus leg seeded only from `insertText` can never reach
+ * a tree that needs a deletion to build, and a paragraph ending in a hard break, three Backspace
+ * presses from `hard-break.md`, was outside all eleven boundary guards and both typing legs.
+ * `tr.delete` is the call a Backspace makes.
+ *
+ * Two deletions, applied in that order inside one transaction, each back-to-front so that every
+ * range still to come is unmoved:
+ *
+ * 1. After every `hard_break` in a paragraph, heading or table cell, the inline content up to the
+ *    next hard break or the block's end is deleted, so that every break becomes its block's last
+ *    node (two breaks in a row become a block ending in two breaks, the case the strip's "until"
+ *    is for).
+ * 2. In the document that leaves, the last character of every such block's last text run —
+ *    whatever its marks, so an inline-code run is deleted from too — so that a one-character run
+ *    empties and the block's end lands on whatever precedes it: an atom, an inline-code run, a
+ *    break, or nothing.
+ *
+ * The deletion counts are per range actually deleted (a break already last in its block has no
+ * continuation to delete and counts nothing), so a caller can say which fixtures each deletion
+ * reached.
+ */
+export function deleteAtEveryBlockEnd(doc: PMNode): DeletionLeg {
+  const continuations: [number, number][] = [];
+  doc.descendants((node, pos) => {
+    if (!INLINE_CONTENT.has(node.type)) return true;
+    const start = pos + 1;
+    let from: number | null = null;
+    node.forEach((child, offset) => {
+      if (child.type !== schema.nodes.hard_break) return;
+      if (from !== null && from < start + offset) continuations.push([from, start + offset]);
+      from = start + offset + child.nodeSize;
+    });
+    if (from !== null && from < start + node.content.size)
+      continuations.push([from, start + node.content.size]);
+    return false;
+  });
+  let tr = EditorState.create({ doc }).tr;
+  for (const [from, to] of [...continuations].reverse()) tr = tr.delete(from, to);
+
+  // One *character* is one code point, as a Backspace deletes it: `[from, to)` spans the last
+  // code point of the run, two positions wide when it is an astral one.
+  const lastChars: [number, number][] = [];
+  tr.doc.descendants((node, pos) => {
+    if (!INLINE_CONTENT.has(node.type)) return true;
+    let range: [number, number] | null = null;
+    node.forEach((child, offset) => {
+      if (!child.isText) return;
+      const end = pos + 1 + offset + child.nodeSize;
+      const last = [...(child.text as string)].pop() as string;
+      range = [end - last.length, end];
+    });
+    if (range !== null) lastChars.push(range);
+    return false;
+  });
+  for (const [from, to] of [...lastChars].reverse()) tr = tr.delete(from, to);
+  return { doc: tr.doc, afterBreaks: continuations.length, lastChars: lastChars.length };
 }
