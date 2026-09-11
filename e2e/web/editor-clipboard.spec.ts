@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 
 /**
  * Task 1.14's acceptance (DECISIONS #review-1-r0 F2): the ProseMirror schema had `toDOM` for every
@@ -224,6 +224,18 @@ test.describe("plain text pasted from outside the editor stays plain", () => {
  * because a stray one the app itself one day writes must fail rather than be swallowed. The app's
  * real path is still the thing exercised: flush → `format` → `writeText` → the "Copied Markdown"
  * status, which `copyMarkdown` sets only after the write resolves.
+ *
+ * **What each kind of case needs** (task 1.32, DECISIONS #review-1-r2 H4). A copy case asserts
+ * the string the app wrote, through the spy, byte-exact. One case — the real-clipboard case below
+ * — asserts that the real write *resolves* and that the OS clipboard then holds the word: with the
+ * spy first in `openEditor`, every click of Copy Markdown in this file went to a stub that always
+ * resolves, so nothing exercised the real `writeText` and `copyMarkdown`'s `catch` branch (in this
+ * container the unspied click is refused unless `clipboard-write` is granted) was covered by
+ * nothing. That case opens the editor through `openEditorWithRealClipboard`, which installs no
+ * spy — never a spy that is installed and then bypassed — and asserts *contains*, not equality, so
+ * it is platform-independent (the carriage return above does not break "contains"). A paste test
+ * of foreign content (the plain-text case above) is the one that needs the real clipboard for its
+ * *source*.
  */
 
 /** The arguments of the `writeText` calls the app made, newest last, recorded on the window. */
@@ -246,6 +258,17 @@ async function installWriteTextSpy(page: Page): Promise<void> {
 
 async function openEditor(page: Page): Promise<void> {
   await installWriteTextSpy(page);
+  await page.goto("/dev/editor");
+  await page.locator(".ProseMirror").click();
+  await expect.poll(() => markdown(page)).toBe("");
+}
+
+/**
+ * The second opener: the real `navigator.clipboard`, no spy, with the two clipboard permissions
+ * granted so the app's `writeText` can resolve and the case can read the OS clipboard back.
+ */
+async function openEditorWithRealClipboard(page: Page, context: BrowserContext): Promise<void> {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/dev/editor");
   await page.locator(".ProseMirror").click();
   await expect.poll(() => markdown(page)).toBe("");
@@ -300,5 +323,24 @@ test.describe("Copy Markdown flushes a pending source burst before it reads the 
     await expect.poll(() => markdown(page)).toBe("gamma\n");
     const written = await clickCopyMarkdown(page);
     expect(written).toBe("gamma\n");
+  });
+});
+
+test.describe("Copy Markdown through the real clipboard", () => {
+  /**
+   * The one case in this file that calls the clipboard's `readText` (task 1.32, H4): no spy,
+   * so the click goes to the browser's own `writeText`, and "Copied Markdown" is reachable only if
+   * that write resolved — `copyMarkdown` sets the failure status if it rejects. The clipboard is
+   * asserted to *contain* the word, never to equal a string, so no OS's line-ending convention
+   * (DECISIONS #021) can reach the assertion.
+   */
+  test("the real write resolves and the OS clipboard holds the word", async ({ page, context }) => {
+    await openEditorWithRealClipboard(page, context);
+    await page.keyboard.type("delta", { delay: 10 });
+    await expect.poll(() => markdown(page)).toBe("delta\n");
+    await page.getByTestId("copy-markdown").click();
+    await expect(page.getByTestId("status")).toHaveText("Copied Markdown");
+    const held = await page.evaluate(() => navigator.clipboard.readText());
+    expect(held).toContain("delta");
   });
 });

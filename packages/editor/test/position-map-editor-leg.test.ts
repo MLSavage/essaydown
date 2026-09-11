@@ -176,8 +176,9 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
   let lettersTyped = 0;
 
   it("asserts one editor-seeded position map per fixture listed in the index", () => {
-    // The count is the index's own length, never a literal (schema-roundtrip.test.ts's rule).
-    expect(names.length).toBe(Object.keys(index).length);
+    // Only non-emptiness here: `names` *is* `Object.keys(index)`, so comparing the two lengths
+    // was `x === x` (task 1.21 F9c, 1.26 G8, and Grok's r2 finding for this file — task 1.32).
+    // The coverage claim is the two collectors below, which are what the loop actually checked.
     expect(names.length).toBeGreaterThan(0);
   });
 

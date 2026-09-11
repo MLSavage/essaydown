@@ -369,4 +369,86 @@ test.describe("source toggle on /dev/editor", () => {
     await expect(page.locator(".cm-content")).toHaveText("abcdef");
     await expect.poll(() => markdown(page)).toBe("abcdef\n");
   });
+
+  /**
+   * The toggle clause of the rule 1.verify.r2 promoted into CLAUDE.md (every reader of the store
+   * that is not an editing surface settles the pending source burst before it reads, and a new
+   * reader's test is an action inside the coalescing window): `toggle` is the first reader the
+   * rule names and was the one of the four without such a case (DECISIONS #review-1-r2 H3, task
+   * 1.32). Toggle to source, type inside the window, toggle back with no wait: the rendered view
+   * is built from the store, so it holds the burst only if something settled the burst before the
+   * build. Two guards can do that — `toggle`'s own `flush()` (DevEditor.tsx) and
+   * `SourceBinding.destroy`'s `commitPending()` on the mode-change effect's cleanup — and this
+   * case goes red only when *both* are removed (1.32's journal records the two mutations, one at a
+   * time); the ordering case after it is the one that tells them apart.
+   */
+  test("toggle inside the window: the burst typed in source is in the rendered view and the pane after an immediate toggle back", async ({
+    page,
+  }) => {
+    await openEditor(page);
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("source");
+    await page.locator(".cm-content").waitFor();
+
+    // Well inside the 1 s window (PRD §6.5): typed and toggled with no wait between, so the burst
+    // is still only in the CodeMirror buffer when the chord lands.
+    await page.keyboard.type("inside", { delay: 10 });
+    await expect(page.locator(".cm-content")).toHaveText("inside");
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("rendered");
+
+    await expect(page.locator(".ProseMirror")).toHaveText("inside");
+    await expect.poll(() => markdown(page)).toBe("inside\n");
+    // And it stays: no timer fires a window later with a stale segment.
+    await page.waitForTimeout(1_500);
+    await expect(page.locator(".ProseMirror")).toHaveText("inside");
+    expect(await markdown(page)).toBe("inside\n");
+  });
+
+  /**
+   * The ordering `toggle`'s comment claims — the pending commit is made *before* `toggleMode`
+   * closes the coalescing group — and the case that distinguishes its `flush()` from `destroy`'s:
+   * `destroy` runs on the effect cleanup, which is after `toggleMode` has closed the group, so a
+   * burst it settles opens a new entry instead of merging into the group it belongs to. To have a
+   * group open to merge into, the burst is split by a flush inside it (Copy Markdown, G1, as in
+   * reproduction (c)): `a`, Copy, `bc` inside the window, the toggle at once, then one Undo from
+   * the rendered view. With the toggle's own flush the burst is one entry and the Undo empties the
+   * document; with only `destroy`'s, `bc` is a second entry and the Undo leaves `a`. (The
+   * hypothesis in H3 — that the burst and a rendered keystroke could share an entry — does not
+   * distinguish the two: the two views push under different coalescing keys, so they never merge.)
+   */
+  test("ordering: a burst split by a Copy and toggled inside the window is one undo entry with the entry before it", async ({
+    page,
+  }) => {
+    await openEditor(page);
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("source");
+    await page.locator(".cm-content").waitFor();
+
+    await page.keyboard.type("a", { delay: 10 });
+    await expect(page.locator(".cm-content")).toHaveText("a");
+    // The Copy flushes `a` into the store and leaves the source group open (the status is not what
+    // this case is about, so it is not asserted).
+    await page.getByTestId("copy-markdown").click();
+    await expect.poll(() => markdown(page)).toBe("a\n");
+
+    await page.locator(".cm-content").click();
+    await page.keyboard.press("End");
+    await page.keyboard.type("bc", { delay: 10 });
+    await expect(page.locator(".cm-content")).toHaveText("abc");
+    // Inside the window after `a`: the continuation is pending when the chord lands.
+    await page.keyboard.press("ControlOrMeta+/");
+    await expect(page.getByTestId("mode")).toHaveText("rendered");
+    await expect(page.locator(".ProseMirror")).toHaveText("abc");
+    await expect.poll(() => markdown(page)).toBe("abc\n");
+
+    // One burst, one entry: the Undo takes `abc` back, not only `bc`.
+    await page.keyboard.press("ControlOrMeta+z");
+    await expect.poll(() => markdown(page)).toBe("");
+    await expect(page.locator(".ProseMirror")).toHaveText("");
+
+    await page.keyboard.press("ControlOrMeta+Shift+Z");
+    await expect.poll(() => markdown(page)).toBe("abc\n");
+    await expect(page.locator(".ProseMirror")).toHaveText("abc");
+  });
 });
