@@ -42,6 +42,7 @@ You are one agent in a Ralph loop on Essay Down, a Tauri 2 + React Markdown essa
 - A fix that adds several guards has one test per guard, enumerated from the diff rather than from the acceptance sentences, and the journal names the test that discharges each guard; a rule promoted into this file names, in the promoting task's journal entry, the test that discharges each of its clauses.
 - Every round-trip family (parser ↔ serializer, mdast ↔ ProseMirror, the position map) has one corpus leg seeded from the writing surface's own output (a ProseMirror doc changed by a typing-shaped transaction, a mode operation's result), not only from parse(fixture); the test title names the leg, and the editor's output is asserted to be a fixed point of parse∘format.
 - Every reader of the document store that is not an editing surface (copy, undo/redo, toggle, unmount, save, export) settles the pending source burst before it reads, and a new reader's test is an action inside the coalescing window; a read that can lag the buffer by a window is a stale-read defect, not a timing quirk.
+- A fix for one member of a stated invariant asserts the invariant over the corpus and enumerates instances only as named guards on top of it; a corpus leg that claims to be seeded from the writing surface's own output includes at least one destructive transaction (a deletion, a split, a join), because the trees a parser cannot produce are usually reached by taking something away.
 
 ## Runner facts you rely on (DECISIONS #009, #012)
 
