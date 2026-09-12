@@ -28,6 +28,19 @@ import { format, parse } from "../../packages/core/src/index.js";
  *
  * A copy case asserts the string the app handed `navigator.clipboard.writeText`, recorded by an
  * init-script spy, never the OS clipboard read back (task 1.28, DECISIONS #021).
+ *
+ * Caret placement (DECISIONS #022, the rule stated in `editor-mark-edge.spec.ts`; task 1.38 after
+ * #review-1-r3 I6): the rendered caret is placed only by motions Blink decides by itself, so a
+ * pass in the Linux container is a pass for every OS — `ArrowDown`, which on a block's last visual
+ * line is Blink's motion to the editable root's end (no line to move to, so the caret goes to the
+ * content's edge), pressed once per visual line the block renders (a hard break is a `<br>`), the
+ * extra presses changing nothing once the edge is reached. Never a Home or End key and never a
+ * modifier chord for caret motion in the rendered view: a contenteditable resolves those through
+ * the OS's key-binding layer (Cocoa scrolls on them), so on macOS the two chords this file used to
+ * press were no-ops that happened to follow a click already at the document's end. Each case
+ * asserts the caret is at the block's end — the DOM selection's anchor text and offset,
+ * byte-exact — before it deletes or pastes, because its bytes cannot tell a right placement from
+ * a wrong one.
  */
 
 /** The arguments of the `writeText` calls the app made, newest last, recorded on the window. */
@@ -65,6 +78,32 @@ async function seedFromSource(page: Page, text: string): Promise<void> {
 
 async function press(page: Page, key: string, times: number): Promise<void> {
   for (let step = 0; step < times; step += 1) await page.keyboard.press(key);
+}
+
+/** To the document's end: `ArrowDown` once per visual line the document renders (see the file comment). */
+async function toDocumentEnd(page: Page, lines: number): Promise<void> {
+  await press(page, "ArrowDown", lines);
+}
+
+/**
+ * The rendered caret as the DOM selection reports it: the anchor text node's text, byte for
+ * byte, and the caret's offset in it. A caret in a text block is a collapsed selection anchored
+ * in a `Text` node; any other shape is reported as its kind so that it fails the location
+ * assertion outright instead of reading as an offset in the wrong node.
+ */
+function caret(page: Page): Promise<{ kind: string; text: string | null; offset: number }> {
+  return page.evaluate(() => {
+    const selection = document.getSelection();
+    if (selection === null || selection.anchorNode === null) {
+      return { kind: "none", text: null, offset: -1 };
+    }
+    if (!selection.isCollapsed) return { kind: "range", text: null, offset: -1 };
+    const node = selection.anchorNode;
+    if (node.nodeType !== Node.TEXT_NODE) {
+      return { kind: `element:${node.nodeName}`, text: null, offset: selection.anchorOffset };
+    }
+    return { kind: "text", text: node.textContent, offset: selection.anchorOffset };
+  });
 }
 
 /** Click "Copy Markdown" and return the one string the app handed `writeText`. */
@@ -119,10 +158,14 @@ test.describe("a hard break left last in its block by a deletion never reaches t
     await seedFromSource(page, "one\\\ntwo");
     await expect.poll(() => markdown(page)).toBe("one\\\ntwo\n");
 
-    // To the document end, then the whole continuation line deleted: the break is now the
-    // paragraph's last node. Before this task the pane read `one\` + newline — a literal
-    // backslash to any Markdown reader — and the copy carried the same bytes.
-    await page.keyboard.press("ControlOrMeta+End");
+    // To the document end (two visual lines), asserted as the end of the continuation line's
+    // text, then the whole continuation line deleted: the break is now the paragraph's last
+    // node. Before this task the pane read `one\` + newline — a literal backslash to any
+    // Markdown reader — and the copy carried the same bytes.
+    await toDocumentEnd(page, 2);
+    await expect
+      .poll(() => caret(page))
+      .toEqual({ kind: "text", text: "two", offset: "two".length });
     await press(page, "Backspace", "two".length);
     await expect.poll(() => markdown(page)).toBe("one\n");
 
@@ -135,7 +178,12 @@ test.describe("a hard break left last in its block by a deletion never reaches t
     await seedFromSource(page, "## one");
     await expect.poll(() => markdown(page)).toBe("## one\n");
     await page.locator(".ProseMirror").click();
-    await page.keyboard.press("ControlOrMeta+End");
+    // To the document end (one visual line), asserted as the end of the heading's text, so the
+    // paste lands after `one`.
+    await toDocumentEnd(page, 1);
+    await expect
+      .poll(() => caret(page))
+      .toEqual({ kind: "text", text: "one", offset: "one".length });
     await paste(page, "text/html", "<br>two");
     // The serializer has no ATX spelling for a heading holding a break, so the pane shows the
     // break inside the heading as a backslash before a line ending; that is the seed, not the
