@@ -8,9 +8,11 @@ import { parse } from "../../core/src/parse.js";
 import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
 import {
   deleteAtEveryBlockEnd,
+  deleteBesideEveryMarkedRun,
   deleteToEveryMarkedRunEnd,
   letterFor,
   pasteIntoEveryListItemParagraph,
+  punctuateThenDeleteAfterEveryMarkedRun,
   splitEveryListItemParagraph,
   typeInsideEveryBlock,
   typeSpaceAtEveryBlockEnd,
@@ -107,6 +109,17 @@ import {
  * text node of the parse holds a reference, and none in the bytes decodes to whitespace; the
  * mark-edge leg's "only spaces differ" compares decoded texts. One guard beside the presence case
  * pins the distinction with the emphasis twin.
+ *
+ * Task 1.41 (DECISIONS #review-1-r4 J1) adds the boundary every leg above types or deletes
+ * *inside* a run or *at* a block's end and none of them reaches: the unmarked whitespace *between*
+ * a flanking-marked run and its neighbour, one Backspace away (`~~beta.~~` then a space,
+ * `~~…](essay.md)~~` then a space — both r4 reviewers' reproductions) — a tree 1.40's `delete`
+ * handler exists for but no corpus leg had built. The corpus gains two legs titled for **the
+ * mark's neighbour**: {@link deleteBesideEveryMarkedRun} deletes the whitespace outright, and
+ * {@link punctuateThenDeleteAfterEveryMarkedRun} — the reviewers' own "certain case" — types a `.`
+ * at the run's end with the run's marks first, then deletes the whitespace after it. Each is
+ * asserted a fixed point that keeps as many `emphasis`/`strong`/`delete` nodes as the fixture's own
+ * tree, discharged by {@link flankingMarkNodesIn}.
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -1288,6 +1301,18 @@ describe("the link edge (task 1.35): one guard per position of a link's edge whi
   });
 });
 
+/**
+ * Every `emphasis`, `strong` or `delete` node under `root`, wherever it is — the flanking marks
+ * the neighbour legs (task 1.41) must neither gain nor lose, since they only touch whitespace
+ * outside a run (or, for the punctuate leg, one character inside it).
+ */
+function flankingMarkNodesIn(root: Root): number {
+  const walk = (node: { type: string; children?: unknown[] }): number =>
+    (node.type === "emphasis" || node.type === "strong" || node.type === "delete" ? 1 : 0) +
+    ((node.children ?? []) as (typeof node)[]).reduce((sum, child) => sum + walk(child), 0);
+  return walk(root);
+}
+
 /** The list items of `root` whose first two children are paragraphs, counted at every depth. */
 function itemsWithTwoParagraphs(root: Root): number {
   let count = 0;
@@ -1437,6 +1462,44 @@ describe("editor fixed point over the corpus", () => {
       expect(linksIn(parse(out))).toBe(linksIn(parse(read(name))));
       expectNoForbiddenEntity(out);
     });
+
+    it(`${name} is an editor fixed point after the whitespace beside every marked run is deleted (the mark's neighbour)`, () => {
+      const before = flankingMarkNodesIn(parse(read(name)));
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+      const deleted = deleteBesideEveryMarkedRun(doc);
+
+      // Presence: the transaction really changed this document, wherever a marked run has
+      // whitespace beside it.
+      expect(deleted.doc.eq(doc)).toBe(deleted.deleted === 0);
+
+      const root = pmToMdast({ doc: deleted.doc, frontMatter });
+      // Deleting the neighbour's whitespace neither opens nor closes a run: the tree keeps as
+      // many flanking-mark nodes as the fixture's own.
+      expect(flankingMarkNodesIn(root)).toBe(before);
+      const out = format(root);
+      // Before this task, this tree — the one-Backspace route both r4 reviewers reproduced by
+      // hand — had no corpus leg to build it, so 1.40's handler had no fixture-wide guard for it.
+      expect(format(parse(out))).toBe(out);
+      expect(flankingMarkNodesIn(parse(out))).toBe(before);
+      expectNoForbiddenEntity(out);
+    });
+
+    it(`${name} is an editor fixed point after a period is typed at the end of every marked run and the whitespace after it deleted (the mark's neighbour, the certain case)`, () => {
+      const before = flankingMarkNodesIn(parse(read(name)));
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+      const punctuated = punctuateThenDeleteAfterEveryMarkedRun(doc);
+
+      // Presence: the transaction really changed this document, wherever a marked run ends with
+      // whitespace after it.
+      expect(punctuated.doc.eq(doc)).toBe(punctuated.punctuated === 0);
+
+      const root = pmToMdast({ doc: punctuated.doc, frontMatter });
+      expect(flankingMarkNodesIn(root)).toBe(before);
+      const out = format(root);
+      expect(format(parse(out))).toBe(out);
+      expect(flankingMarkNodesIn(parse(out))).toBe(before);
+      expectNoForbiddenEntity(out);
+    });
   }
 
   for (const name of names) {
@@ -1485,6 +1548,28 @@ describe("editor fixed point over the corpus", () => {
       (name) => typeSpaceAtEveryLinkEnd(mdastToPM(parse(read(name))).doc).links > 0,
     );
     expect(reached.length).toBeGreaterThan(0);
+    expect(reached).toContain("link-in-emphasis.md");
+  });
+
+  it("at least one fixture in the index holds a marked run with whitespace beside it, on both sides, for the mark's-neighbour deletion leg", () => {
+    // Without this, the leg could be green because no fixture in the corpus carries a flanking
+    // mark with unmarked whitespace outside it — the reason `strikethrough-punctuation.md` (the
+    // reviewers' own `~~beta.~~` reproduction) and `link-in-emphasis.md` (the emphasis run before
+    // " before its argument") carry the claim.
+    const reached = names.filter(
+      (name) => deleteBesideEveryMarkedRun(mdastToPM(parse(read(name))).doc).deleted > 0,
+    );
+    expect(reached.length).toBeGreaterThan(0);
+    expect(reached).toContain("strikethrough-punctuation.md");
+    expect(reached).toContain("link-in-emphasis.md");
+  });
+
+  it("at least one fixture in the index holds a marked run the punctuate-then-delete leg reaches (the certain case)", () => {
+    const reached = names.filter(
+      (name) => punctuateThenDeleteAfterEveryMarkedRun(mdastToPM(parse(read(name))).doc).punctuated > 0,
+    );
+    expect(reached.length).toBeGreaterThan(0);
+    expect(reached).toContain("strikethrough-punctuation.md");
     expect(reached).toContain("link-in-emphasis.md");
   });
 

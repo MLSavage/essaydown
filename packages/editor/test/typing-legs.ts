@@ -1,4 +1,4 @@
-import type { Node as PMNode } from "prosemirror-model";
+import type { Mark as PMMark, Node as PMNode } from "prosemirror-model";
 import { Fragment, Slice } from "prosemirror-model";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { expect } from "vitest";
@@ -29,6 +29,13 @@ import { schema } from "../src/schema.js";
  * leg above leaves the block tree as the parser built it, so a parsed block attribute that
  * outlives the structure it described (`listItem.spread` after a paste adds a paragraph) was
  * outside all of them.
+ *
+ * Task 1.41 (DECISIONS #review-1-r4 J1) adds **the mark's neighbour**,
+ * {@link deleteBesideEveryMarkedRun} and {@link punctuateThenDeleteAfterEveryMarkedRun}: every leg
+ * above types or deletes *inside* a run or *at* a block's end, so a Backspace over the unmarked
+ * whitespace *between* a flanking-marked run and its neighbour — the one-keystroke route both r4
+ * reviewers found (`~~beta.~~` then a space, `~~…](essay.md)~~` then a space) — was outside all of
+ * them, and 1.40's `delete` handler had no corpus leg reaching the tree it exists for.
  */
 
 /** {@link typeSpaceAtEveryBlockEnd}'s result: the changed document, and how many blocks it typed in. */
@@ -408,4 +415,146 @@ export function pasteIntoEveryListItemParagraph(doc: PMNode): ListSplitLeg {
       .replaceSelection(twoLinePasteSlice("X", "Y"));
   }
   return { doc: tr.doc, items: ends.length };
+}
+
+/**
+ * {@link deleteBesideEveryMarkedRun}'s result: the changed document, and how many single
+ * whitespace characters it deleted — one per run side that had one, counted once even where two
+ * mark passes name the same neighbour (nested marks over the same span, or two adjacent runs
+ * sharing the one space between them).
+ */
+export interface MarkNeighbourLeg {
+  doc: PMNode;
+  deleted: number;
+}
+
+/**
+ * The child nodes and their document positions of an inline-content block, in order — the shape
+ * both functions below scan a maximal run over.
+ */
+function inlineChildren(node: PMNode, blockStart: number): { children: PMNode[]; starts: number[] } {
+  const children: PMNode[] = [];
+  const starts: number[] = [];
+  node.forEach((child, offset) => {
+    children.push(child);
+    starts.push(blockStart + offset);
+  });
+  return { children, starts };
+}
+
+/**
+ * A ProseMirror transaction shaped like a Backspace over the one character just outside a flanking
+ * mark's run — the review's own reproduction (DECISIONS #review-1-r4 J1, task 1.41): for every
+ * maximal run of `emphasis`, `strong` or `delete` in a paragraph, heading or table cell, the
+ * whitespace character immediately outside the run is deleted on each side where the adjacent
+ * sibling is text and starts (after the run) or ends (before the run) with one. Two single-
+ * character deletions per run, applied separately — never merged into one range — so a run flanked
+ * by whitespace on both sides loses exactly one character from each neighbour and never reaches
+ * past it into whatever follows. `tr.delete` is the call a Backspace makes; every range found is
+ * collected first and the transaction applies them back-to-front, so each leaves the ranges still
+ * to come unmoved.
+ */
+export function deleteBesideEveryMarkedRun(doc: PMNode): MarkNeighbourLeg {
+  const ranges = new Map<string, [number, number]>();
+  const addRange = (from: number, to: number): void => {
+    ranges.set(`${from}-${to}`, [from, to]);
+  };
+  doc.descendants((node, pos) => {
+    if (!INLINE_CONTENT.has(node.type)) return true;
+    const { children, starts } = inlineChildren(node, pos + 1);
+    for (const mark of FLANKING_MARKS) {
+      let i = 0;
+      while (i < children.length) {
+        if (mark.isInSet(children[i].marks) === undefined) {
+          i += 1;
+          continue;
+        }
+        const runStart = i;
+        while (i < children.length && mark.isInSet(children[i].marks) !== undefined) i += 1;
+        const runEnd = i;
+        if (runStart > 0) {
+          const before = children[runStart - 1];
+          if (before.isText) {
+            const text = before.text as string;
+            const last = [...text].pop();
+            const end = starts[runStart - 1] + before.nodeSize;
+            if (last !== undefined && /\s/u.test(last)) addRange(end - last.length, end);
+          }
+        }
+        if (runEnd < children.length) {
+          const after = children[runEnd];
+          if (after.isText) {
+            const text = after.text as string;
+            const first = [...text][0];
+            const start = starts[runEnd];
+            if (first !== undefined && /\s/u.test(first)) addRange(start, start + first.length);
+          }
+        }
+      }
+    }
+    return false;
+  });
+  const sorted = [...ranges.values()].sort((a, b) => b[0] - a[0]);
+  let tr = EditorState.create({ doc }).tr;
+  for (const [from, to] of sorted) tr = tr.delete(from, to);
+  return { doc: tr.doc, deleted: sorted.length };
+}
+
+/**
+ * {@link punctuateThenDeleteAfterEveryMarkedRun}'s result: the changed document, and how many
+ * runs it typed a period into and then deleted the following whitespace from.
+ */
+export interface MarkNeighbourPunctuateLeg {
+  doc: PMNode;
+  punctuated: number;
+}
+
+/**
+ * The "certain case" of the review's reproduction: rather than deleting the neighbour whitespace
+ * outright, a `.` is typed at the run's end, with the run's own marks (`setStoredMarks` first, the
+ * call {@link typeSpaceAtEveryLinkEnd} makes for the same reason — inserting at a run's exclusive
+ * edge would otherwise place the text outside it), and then the whitespace that character's
+ * neighbour was is deleted — the exact shape the r4 reviewers reproduced by hand (`~~beta.~~` then
+ * a Backspace over the following space, `~~…](essay.md)~~` the same). Only the run's *after* side
+ * has a "then deletes the whitespace after it" to speak of; a run with no whitespace immediately
+ * outside it is untouched. Each run's insertion and deletion are two steps of the same local
+ * transaction, so the position computed before either is still valid for both; runs are processed
+ * back-to-front so that each pair leaves the positions still to come unmoved.
+ */
+export function punctuateThenDeleteAfterEveryMarkedRun(doc: PMNode): MarkNeighbourPunctuateLeg {
+  const targets = new Map<number, { wsLen: number; marks: readonly PMMark[] }>();
+  doc.descendants((node, pos) => {
+    if (!INLINE_CONTENT.has(node.type)) return true;
+    const { children, starts } = inlineChildren(node, pos + 1);
+    for (const mark of FLANKING_MARKS) {
+      let i = 0;
+      while (i < children.length) {
+        if (mark.isInSet(children[i].marks) === undefined) {
+          i += 1;
+          continue;
+        }
+        while (i < children.length && mark.isInSet(children[i].marks) !== undefined) i += 1;
+        const runEnd = i;
+        const last = children[runEnd - 1];
+        if (runEnd < children.length && last.isText) {
+          const after = children[runEnd];
+          if (after.isText) {
+            const text = after.text as string;
+            const first = [...text][0];
+            if (first !== undefined && /\s/u.test(first)) {
+              targets.set(starts[runEnd], { wsLen: first.length, marks: last.marks });
+            }
+          }
+        }
+      }
+    }
+    return false;
+  });
+  const ordered = [...targets.entries()].sort((a, b) => b[0] - a[0]);
+  let tr = EditorState.create({ doc }).tr;
+  for (const [pos, { wsLen, marks }] of ordered) {
+    tr = tr.setStoredMarks([...marks]).insertText(".", pos);
+    tr = tr.delete(pos + 1, pos + 1 + wsLen);
+  }
+  return { doc: tr.doc, punctuated: ordered.length };
 }
