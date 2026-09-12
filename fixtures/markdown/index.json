@@ -281,6 +281,25 @@
       1
     ]
   },
+  "hard-break-in-emphasis.md": {
+    "nodeTypes": [
+      "break",
+      "delete",
+      "emphasis",
+      "paragraph",
+      "root",
+      "strong",
+      "text"
+    ],
+    "blockCount": 4,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      4,
+      7,
+      10
+    ]
+  },
   "heading-h1.md": {
     "nodeTypes": [
       "heading",

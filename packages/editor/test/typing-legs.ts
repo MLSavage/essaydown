@@ -17,6 +17,9 @@ import { schema } from "../src/schema.js";
  * them: the trees a parser cannot produce are usually reached by taking something away. Task 1.30
  * (DECISIONS #review-1-r2 H8) adds {@link typeSpaceInsideEveryMarkedRun}: a space typed with the
  * caret inside a mark, at the end of an emphasised word, the one-keystroke route to the mark edge.
+ * Task 1.34 (DECISIONS #review-1-r3 I1) adds the deletion leg's second range set,
+ * {@link deleteToEveryMarkedRunEnd}: the first set deletes to the *block's* end after every break,
+ * so the break was always the block's last node and never a run's last node with text after it.
  */
 
 /** {@link typeSpaceAtEveryBlockEnd}'s result: the changed document, and how many blocks it typed in. */
@@ -220,4 +223,70 @@ export function typeSpaceInsideEveryMarkedRun(doc: PMNode): MarkEdgeLeg {
   let tr = EditorState.create({ doc }).tr;
   for (const pos of [...ends].reverse()) tr = tr.insertText(" ", pos);
   return { doc: tr.doc, runs: ends.length };
+}
+
+/**
+ * {@link deleteToEveryMarkedRunEnd}'s result: the changed document, how many ranges it deleted
+ * (one per hard break inside a flanking mark's run that had run content after it), and how many
+ * of those ranges reached the block's end (so the break is then the block's last node, which the
+ * block's-end clause drops, rather than the run's last node with text after it).
+ */
+export interface MarkedRunDeletionLeg {
+  doc: PMNode;
+  afterBreaksInRuns: number;
+  toBlockEnd: number;
+}
+
+/**
+ * The deletion leg's second range set (task 1.34, DECISIONS #review-1-r3 I1, Claude's route: one
+ * Backspace inside an emphasised verse loaded from a file): for every `hard_break` carrying a
+ * flanking mark, in a paragraph, heading or table cell, the inline content from the break's end to
+ * the end of that *mark's run* — the maximal stretch of adjacent nodes carrying the mark, not the
+ * block — is deleted, so the break becomes the run's last node with whatever followed the run
+ * (unmarked text, another mark's run, nothing) still after it. Where the break carries more than
+ * one flanking mark the shortest run's end is taken, so the break is last in at least one run and
+ * the text after it keeps the marks whose runs go on. A break inside a range already taken (a
+ * second break in the same run) is deleted with it and counts nothing; the ranges are therefore
+ * disjoint and are applied back-to-front so that each leaves the ranges still to come unmoved.
+ * `tr.delete` is the call a Backspace makes.
+ *
+ * This is a second *document*, not a third pass over {@link deleteAtEveryBlockEnd}'s: that leg's
+ * first set deletes after every break to the block's end, which is this range widened past the
+ * run's end, so the two shapes — the break last in its block, the break last in its run with text
+ * after it — cannot both be built from one break.
+ */
+export function deleteToEveryMarkedRunEnd(doc: PMNode): MarkedRunDeletionLeg {
+  const ranges: [number, number][] = [];
+  let toBlockEnd = 0;
+  doc.descendants((node, pos) => {
+    if (!INLINE_CONTENT.has(node.type)) return true;
+    const children: PMNode[] = [];
+    const starts: number[] = [];
+    node.forEach((child, offset) => {
+      children.push(child);
+      starts.push(pos + 1 + offset);
+    });
+    const blockEnd = pos + 1 + node.content.size;
+    let coveredTo = -1;
+    children.forEach((child, i) => {
+      if (child.type !== schema.nodes.hard_break || starts[i] < coveredTo) return;
+      const marks = FLANKING_MARKS.filter((mark) => mark.isInSet(child.marks) !== undefined);
+      if (marks.length === 0) return;
+      const from = starts[i] + child.nodeSize;
+      let to = blockEnd;
+      for (const mark of marks) {
+        let j = i + 1;
+        while (j < children.length && mark.isInSet(children[j].marks) !== undefined) j += 1;
+        to = Math.min(to, j < children.length ? starts[j] : blockEnd);
+      }
+      if (from >= to) return;
+      ranges.push([from, to]);
+      if (to === blockEnd) toBlockEnd += 1;
+      coveredTo = to;
+    });
+    return false;
+  });
+  let tr = EditorState.create({ doc }).tr;
+  for (const [from, to] of [...ranges].reverse()) tr = tr.delete(from, to);
+  return { doc: tr.doc, afterBreaksInRuns: ranges.length, toBlockEnd };
 }

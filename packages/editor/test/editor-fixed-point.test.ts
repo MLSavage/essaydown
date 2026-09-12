@@ -8,6 +8,7 @@ import { parse } from "../../core/src/parse.js";
 import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
 import {
   deleteAtEveryBlockEnd,
+  deleteToEveryMarkedRunEnd,
   letterFor,
   typeInsideEveryBlock,
   typeSpaceAtEveryBlockEnd,
@@ -54,12 +55,36 @@ import {
  * three flanking marks, the trailing edge in the first, middle and last positions of the block,
  * plus the nested case, the link absence case and the clauses read from the diff; the corpus
  * gains a leg titled for the **mark edge**, which types the space inside every marked run.
+ *
+ * Task 1.34 (DECISIONS #review-1-r3 I1) adds the member of the mark-edge boundary that 1.30's
+ * guards asserted only for whitespace and its backlog line deferred as unreachable: a `hard_break`
+ * left as a *run's* last node with unmarked text after it — one Backspace inside an emphasised
+ * verse loaded from a file — reached `format`, which wrote the break's line ending as a numeric
+ * character reference inside the delimiters and escaped the next character, a fixed point whose
+ * parse holds no `break`. The fifth suite is one guard per position and mark (a break last in the
+ * run before unmarked text, in a paragraph and in a setext heading; before another mark's run; as
+ * the run's first node; two breaks at the edge), each asserting the bytes, the fixed point, that
+ * the parsed output keeps as many `break`s as the input tree had, and that no text node of it
+ * holds a numeric character reference — because a fixed point alone accepted the defect (the
+ * escaped entity is literal text that reparses to itself). The deletion leg gains a second range
+ * set, seeded from `hard-break-in-emphasis.md`, that deletes to the *marked run's* end after every
+ * break inside a mark, where 1.29's ranges went to the block's end and so never built this tree;
+ * and every leg's assertion of absence is one regex over the whole entity family
+ * ({@link ENTITY}) rather than the one literal each finding produced.
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
 
 const index = JSON.parse(readFileSync(`${FIXTURES}/index.json`, "utf8")) as Record<string, unknown>;
 const names = Object.keys(index).sort();
+
+/**
+ * A numeric character reference, decimal or hexadecimal — the whole family the serializer spells
+ * unparsable whitespace and the character after a break as (a space, a line ending, a letter, a
+ * no-break space have each appeared), matched as a pattern so that a grep for any one member
+ * across the test tree turns up only assertions of absence.
+ */
+const ENTITY = /&#x?[0-9a-fA-F]+;/;
 
 function read(name: string): string {
   return readFileSync(`${FIXTURES}/${name}`, "utf8");
@@ -109,7 +134,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       { type: "paragraph", children: [{ type: "text", value: "hey" }] },
     ]);
     expect(format(root)).toBe("hey\n");
-    expect(format(root)).not.toContain("&#x20;");
+    expect(format(root)).not.toMatch(ENTITY);
   });
 
   it("boundary 3 (before a hard break): the whitespace a hard break does not own is kept", () => {
@@ -131,7 +156,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       },
     ]);
     expect(format(root)).toBe("one \\\ntwo\n");
-    expect(format(root)).not.toContain("&#x20;");
+    expect(format(root)).not.toMatch(ENTITY);
     expect(format(parse(format(root)))).toBe(format(root));
   });
 
@@ -153,7 +178,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       },
     ]);
     expect(format(root)).toBe("one \\\ntwo\n");
-    expect(format(root)).not.toContain("&#x20;");
+    expect(format(root)).not.toMatch(ENTITY);
   });
 
   it("boundary 5 (before a soft line break): the space at the end of a wrapped line is dropped, first, middle and last", () => {
@@ -163,7 +188,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
     for (const [label, typed] of SOFT_BREAK_POSITIONS_BEFORE) {
       const root = mdastOf(paragraph(schema.text(typed)));
       expect(format(root), label).toBe(WRAPPED);
-      expect(format(root), label).not.toContain("&#x20;");
+      expect(format(root), label).not.toMatch(ENTITY);
       expect(format(parse(format(root))), label).toBe(WRAPPED);
     }
   });
@@ -172,7 +197,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
     for (const [label, typed] of SOFT_BREAK_POSITIONS_AFTER) {
       const root = mdastOf(paragraph(schema.text(typed)));
       expect(format(root), label).toBe(WRAPPED);
-      expect(format(root), label).not.toContain("&#x20;");
+      expect(format(root), label).not.toMatch(ENTITY);
       expect(format(parse(format(root))), label).toBe(WRAPPED);
     }
   });
@@ -186,7 +211,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       { type: "paragraph", children: [{ type: "text", value: "one\ntwo" }] },
     ]);
     expect(format(root)).toBe("one\ntwo\n");
-    expect(format(root)).not.toContain("&#x20;");
+    expect(format(root)).not.toMatch(ENTITY);
     // The block was not split: one paragraph before, one paragraph after the round trip.
     expect(parse(format(root)).children).toHaveLength(1);
     expect(format(parse(format(root)))).toBe(format(root));
@@ -241,7 +266,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       root.children[0].children[row].children.map((c) => c.children);
     expect(cells(0)).toEqual([[{ type: "text", value: "a" }], [{ type: "text", value: "b" }]]);
     expect(cells(1)).toEqual([[{ type: "text", value: "c" }], [{ type: "text", value: "d" }]]);
-    expect(format(root)).not.toContain("&#x20;");
+    expect(format(root)).not.toMatch(ENTITY);
   });
 
   it("a heading's ends are stripped too (the third block the strip runs on)", () => {
@@ -273,6 +298,45 @@ function breaksIn(root: Root): number {
 }
 
 /**
+ * The hard breaks of `doc` that are not among a block's trailing breaks — the ones the block's-end
+ * clause keeps, and so the number of `break`s the tree leaving the editor has to hold.
+ */
+function breaksNotLastInBlock(doc: PMNode): number {
+  let count = 0;
+  doc.descendants((node) => {
+    if (!node.isTextblock) return true;
+    const children: PMNode[] = [];
+    node.forEach((child) => children.push(child));
+    while (children.length > 0 && children[children.length - 1].type === schema.nodes.hard_break)
+      children.pop();
+    count += children.filter((child) => child.type === schema.nodes.hard_break).length;
+    return false;
+  });
+  return count;
+}
+
+/** Every hard break in the editor's own tree, wherever it is. */
+function hardBreaksIn(doc: PMNode): number {
+  let count = 0;
+  doc.descendants((node) => {
+    if (node.type === schema.nodes.hard_break) count += 1;
+    return true;
+  });
+  return count;
+}
+
+/** The value of every `text` node under `root`, wherever it is. */
+function textValues(root: Root): string[] {
+  const out: string[] = [];
+  const walk = (node: { type: string; value?: string; children?: unknown[] }): void => {
+    if (node.type === "text") out.push(node.value as string);
+    for (const child of (node.children ?? []) as (typeof node)[]) walk(child);
+  };
+  walk(root);
+  return out;
+}
+
+/**
  * The two assertions every guard below makes: the bytes `format` writes, and that those bytes are
  * a fixed point of `parse`∘`format` — the second is the round trip the finding is about, and the
  * first is what stops a guard from pinning any fixed point at all as the right one.
@@ -280,7 +344,7 @@ function breaksIn(root: Root): number {
 function expectBytes(root: Root, bytes: string, label?: string): void {
   expect(format(root), label).toBe(bytes);
   expect(format(parse(format(root))), label).toBe(format(root));
-  expect(format(root), label).not.toContain("&#x20;");
+  expect(format(root), label).not.toMatch(ENTITY);
 }
 
 describe("the block's end and an atom (task 1.29): one guard per position, on paragraph and on heading", () => {
@@ -419,7 +483,7 @@ describe("the block's end and an atom (task 1.29): one guard per position, on pa
       },
     ]);
     expect(format(root)).toBe("| a b |\n| --- |\n");
-    expect(format(root)).not.toContain("&#xA;");
+    expect(format(root)).not.toMatch(ENTITY);
     expect(format(parse(format(root)))).toBe(format(root));
     // Two line endings in one run are still one space: the run collapses, whatever it holds.
     expect(format(mdastOf(cell(schema.text("a\n\nb"))))).toBe("| a b |\n| --- |\n");
@@ -440,7 +504,7 @@ describe("the block's end and an atom (task 1.29): one guard per position, on pa
       },
     ]);
     expect(format(root)).toBe("| a |\n| - |\n");
-    expect(format(root)).not.toContain("&#xA;");
+    expect(format(root)).not.toMatch(ENTITY);
     expect(format(parse(format(root)))).toBe(format(root));
     // …and a break last in a cell is dropped like any block's (position 1 on the third block).
     const withBreak = mdastOf(cell(schema.text("a"), schema.node("hard_break")));
@@ -673,7 +737,7 @@ describe("the mark edge (task 1.30): one guard per edge of CommonMark §6.2's fl
       },
     ]);
     expect(format(parse(format(withCode)))).toBe(format(withCode));
-    expect(format(withCode)).not.toContain("&#x20;");
+    expect(format(withCode)).not.toMatch(ENTITY);
     // An image first in the run: the space after it is inside the run, not at its edge.
     const image = schema.node("image", { url: "a.png", alt: "", title: null }, undefined, [em]);
     const withImage = mdastOf(paragraph(image, schema.text(" b", [em]), schema.text(" c")));
@@ -753,14 +817,190 @@ describe("the mark edge (task 1.30): one guard per edge of CommonMark §6.2's fl
     );
     const out = format(pmToMdast({ doc: typed.doc, frontMatter: null }));
     expect(out).toBe("a *b*  c\n");
-    expect(out).not.toContain("&#x20;");
+    expect(out).not.toMatch(ENTITY);
+  });
+});
+
+/**
+ * The four assertions every guard of the atom-at-the-mark-edge suite makes (task 1.34): the bytes
+ * `format` writes, that they are a fixed point of `parse`∘`format`, that the parsed output holds
+ * exactly as many `break`s as the editor's tree had (the defect's fixed point held none), and that
+ * no text node of it is a numeric character reference (the defect's text was one).
+ */
+function expectBreakSurvives(doc: PMNode, bytes: string, label?: string): void {
+  const out = format(mdastOf(doc));
+  expect(out, label).toBe(bytes);
+  expect(format(parse(out)), label).toBe(out);
+  expect(breaksIn(parse(out)), label).toBe(hardBreaksIn(doc));
+  expect(hardBreaksIn(doc), label).toBeGreaterThan(0);
+  for (const value of textValues(parse(out))) expect(value, label).not.toMatch(ENTITY);
+}
+
+/** A depth-1 heading: the serializer writes one that holds a break in setext form. */
+function setext(...content: PMNode[]): PMNode {
+  return schema.node("doc", null, [schema.node("heading", { depth: 1 }, content)]);
+}
+
+describe("the atom at the mark edge (task 1.34): one guard per position of a hard break at a flanking run's edge, per flanking mark", () => {
+  for (const [name, mark, d] of FLANKING) {
+    const br = (): PMNode => schema.node("hard_break", null, undefined, [mark]);
+    // The run of another flanking mark, for the "before another mark's run" position.
+    const [otherName, other, od] = FLANKING.find(([n]) => n !== name) as (typeof FLANKING)[number];
+
+    it(`${name}, trailing edge in a paragraph: a break last in the run before unmarked text leaves the mark, and the break survives`, () => {
+      // Before this task: the break stayed inside the delimiters, the serializer spelled its line
+      // ending as a character reference and escaped the `c`, and the parse of that held no break.
+      const doc = paragraph(schema.text("a", [mark]), br(), schema.text(" c"));
+      expect(mdastOf(doc).children).toEqual([
+        {
+          type: "paragraph",
+          children: [wrapped(name, "a"), { type: "break" }, { type: "text", value: "c" }],
+        },
+      ]);
+      expectBreakSurvives(doc, `${d}a${d}\\\nc\n`);
+    });
+
+    it(`${name}, trailing edge in a setext heading: the same tree in a heading keeps its block type and its break`, () => {
+      // Before this task this member was not even a fixed point.
+      const doc = setext(schema.text("a", [mark]), br(), schema.text(" c"));
+      expect(mdastOf(doc).children).toEqual([
+        {
+          type: "heading",
+          depth: 1,
+          children: [wrapped(name, "a"), { type: "break" }, { type: "text", value: "c" }],
+        },
+      ]);
+      expectBreakSurvives(doc, `${d}a${d}\\\nc\n=\n`);
+    });
+
+    it(`${name}, trailing edge before another mark's run (${otherName}): the break leaves the first mark and does not join the second`, () => {
+      const doc = paragraph(schema.text("a", [mark]), br(), schema.text("b", [other]));
+      expect(mdastOf(doc).children).toEqual([
+        {
+          type: "paragraph",
+          children: [wrapped(name, "a"), { type: "break" }, wrapped(otherName, "b")],
+        },
+      ]);
+      expectBreakSurvives(doc, `${d}a${d}\\\n${od}b${od}\n`);
+    });
+
+    it(`${name}, leading edge: a break as the run's first node leaves the mark, and the text after it keeps it`, () => {
+      // The symmetric case: an opening delimiter before a break would close a line, not open a run.
+      const doc = paragraph(schema.text("x "), br(), schema.text("b", [mark]));
+      expect(mdastOf(doc).children).toEqual([
+        {
+          type: "paragraph",
+          children: [{ type: "text", value: "x " }, { type: "break" }, wrapped(name, "b")],
+        },
+      ]);
+      expectBreakSurvives(doc, `x \\\n${d}b${d}\n`);
+    });
+
+    it(`${name}, two breaks at the edge: both leave the mark, trailing and leading (the scan's "continues")`, () => {
+      const trailing = paragraph(schema.text("a", [mark]), br(), br(), schema.text(" c"));
+      expect(mdastOf(trailing).children).toEqual([
+        {
+          type: "paragraph",
+          children: [
+            wrapped(name, "a"),
+            { type: "break" },
+            { type: "break" },
+            { type: "text", value: "c" },
+          ],
+        },
+      ]);
+      expectBreakSurvives(trailing, `${d}a${d}\\\n\\\nc\n`, "trailing");
+
+      const leading = paragraph(schema.text("x "), br(), br(), schema.text("b", [mark]));
+      expect(mdastOf(leading).children).toEqual([
+        {
+          type: "paragraph",
+          children: [
+            { type: "text", value: "x " },
+            { type: "break" },
+            { type: "break" },
+            wrapped(name, "b"),
+          ],
+        },
+      ]);
+      expectBreakSurvives(leading, `x \\\n\\\n${d}b${d}\n`, "leading");
+    });
+
+    it(`${name}, clause: a break in the middle of the run is untouched (the absence case), and one left last in the block falls to the block's-end clause`, () => {
+      // Inside the run a break is legal — `${d}a\` newline `b${d}` parses to a break inside the
+      // mark — so the scan, which only visits the edges, never reaches it.
+      const middle = paragraph(schema.text("a", [mark]), br(), schema.text("b", [mark]));
+      expect(mdastOf(middle).children).toEqual([
+        {
+          type: "paragraph",
+          children: [
+            {
+              type: name === "strikethrough" ? "delete" : name,
+              children: [
+                { type: "text", value: "a" },
+                { type: "break" },
+                { type: "text", value: "b" },
+              ],
+            },
+          ],
+        },
+      ]);
+      expectBreakSurvives(middle, `${d}a\\\nb${d}\n`, "middle");
+      // With nothing after the run, the break the edge scan unmarked is the block's last node:
+      // 1.29's clause drops it, as it drops any trailing break.
+      const last = mdastOf(paragraph(schema.text("a", [mark]), br()));
+      expect(last.children).toEqual([{ type: "paragraph", children: [wrapped(name, "a")] }]);
+      expectBytes(last, `${d}a${d}\n`, "last");
+    });
+  }
+
+  it("nested (emphasis inside strong), a break at the shared edge: the break leaves every mark whose edge it touches", () => {
+    const em = schema.marks.emphasis.create();
+    const strong = schema.marks.strong.create();
+    const doc = paragraph(
+      schema.text("a", [em, strong]),
+      schema.node("hard_break", null, undefined, [em, strong]),
+      schema.text(" c"),
+    );
+    expect(mdastOf(doc).children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "strong",
+            children: [{ type: "emphasis", children: [{ type: "text", value: "a" }] }],
+          },
+          { type: "break" },
+          { type: "text", value: "c" },
+        ],
+      },
+    ]);
+    expectBreakSurvives(doc, "***a***\\\nc\n");
+  });
+
+  it("the leg's seed is Claude's shape: one Backspace after the break of `hard-break-in-emphasis.md`'s first verse leaves the break last in its run", () => {
+    // The corpus leg below deletes to every marked run's end after every break inside a mark; this
+    // pins what that produces on the reproduction's own shape (the tree, before the strip), so the
+    // leg is known to build the break-last-in-run tree and not the break-last-in-block one.
+    const { doc } = mdastToPM(parse("*a\\\nb* c\n"));
+    const deleted = deleteToEveryMarkedRunEnd(doc);
+    expect(deleted.afterBreaksInRuns).toBe(1);
+    expect(deleted.toBlockEnd).toBe(0);
+    const em = schema.marks.emphasis.create();
+    expect(deleted.doc.toJSON()).toEqual(
+      paragraph(
+        schema.text("a", [em]),
+        schema.node("hard_break", null, undefined, [em]),
+        schema.text(" c"),
+      ).toJSON(),
+    );
+    expectBreakSurvives(deleted.doc, "*a*\\\nc\n");
   });
 });
 
 describe("editor fixed point over the corpus", () => {
   it("asserts one editor fixed point per fixture listed in the index", () => {
     // The count is the index's own length, never a literal (see schema-roundtrip.test.ts).
-    expect(names.length).toBe(Object.keys(index).length);
     expect(names.length).toBeGreaterThan(0);
   });
 
@@ -776,7 +1016,7 @@ describe("editor fixed point over the corpus", () => {
       const out = format(pmToMdast({ doc: typed.doc, frontMatter }));
       expect(out).toBe(canonical);
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toContain("&#x20;");
+      expect(out).not.toMatch(ENTITY);
     });
 
     it(`${name} is an editor fixed point after a letter is typed inside every block`, () => {
@@ -796,7 +1036,7 @@ describe("editor fixed point over the corpus", () => {
       expect(out.split(letter).join("")).toBe(canonical);
       expect(out.length - canonical.length).toBe(typed.typed);
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toContain("&#x20;");
+      expect(out).not.toMatch(ENTITY);
     });
 
     it(`${name} is an editor fixed point unchanged (the absence case)`, () => {
@@ -804,7 +1044,7 @@ describe("editor fixed point over the corpus", () => {
       const out = format(pmToMdast(mdastToPM(parse(read(name)))));
       expect(out).toBe(canonical);
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toContain("&#x20;");
+      expect(out).not.toMatch(ENTITY);
     });
 
     it(`${name} is an editor fixed point after deletion: the continuation after every hard break, then the last character of every block's last run`, () => {
@@ -823,8 +1063,29 @@ describe("editor fixed point over the corpus", () => {
       // Before this task, a block the deletion left ending in a break serialised to a bare
       // trailing backslash that `parse` read as a literal one, and this was not a fixed point.
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toContain("&#x20;");
-      expect(out).not.toContain("&#xA;");
+      expect(out).not.toMatch(ENTITY);
+    });
+
+    it(`${name} is an editor fixed point after deletion to the end of every marked run that holds a hard break (the atom at the mark edge)`, () => {
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+      const deleted = deleteToEveryMarkedRunEnd(doc);
+
+      // Presence: the transaction really changed this document, wherever it had a break inside a
+      // marked run; the test after the loop says which fixtures the ranges reached.
+      expect(deleted.doc.eq(doc)).toBe(deleted.afterBreaksInRuns === 0);
+
+      const root = pmToMdast({ doc: deleted.doc, frontMatter });
+      // Every break the deletion left last in its *run* survives the trip; only the ones it left
+      // last in their *block* are the block's-end clause's, and dropped (1.29), so the count is
+      // the tree's own, never a literal.
+      expect(breaksIn(root)).toBe(breaksNotLastInBlock(deleted.doc));
+      const out = format(root);
+      // Before this task, a break left last in an emphasis, strong or strikethrough run with text
+      // after it serialised to a character reference inside the delimiters — for two of the three
+      // marks a fixed point whose parse held no break at all.
+      expect(format(parse(out))).toBe(out);
+      expect(breaksIn(parse(out))).toBe(breaksIn(root));
+      expect(out).not.toMatch(ENTITY);
     });
 
     it(`${name} is an editor fixed point after a space is typed inside every marked run, at its end (the mark edge)`, () => {
@@ -839,7 +1100,7 @@ describe("editor fixed point over the corpus", () => {
       // Before this task, every space typed inside a mark was written as a character reference
       // (and, for strikethrough, the tildes stopped being a delimiter at all).
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toContain("&#x20;");
+      expect(out).not.toMatch(ENTITY);
       // Only spaces differ: the moved space is now after (or before) the mark, or dropped at a
       // boundary that does not keep one, and nothing else about the bytes — the delimiters, the
       // escapes, the mark's own text — has moved.
@@ -866,6 +1127,26 @@ describe("editor fixed point over the corpus", () => {
     );
     expect(reached.length).toBeGreaterThan(0);
     expect(reached).toContain("hard-break.md");
+  });
+
+  it("at least one fixture in the index holds a hard break inside a marked run the second deletion set deletes after, both with text left after the run and with the run reaching the block's end", () => {
+    // Without this, the marked-run leg could be green because no fixture in the corpus has a
+    // break inside emphasis, strong or strikethrough — the reason `hard-break-in-emphasis.md`
+    // carries the claim, on all three marks. Both shapes the ranges can leave are reached: the
+    // break last in its run with text after it (the finding), and the break last in its block
+    // (the block's-end clause's, the absence case of the new clause).
+    const legs = names.map(
+      (name) => [name, deleteToEveryMarkedRunEnd(mdastToPM(parse(read(name))).doc)] as const,
+    );
+    const reached = legs.filter(([, leg]) => leg.afterBreaksInRuns > 0).map(([name]) => name);
+    expect(reached.length).toBeGreaterThan(0);
+    expect(reached).toContain("hard-break-in-emphasis.md");
+    const withText = legs
+      .filter(([, leg]) => leg.afterBreaksInRuns - leg.toBlockEnd > 0)
+      .map(([name]) => name);
+    expect(withText).toContain("hard-break-in-emphasis.md");
+    const toBlockEnd = legs.filter(([, leg]) => leg.toBlockEnd > 0).map(([name]) => name);
+    expect(toBlockEnd).toContain("hard-break-in-emphasis.md");
   });
 
   it("at least one fixture in the index has a block whose last run the deletion leg deletes from", () => {
