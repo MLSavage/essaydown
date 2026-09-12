@@ -422,18 +422,24 @@ export const nodes: Record<string, NodeSpec> = {
 };
 
 /**
- * Mark specs. **Declaration order is the nesting order**: ProseMirror keeps a mark set sorted by
- * the type's rank in this object, and {@link pmToMdast} wraps the lowest-ranked mark outermost. So
- * a text span carrying `link` and `strong` always comes back as `[**a**](url)`, never
+ * Mark specs. **Declaration order is the nesting order where the runs coincide**: ProseMirror
+ * keeps a mark set sorted by the type's rank in this object, and {@link pmToMdast} wraps the mark
+ * whose run reaches furthest outermost ({@link outermostMark}: `*[b](u) c*` is emphasis around a
+ * link, `[*b* c](u)` a link around emphasis, because that is the only nesting either tree has),
+ * falling back to the lowest rank when two runs cover exactly the same span. So a text span
+ * carrying `link` and `strong` and nothing beside it comes back as `[**a**](url)`, never
  * `**[a](url)**`.
  *
  * That is a real, deliberate normalisation, and the price of the ProseMirror mark model (PRD §4):
  * PM records *which* marks cover a character, not how the source nested them, so the nesting of
  * two marks over the same span cannot survive the trip and has to be chosen. `link` is outermost
  * because that is what CommonMark produces for the common `[**a**](url)`, and `code` is innermost
- * because mdast's `inlineCode` holds literal text and can contain nothing else. No fixture in
- * fixtures/markdown nests two marks, so the corpus round trip is exact; `schema.test.ts` pins the
- * normalisation on hand-written input instead.
+ * because mdast's `inlineCode` holds literal text and can contain nothing else. The one exception
+ * (task 1.35, DECISIONS #review-1-r3 I3) is a span whose edge holds whitespace or a hard break:
+ * `*[b ](u)*` and `[*b* ](u)` are different trees, and the flat span `[link, emphasis]("b ")` is
+ * only ever the first, so the flanking mark is written outermost there — the only nesting in
+ * which the delimiter's neighbour is not the whitespace (CommonMark §6.2). `schema.test.ts` pins
+ * the normalisation on hand-written input.
  */
 export const marks: Record<string, MarkSpec> = {
   link: {
@@ -667,8 +673,9 @@ const CELL_LINE_ENDING = " ";
  *
  * **Ownership rule, stated once for the whole boundary family** (task 1.13 closed the block's two
  * ends only; task 1.25 the line boundaries inside it; task 1.29 the atom at the block's end and
- * the cell; task 1.30 the mark edge; task 1.34 the atom at the mark edge). Whitespace belongs to
- * the boundary it touches, and the boundaries are exactly the ones micromark normalises:
+ * the cell; task 1.30 the mark edge; task 1.34 the atom at the mark edge; task 1.35 the link
+ * edge). Whitespace belongs to the boundary it touches, and the boundaries are exactly the ones
+ * micromark normalises:
  *
  * - **The outer edge of an `emphasis`, `strong` or `delete` run** gives up the ASCII whitespace
  *   inside it: it belongs **outside** the mark (task 1.30, DECISIONS #review-1-r2 H8). A run's
@@ -686,7 +693,18 @@ const CELL_LINE_ENDING = " ";
  *   touches: `em+strong("b ")` before unmarked text hands its space to both. A **link's** text
  *   keeps its whitespace (`[b ](u)` is a link; `link` is not a flanking mark), which is also why
  *   the moved whitespace keeps every mark other than the one whose edge it left, and inline code
- *   stays opaque. **A `hard_break` at either edge of the run leaves the mark the way a
+ *   stays opaque. **The link predicate** (task 1.35, DECISIONS #review-1-r3 I3): the edge scan
+ *   stops at a node carrying `link` when the node beyond it on that side — the next node the
+ *   scan would step to, or the one outside the run where there is none — does not carry the
+ *   same link, because the link's edge then coincides with the run's edge and the delimiter's
+ *   actual neighbour in the bytes is the bracket, not the whitespace: `*a [b ](u)* c` closes on
+ *   `)`, `x *[ b](u)*` opens on `[`, both flanking, and nothing has to move. ProseMirror's flat
+ *   mark set (`[link, emphasis]` on one text node) cannot say which mark is outermost in the
+ *   serialisation, so the predicate is read from the neighbour, the way §6.2 reads it; 1.30's
+ *   clause assumed the flanking mark was outermost and split the link, inventing a second,
+ *   whitespace-only link (`*a [b](u)*[ ](u) c`). When the link continues past the run
+ *   (`[*b* c](u)`: the node beyond carries the same link) the flanking mark *is* the inner one
+ *   and the whitespace moves within the link, as before. **A `hard_break` at either edge of the run leaves the mark the way a
  *   whitespace-only run does** (task 1.34, DECISIONS #review-1-r3 I1): the break gives up the
  *   mark and the edge scan continues past it, so `[em(a), em(break), text(" c")]` becomes
  *   `[em(a), break, text("c")]` — `*a*\` newline `c`, which `parse` reads as `emphasis[a],
@@ -705,14 +723,22 @@ const CELL_LINE_ENDING = " ";
  * - **Every line start** takes the ASCII whitespace after it. A block's first inline node starts a
  *   line (CommonMark §4.8: a paragraph's leading whitespace is stripped); so does the position
  *   after a `hard_break` (§6.7: "leading spaces at the beginning of the next line are ignored");
- *   so does the position after a soft line break (§6.8).
+ *   so does the position after a soft line break (§6.8). **A text node carrying `link` stops the
+ *   block-start trim** (task 1.35, DECISIONS #review-1-r3 I4): the block's first byte is then the
+ *   link's `[`, and `[ b](u)` is a link whose text begins with a space, which §4.8 does not
+ *   touch. The two other line starts are not stopped: a continuation line's leading whitespace
+ *   is stripped at the block level, before inline parsing sees the link, so `[a\` newline `  b](u)`
+ *   parses to `[a\` newline `b](u)` inside the link as it does outside one.
  * - **Every line end** gives up the ASCII whitespace before it (§6.8, the other half of the soft
  *   break's rule). A **hard break is the exception**: it owns the whitespace *after* it and not
  *   the whitespace before it, because `foo \` is exactly how the serializer spells a break after a
  *   text run ending in a space, and that parses back to the same run.
  * - **The block's end** takes the trailing whitespace of its last inline node **and drops a
  *   trailing `hard_break`**, repeatedly, until the last node is neither a whitespace-only run nor
- *   a break. A break with nothing after it is not a line break: the serializer spells it as a
+ *   a break — **or is a text node carrying `link`**, which stops the loop with its whitespace kept
+ *   (task 1.35, I4): the block's end is then the link's `)`, and `see [the essay ](u)` is a link
+ *   whose text ends in a space, bytes micromark keeps and the strip used to rewrite. A break with
+ *   nothing after it is not a line break: the serializer spells it as a
  *   backslash before the block's own line ending, and §6.7 reads a backslash at a paragraph's end
  *   as a literal backslash (a heading's is worse — `H\` on its own line reparses as a paragraph,
  *   the block type lost). So it is dropped the way a run trimmed to nothing is dropped, and the
@@ -735,7 +761,9 @@ const CELL_LINE_ENDING = " ";
  * run is opaque: it owns the whitespace inside it, stops the strip (the mark-edge scan included:
  * a marked run that begins or ends at an image, a raw atom or an inline-code run keeps what is
  * inside; a `hard_break` at a run's edge is the one atom that scan does not stop at — it leaves
- * the mark, as the mark-edge clause says), and (`hard_break` aside) puts the scan mid-line. A run
+ * the mark, as the mark-edge clause says, unless it carries a link whose edge is the run's, when
+ * the link predicate stops the scan before the atom clause is reached), and (`hard_break` aside)
+ * puts the scan mid-line. A run
  * trimmed to nothing is dropped rather than kept as a zero-length text node, which ProseMirror
  * rejects; dropping it leaves the line-boundary state as it found it,
  * because emitting nothing neither starts nor ends a line. The block's *start* is therefore the
@@ -759,7 +787,11 @@ function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string)
       continue;
     }
     let text = (node.text as string).replace(LINE_ENDING_RUN, lineEnding);
-    if (atLineStart) text = text.replace(LEADING_WHITESPACE, "");
+    // The block's start is the first node that survives; a link there keeps its leading
+    // whitespace (the block's first byte is its `[`), a link after a line ending does not.
+    const atBlockStart = out.length === 0;
+    if (atLineStart && !(atBlockStart && isLinked(node)))
+      text = text.replace(LEADING_WHITESPACE, "");
     if (text === "") continue;
     atLineStart = text.endsWith("\n");
     out.push(text === node.text ? node : schema.text(text, node.marks));
@@ -774,6 +806,7 @@ function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string)
       continue;
     }
     if (!last.isText || schema.marks.inline_code.isInSet(last.marks) !== undefined) break;
+    if (isLinked(last)) break;
     const text = (last.text as string).replace(TRAILING_WHITESPACE, "");
     if (text === "") {
       out.pop();
@@ -783,6 +816,37 @@ function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string)
     break;
   }
   return out;
+}
+
+/** A node carrying the `link` mark: its edge whitespace is the link's, inside the brackets. */
+function isLinked(node: PMNode): boolean {
+  return schema.marks.link.isInSet(node.marks) !== undefined;
+}
+
+/**
+ * The link predicate of the mark-edge clause (task 1.35): the scan stops at `run[k]` when it
+ * carries a link whose own run — the maximal stretch of nodes carrying the same link, followed
+ * through the run and into `before` and `after`, the nodes outside it on each side — lies inside
+ * the flanking run, because the link is then the inner mark and the delimiter's neighbour in the
+ * bytes is the link's bracket. A link that continues past the flanking run on either side is the
+ * outer mark ({@link outermostMark} nests by the same extents), and the whitespace moves within
+ * it as for any other inner text. `isInSet` compares marks by `eq`, so a link is "the same" when
+ * its `url` and `title` are.
+ */
+function linkEdgeStops(
+  run: readonly PMNode[],
+  k: number,
+  before: PMNode | undefined,
+  after: PMNode | undefined,
+): boolean {
+  const link = schema.marks.link.isInSet(run[k].marks);
+  if (link === undefined) return false;
+  let a = k;
+  while (a > 0 && link.isInSet(run[a - 1].marks)) a -= 1;
+  if (a === 0 && before !== undefined && link.isInSet(before.marks)) return false;
+  let b = k;
+  while (b < run.length - 1 && link.isInSet(run[b + 1].marks)) b += 1;
+  return !(b === run.length - 1 && after !== undefined && link.isInSet(after.marks));
 }
 
 /**
@@ -812,8 +876,8 @@ function isStrippable(node: PMNode): boolean {
  * {@link inlineToMdast}). Its leading edge is scanned from `i` forward and its trailing edge from
  * `j - 1` back, each scan stepping over whitespace-only runs and `hard_break`s (which lose the
  * mark whole), then splitting the first run with content into its edge whitespace, unmarked, and
- * the rest, and stopping there — or at any other atom or an inline-code run, which is opaque. The
- * whole list is then
+ * the rest, and stopping there — or at any other atom or an inline-code run, which is opaque, or
+ * at a link whose edge is the run's ({@link linkEdgeStops}). The whole list is then
  * rejoined the way ProseMirror joins it (`Fragment.fromArray`: adjacent text with the same marks
  * becomes one node), so a moved space and its unmarked neighbour are one run for the line and
  * block rules that follow. First, middle and last positions of a run in the block are cut by the
@@ -830,7 +894,7 @@ function unmarkEdgeWhitespace(nodes: readonly PMNode[]): PMNode[] {
       }
       let j = i + 1;
       while (j < out.length && mark.isInSet(out[j].marks) !== undefined) j += 1;
-      const run = giveUpEdges(out.slice(i, j), mark);
+      const run = giveUpEdges(out.slice(i, j), mark, out[i - 1], out[j]);
       out = [...out.slice(0, i), ...run, ...out.slice(j)];
       i += run.length;
     }
@@ -838,12 +902,23 @@ function unmarkEdgeWhitespace(nodes: readonly PMNode[]): PMNode[] {
   return [...Fragment.fromArray(out).content];
 }
 
-/** One run of `mark`, its edge whitespace given up on both sides (see {@link unmarkEdgeWhitespace}). */
-function giveUpEdges(run: readonly PMNode[], mark: MarkType): PMNode[] {
+/**
+ * One run of `mark`, its edge whitespace given up on both sides (see {@link unmarkEdgeWhitespace}).
+ * `before` and `after` are the nodes outside the run on each side (`undefined` at the block's
+ * ends), which the link predicate ({@link linkEdgeStops}) reads to tell a link inside the run
+ * from one that continues past it.
+ */
+function giveUpEdges(
+  run: readonly PMNode[],
+  mark: MarkType,
+  before: PMNode | undefined,
+  after: PMNode | undefined,
+): PMNode[] {
   const out = [...run];
   const without = (node: PMNode): readonly PMMark[] => mark.removeFromSet(node.marks);
   for (let k = 0; k < out.length; k += 1) {
     const node = out[k];
+    if (linkEdgeStops(out, k, before, after)) break;
     if (node.type === schema.nodes.hard_break) {
       out[k] = node.mark(without(node));
       continue;
@@ -866,6 +941,7 @@ function giveUpEdges(run: readonly PMNode[], mark: MarkType): PMNode[] {
   }
   for (let k = out.length - 1; k >= 0; k -= 1) {
     const node = out[k];
+    if (linkEdgeStops(out, k, before, after)) break;
     if (node.type === schema.nodes.hard_break) {
       out[k] = node.mark(without(node));
       continue;
@@ -963,25 +1039,67 @@ function inlineToPM(children: readonly PhrasingContent[], carried: readonly PMMa
  * `raw_inline`) are atoms with a width of their own; so every run holds at least one node and no
  * item can sit on a run boundary. A run is `[i, j)`: `i` is the first node carrying the mark and
  * `j` the first node after it that does not, so the first, middle and last runs of a list are cut
- * by the same rule (`schema.test.ts` asserts a mark in each of the three positions).
+ * by the same rule (`schema.test.ts` asserts a mark in each of the three positions). Which of a
+ * node's marks is wrapped first is {@link outermostMark}'s.
  */
 function inlineToMdast(nodes: readonly PMNode[]): PhrasingContent[] {
   const out: PhrasingContent[] = [];
   let i = 0;
   while (i < nodes.length) {
-    const outer = nodes[i].marks[0];
+    const outer = outermostMark(nodes, i);
     if (outer === undefined) {
       out.push(leafToMdast(nodes[i]));
       i += 1;
       continue;
     }
-    let j = i + 1;
-    while (j < nodes.length && outer.isInSet(nodes[j].marks)) j += 1;
+    const j = runEnd(nodes, i, outer);
     const inner = nodes.slice(i, j).map((node) => node.mark(outer.removeFromSet(node.marks)));
     out.push(wrapMark(outer, inner));
     i = j;
   }
   return out;
+}
+
+/** The end of `mark`'s maximal run starting at `i`: the first index after it that does not carry it. */
+function runEnd(nodes: readonly PMNode[], i: number, mark: PMMark): number {
+  let j = i + 1;
+  while (j < nodes.length && mark.isInSet(nodes[j].marks)) j += 1;
+  return j;
+}
+
+/** Whether the run `[i, j)` begins or ends with ASCII whitespace or a hard break — an edge that only a link's bracket can shield from CommonMark §6.2's flanking rules. */
+function runHasEdgeWhitespace(nodes: readonly PMNode[], i: number, j: number): boolean {
+  const edge = (node: PMNode, pattern: RegExp): boolean =>
+    node.type === schema.nodes.hard_break || (node.isText && pattern.test(node.text as string));
+  return edge(nodes[i], LEADING_WHITESPACE) || edge(nodes[j - 1], TRAILING_WHITESPACE);
+}
+
+/**
+ * The mark {@link inlineToMdast} wraps outermost at `i` (see {@link marks} for the rule): the one
+ * whose run from `i` reaches furthest, ties broken by rank — except that a `link` tied with a
+ * flanking mark over a run with edge whitespace yields to it (task 1.35), and `inline_code`,
+ * which can hold nothing, is never chosen while another mark is on the node.
+ */
+function outermostMark(nodes: readonly PMNode[], i: number): PMMark | undefined {
+  let best: PMMark | undefined;
+  let bestEnd = i;
+  for (const mark of nodes[i].marks) {
+    if (mark.type === schema.marks.inline_code && nodes[i].marks.length > 1) continue;
+    const end = runEnd(nodes, i, mark);
+    if (best === undefined || end > bestEnd) {
+      best = mark;
+      bestEnd = end;
+      continue;
+    }
+    if (
+      end === bestEnd &&
+      best.type === schema.marks.link &&
+      FLANKING_MARKS.includes(mark.type) &&
+      runHasEdgeWhitespace(nodes, i, end)
+    )
+      best = mark;
+  }
+  return best;
 }
 
 function wrapMark(mark: PMMark, inner: readonly PMNode[]): PhrasingContent {

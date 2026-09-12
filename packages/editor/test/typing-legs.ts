@@ -20,6 +20,10 @@ import { schema } from "../src/schema.js";
  * Task 1.34 (DECISIONS #review-1-r3 I1) adds the deletion leg's second range set,
  * {@link deleteToEveryMarkedRunEnd}: the first set deletes to the *block's* end after every break,
  * so the break was always the block's last node and never a run's last node with text after it.
+ * Task 1.35 (DECISIONS #review-1-r3 I3/I4) adds {@link typeSpaceAtEveryLinkEnd}, the **link
+ * edge**: a space typed at the end of every link's text, inside the link, so that the link's edge
+ * whitespace meets whatever boundary the link's own edge is at — a flanking mark's, the block's,
+ * or none.
  */
 
 /** {@link typeSpaceAtEveryBlockEnd}'s result: the changed document, and how many blocks it typed in. */
@@ -289,4 +293,39 @@ export function deleteToEveryMarkedRunEnd(doc: PMNode): MarkedRunDeletionLeg {
   let tr = EditorState.create({ doc }).tr;
   for (const [from, to] of [...ranges].reverse()) tr = tr.delete(from, to);
   return { doc: tr.doc, afterBreaksInRuns: ranges.length, toBlockEnd };
+}
+
+/**
+ * {@link typeSpaceAtEveryLinkEnd}'s result: the changed document and how many link-marked text
+ * nodes it typed a space at the end of.
+ */
+export interface LinkEdgeLeg {
+  doc: PMNode;
+  links: number;
+}
+
+/**
+ * A ProseMirror transaction shaped like typing a space with the caret *inside a link*, at the end
+ * of its text — the shape task 1.35 repairs (DECISIONS #review-1-r3 I3/I4: `*a [b ](u)* c`, a
+ * link whose edge whitespace is at a flanking mark's edge, and `see [the essay ](u)`, one whose
+ * edge is the block's): at the end of every text node carrying `link`, in a paragraph, heading or
+ * table cell, one space is inserted by `insertText` with **that node's own marks set as the
+ * transaction's stored marks first** (the marks `insertText` reads before it asks the position),
+ * because `link` is not inclusive — at the end of a link's text `$pos.marks()` drops it, and a
+ * space inserted without marks would land after the link, where the mark-edge leg
+ * ({@link typeSpaceInsideEveryMarkedRun}) already types. Each step clears the stored marks, so
+ * they are set before every insertion; the insertions are applied back-to-front so that each one
+ * leaves the positions still to come unmoved.
+ */
+export function typeSpaceAtEveryLinkEnd(doc: PMNode): LinkEdgeLeg {
+  const ends: [number, PMNode][] = [];
+  doc.descendants((node, pos, parent) => {
+    if (!node.isText || parent === null || !INLINE_CONTENT.has(parent.type)) return true;
+    if (schema.marks.link.isInSet(node.marks) !== undefined) ends.push([pos + node.nodeSize, node]);
+    return true;
+  });
+  let tr = EditorState.create({ doc }).tr;
+  for (const [pos, node] of [...ends].reverse())
+    tr = tr.setStoredMarks([...node.marks]).insertText(" ", pos);
+  return { doc: tr.doc, links: ends.length };
 }

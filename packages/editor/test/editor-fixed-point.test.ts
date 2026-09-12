@@ -12,6 +12,7 @@ import {
   letterFor,
   typeInsideEveryBlock,
   typeSpaceAtEveryBlockEnd,
+  typeSpaceAtEveryLinkEnd,
   typeSpaceInsideEveryMarkedRun,
 } from "./typing-legs.js";
 
@@ -71,6 +72,21 @@ import {
  * break inside a mark, where 1.29's ranges went to the block's end and so never built this tree;
  * and every leg's assertion of absence is one regex over the whole entity family
  * ({@link ENTITY}) rather than the one literal each finding produced.
+ *
+ * Task 1.35 (DECISIONS #review-1-r3 I3, I4) adds the boundary at which link-marked text is not
+ * the strip's to move: the link's own edge. 1.30's clause split a link-marked run at a flanking
+ * mark's edge and the split-off space kept the `link`, so `*a [b ](u)* c` came back with a
+ * second, whitespace-only link (I3, a regression), and the block's two trims dropped a link's
+ * edge whitespace where the link was the block's first or last node (I4, since 1.13). The sixth
+ * suite is one guard per position and mark for a link with edge whitespace at a flanking run's
+ * edge (alone in the run; the run first, middle and last in the block; in a cell), the bare link
+ * first and last in a paragraph, a heading and a cell, and the clauses read from the diff — the
+ * link that continues past the run (whose space still moves, within the link), the break at the
+ * link's edge, the block-start stop's absence case after a break, and the nesting `pmToMdast`
+ * now decides from the runs' extents, because `*[b ](u)*` is its own bytes only with the
+ * emphasis written outside the link. Each asserts the bytes, the fixed point, and that the parsed
+ * output holds exactly one `link` (the defect's held two). The corpus gains a leg titled for the
+ * **link edge**, which types a space inside every link, at the end of its text.
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -998,6 +1014,227 @@ describe("the atom at the mark edge (task 1.34): one guard per position of a har
   });
 });
 
+/** Every `link` node under `root`, wherever it is. */
+function linksIn(root: Root): number {
+  const walk = (node: { type: string; children?: unknown[] }): number =>
+    (node.type === "link" ? 1 : 0) +
+    ((node.children ?? []) as (typeof node)[]).reduce((sum, child) => sum + walk(child), 0);
+  return walk(root);
+}
+
+/**
+ * The assertions every guard of the link-edge suite makes (task 1.35): {@link expectBytes}'s
+ * three, and that the parsed output holds exactly one `link` — the defect's output held two, the
+ * second whitespace-only, and a fixed point alone accepted it.
+ */
+function expectOneLink(root: Root, bytes: string, label?: string): void {
+  expectBytes(root, bytes, label);
+  expect(linksIn(parse(format(root))), label).toBe(1);
+}
+
+describe("the link edge (task 1.35): one guard per position of a link's edge whitespace at a flanking run's edge or a block's, per flanking mark", () => {
+  const link = schema.marks.link.create({ url: "u", title: null });
+  for (const [name, mark, d] of FLANKING) {
+    it(`${name}, the link alone in the run, its trailing space at the run's trailing edge: \`${d}[b ](u)${d}\` is its own bytes, one link`, () => {
+      // The delimiter's neighbour is the link's `)`, which is right-flanking whatever the link's
+      // text ends in; before this task the space left the mark and kept the link, and the
+      // serializer wrote a second link around it.
+      const root = mdastOf(paragraph(schema.text("b ", [link, mark])));
+      expect(root.children).toEqual([
+        {
+          type: "paragraph",
+          children: [
+            {
+              type: name === "strikethrough" ? "delete" : name,
+              children: [
+                { type: "link", url: "u", title: null, children: [{ type: "text", value: "b " }] },
+              ],
+            },
+          ],
+        },
+      ]);
+      expectOneLink(root, `${d}[b ](u)${d}\n`);
+    });
+
+    it(`${name}, the link alone in the run, its leading space at the run's leading edge: \`${d}[ b](u)${d}\` is its own bytes, one link`, () => {
+      const root = mdastOf(paragraph(schema.text(" b", [link, mark])));
+      expectOneLink(root, `${d}[ b](u)${d}\n`);
+    });
+
+    it(`${name}, a link with a trailing space last in the run, the run first, middle and last in the block: \`${d}a [b ](u)${d} c\``, () => {
+      const first = mdastOf(
+        paragraph(schema.text("a ", [mark]), schema.text("b ", [link, mark]), schema.text(" c")),
+      );
+      expectOneLink(first, `${d}a [b ](u)${d} c\n`, "first");
+
+      const middle = mdastOf(
+        paragraph(
+          schema.text("x "),
+          schema.text("a ", [mark]),
+          schema.text("b ", [link, mark]),
+          schema.text(" c"),
+        ),
+      );
+      expectOneLink(middle, `x ${d}a [b ](u)${d} c\n`, "middle");
+
+      const last = mdastOf(
+        paragraph(schema.text("x "), schema.text("a ", [mark]), schema.text("b ", [link, mark])),
+      );
+      expectOneLink(last, `x ${d}a [b ](u)${d}\n`, "last");
+    });
+
+    it(`${name}, in a table cell: \`| ${d}[b ](u)${d} |\` keeps the link's space at the cell's end too`, () => {
+      const root = mdastOf(cell(schema.text("b ", [link, mark])));
+      expectOneLink(root, `| ${d}[b ](u)${d} |\n| ${"-".repeat(d.length * 2 + 7)} |\n`);
+    });
+  }
+
+  it("a bare link with a trailing space last in a paragraph, a heading and a cell keeps it: the block's end is the link's `)`", () => {
+    expectOneLink(
+      mdastOf(paragraph(schema.text("see "), schema.text("b ", [link]))),
+      "see [b ](u)\n",
+      "paragraph",
+    );
+    expectOneLink(
+      mdastOf(heading(schema.text("see "), schema.text("b ", [link]))),
+      "## see [b ](u)\n",
+      "heading",
+    );
+    expectOneLink(
+      mdastOf(cell(schema.text("see "), schema.text("b ", [link]))),
+      "| see [b ](u) |\n| ----------- |\n",
+      "cell",
+    );
+  });
+
+  it("a bare link with a leading space first in a paragraph, a heading and a cell keeps it: the block's first byte is the link's `[`", () => {
+    expectOneLink(
+      mdastOf(paragraph(schema.text(" b", [link]), schema.text(" c"))),
+      "[ b](u) c\n",
+      "paragraph",
+    );
+    expectOneLink(
+      mdastOf(heading(schema.text(" b", [link]), schema.text(" c"))),
+      "## [ b](u) c\n",
+      "heading",
+    );
+    expectOneLink(
+      mdastOf(cell(schema.text(" b", [link]), schema.text(" c"))),
+      "| [ b](u) c |\n| --------- |\n",
+      "cell",
+    );
+  });
+
+  it("clause: a link that continues past the run on the far side is the outer mark, and the flanking mark's edge space still moves — within the link", () => {
+    // `[*b* c](u)` (the near side, 1.30's guard above) is unchanged; these are the other side:
+    // the link starts before the run and ends with it, so the run's closing delimiter is inside
+    // the link and its neighbour has to be `b`, not the space.
+    const em = schema.marks.emphasis.create();
+    const trailing = mdastOf(paragraph(schema.text("a ", [link]), schema.text("b ", [link, em])));
+    expect(trailing.children).toEqual([
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "link",
+            url: "u",
+            title: null,
+            children: [
+              { type: "text", value: "a " },
+              { type: "emphasis", children: [{ type: "text", value: "b" }] },
+              { type: "text", value: " " },
+            ],
+          },
+        ],
+      },
+    ]);
+    expectOneLink(trailing, "[a *b* ](u)\n", "trailing");
+
+    const leading = mdastOf(paragraph(schema.text(" b", [link, em]), schema.text(" a", [link])));
+    expectOneLink(leading, "[ *b* a](u)\n", "leading");
+  });
+
+  it("clause: the block's end pops an unlinked whitespace-only run and then stops at the link", () => {
+    expectOneLink(mdastOf(paragraph(schema.text("b ", [link]), schema.text(" "))), "[b ](u)\n");
+  });
+
+  it("clause: the block-start stop is the block's start only — after a hard break inside a link the continuation line's leading whitespace is still dropped (the absence case)", () => {
+    // CommonMark strips a continuation line's leading whitespace at the block level, before
+    // inline parsing sees the link, so `[a\` newline `  b](u)` is `[a\` newline `b](u)` and a
+    // link that kept the spaces would not be a fixed point.
+    const root = mdastOf(
+      paragraph(
+        schema.text("a", [link]),
+        schema.node("hard_break", null, undefined, [link]),
+        schema.text("  b", [link]),
+      ),
+    );
+    expectOneLink(root, "[a\\\nb](u)\n");
+    expect(breaksIn(parse(format(root)))).toBe(1);
+  });
+
+  it("clause: a hard break at the link's edge inside the run stays with the link (the predicate runs before the atom clause)", () => {
+    // 1.34's clause moves a break at a flanking run's edge out of the mark; a break that is the
+    // link's first node stays, because `*[\` newline `b](u)*` is a link inside emphasis and its
+    // own bytes, whereas the break moved out would nest the link inside the emphasis's line.
+    const em = schema.marks.emphasis.create();
+    const root = mdastOf(
+      paragraph(
+        schema.node("hard_break", null, undefined, [link, em]),
+        schema.text("b", [link, em]),
+      ),
+    );
+    expectOneLink(root, "*[\\\nb](u)*\n");
+    expect(breaksIn(parse(format(root)))).toBe(1);
+  });
+
+  it("clause: a whitespace-only link at the run's edge keeps its mark and its space: `*[ ](u)b*`", () => {
+    // 1.30's whitespace-only case strips the mark from a run that is only whitespace; a link
+    // that is only whitespace is still a link, and the trim used to drop it whole.
+    const em = schema.marks.emphasis.create();
+    const root = mdastOf(paragraph(schema.text(" ", [link, em]), schema.text("b", [em])));
+    expectOneLink(root, "*[ ](u)b*\n");
+  });
+
+  it("clause (nesting): the mark whose run reaches furthest is outermost, and a coinciding span without edge whitespace keeps the rank order (the absence case)", () => {
+    const em = schema.marks.emphasis.create();
+    // Emphasis around the link: the emphasis run goes on past the link's.
+    expectOneLink(
+      mdastOf(paragraph(schema.text("b", [link, em]), schema.text(" c", [em]))),
+      "*[b](u) c*\n",
+      "emphasis outer",
+    );
+    // The link around emphasis: the link's run goes on past the emphasis's.
+    expectOneLink(
+      mdastOf(paragraph(schema.text("b", [link, em]), schema.text(" c", [link]))),
+      "[*b* c](u)\n",
+      "link outer",
+    );
+    // The same span, no edge whitespace: the rank order's normalisation (`marks`'s doc comment).
+    expectOneLink(mdastOf(paragraph(schema.text("b", [link, em]))), "[*b*](u)\n", "tie");
+  });
+
+  it("clause (nesting): inline code is never the outer mark while another mark is on the node", () => {
+    const code = schema.marks.inline_code.create();
+    const root = mdastOf(paragraph(schema.text("a", [link, code]), schema.text("b", [code])));
+    expectOneLink(root, "[`a`](u)`b`\n");
+  });
+
+  it("the leg's seed is Claude's shape: a space typed at the end of `b` in `*a [b](u)* c` with the link's marks lands inside the link", () => {
+    // The corpus leg below types with the link's own marks stored; this pins what that produces
+    // on the reproduction itself (the tree, before the strip), so the leg is known to build the
+    // link-edge tree and not a space after the link.
+    const { doc } = mdastToPM(parse("*a [b](u)* c\n"));
+    const typed = typeSpaceAtEveryLinkEnd(doc);
+    expect(typed.links).toBe(1);
+    const em = schema.marks.emphasis.create();
+    expect(typed.doc.toJSON()).toEqual(
+      paragraph(schema.text("a ", [em]), schema.text("b ", [link, em]), schema.text(" c")).toJSON(),
+    );
+    expectOneLink(pmToMdast({ doc: typed.doc, frontMatter: null }), "*a [b ](u)* c\n");
+  });
+});
+
 describe("editor fixed point over the corpus", () => {
   it("asserts one editor fixed point per fixture listed in the index", () => {
     // The count is the index's own length, never a literal (see schema-roundtrip.test.ts).
@@ -1108,7 +1345,35 @@ describe("editor fixed point over the corpus", () => {
       expect(out.length).toBeGreaterThanOrEqual(canonical.length);
       expect(out.length - canonical.length).toBeLessThanOrEqual(typed.runs);
     });
+
+    it(`${name} is an editor fixed point after a space is typed at the end of every link's text, inside the link (the link edge)`, () => {
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+      const typed = typeSpaceAtEveryLinkEnd(doc);
+
+      // Presence: the transaction really changed this document, wherever it has a link.
+      expect(typed.doc.eq(doc)).toBe(typed.links === 0);
+
+      const out = format(pmToMdast({ doc: typed.doc, frontMatter }));
+      // Before this task, a link whose edge was a flanking run's edge came back split in two
+      // (the space's own link invented after the mark), and one whose edge was the block's lost
+      // the space. The fixed point alone accepts both, so the link count and the entity family
+      // are asserted beside it.
+      expect(format(parse(out))).toBe(out);
+      expect(linksIn(parse(out))).toBe(linksIn(parse(read(name))));
+      expect(out).not.toMatch(ENTITY);
+      for (const value of textValues(parse(out))) expect(value).not.toMatch(ENTITY);
+    });
   }
+
+  it("at least one fixture in the index holds a link the link-edge leg types into", () => {
+    // Without this, the link-edge leg could be green because no fixture in the corpus carries a
+    // link for it to type inside — the reason `link-in-emphasis.md` carries the claim.
+    const reached = names.filter(
+      (name) => typeSpaceAtEveryLinkEnd(mdastToPM(parse(read(name))).doc).links > 0,
+    );
+    expect(reached.length).toBeGreaterThan(0);
+    expect(reached).toContain("link-in-emphasis.md");
+  });
 
   it("at least one fixture in the index holds a marked run the mark-edge leg types into", () => {
     // Without this, the mark-edge leg could be green because no fixture in the corpus carries
