@@ -97,6 +97,16 @@ import {
  * confirmations are in `list-spread.test.ts`; the corpus gains a leg titled for the **list
  * split**, which splits every list item's first paragraph at its end and, separately, replaces
  * its end with the two-paragraph slice a two-line plain-text paste builds.
+ *
+ * Task 1.40 (DECISIONS #review-1-r4 J1, #026) narrows the entity assertion from the bytes to the
+ * rule. The serializer half of the flanking property encodes the character outside a mark when the
+ * mark's edge is punctuation — `x *a.*&#x62;`, and since 1.40 `~~a.~~&#x62;` — and the fixture
+ * `strikethrough-punctuation.md` carries that tree into every corpus leg, so "no member of the
+ * family anywhere in `out`" would have gone red on the serializer's correct output. Every leg and
+ * guard that asserted absence over the bytes asserts {@link expectNoForbiddenEntity} instead: no
+ * text node of the parse holds a reference, and none in the bytes decodes to whitespace; the
+ * mark-edge leg's "only spaces differ" compares decoded texts. One guard beside the presence case
+ * pins the distinction with the emphasis twin.
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -109,8 +119,41 @@ const names = Object.keys(index).sort();
  * unparsable whitespace and the character after a break as (a space, a line ending, a letter, a
  * no-break space have each appeared), matched as a pattern so that a grep for any one member
  * across the test tree turns up only assertions of absence.
+ *
+ * Since task 1.40 (DECISIONS #026) the family is forbidden by rule, not by presence in the bytes
+ * ({@link expectNoForbiddenEntity}). Forbidden: a reference the parsed text keeps — `\&#xA;`,
+ * the escaped line ending 1.34's break wrote, which reparses to itself as literal text — and one
+ * that decodes to whitespace — `&#x20;`, the space or line ending the strip owns (1.29, 1.30), which
+ * the parser decodes back into the text so only its decoded value tells. The serializer's correct
+ * output: a reference that decodes to the mark's neighbour outside it — `&#x62;` in `x *a.*&#x62;`
+ * (the built-in handlers) and `~~a.~~&#x62;` (1.40's `delete` handler) — a fixed point whose
+ * parsed text holds the plain letter; it is what makes the delimiter valid beside punctuation
+ * inside the mark, and the corpus holds it since `strikethrough-punctuation.md`.
  */
 const ENTITY = /&#x?[0-9a-fA-F]+;/;
+
+/** Every member of {@link ENTITY} in a string, with its radix and digits. */
+const ENTITIES = /&#(x?)([0-9a-fA-F]+);/g;
+
+/** `bytes` with every numeric character reference replaced by the character it names. */
+function decodeReferences(bytes: string): string {
+  return bytes.replace(ENTITIES, (reference: string, hex: string, digits: string) => {
+    const codePoint = parseInt(digits, hex ? 16 : 10);
+    return Number.isNaN(codePoint) ? reference : String.fromCodePoint(codePoint);
+  });
+}
+
+/**
+ * The entity rule (DECISIONS #026): no text node of `parse(out)` holds a member of the family, and
+ * no member of it in `out` decodes to whitespace. A member that decodes to a mark's neighbour
+ * passes — see {@link ENTITY}.
+ */
+function expectNoForbiddenEntity(out: string, label?: string): void {
+  for (const value of textValues(parse(out))) expect(value, label).not.toMatch(ENTITY);
+  for (const [reference] of out.matchAll(ENTITIES)) {
+    expect(decodeReferences(reference), label).not.toMatch(/\s/u);
+  }
+}
 
 function read(name: string): string {
   return readFileSync(`${FIXTURES}/${name}`, "utf8");
@@ -160,7 +203,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       { type: "paragraph", children: [{ type: "text", value: "hey" }] },
     ]);
     expect(format(root)).toBe("hey\n");
-    expect(format(root)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(root));
   });
 
   it("boundary 3 (before a hard break): the whitespace a hard break does not own is kept", () => {
@@ -182,7 +225,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       },
     ]);
     expect(format(root)).toBe("one \\\ntwo\n");
-    expect(format(root)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(root));
     expect(format(parse(format(root)))).toBe(format(root));
   });
 
@@ -204,7 +247,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       },
     ]);
     expect(format(root)).toBe("one \\\ntwo\n");
-    expect(format(root)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(root));
   });
 
   it("boundary 5 (before a soft line break): the space at the end of a wrapped line is dropped, first, middle and last", () => {
@@ -214,7 +257,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
     for (const [label, typed] of SOFT_BREAK_POSITIONS_BEFORE) {
       const root = mdastOf(paragraph(schema.text(typed)));
       expect(format(root), label).toBe(WRAPPED);
-      expect(format(root), label).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(format(root), label);
       expect(format(parse(format(root))), label).toBe(WRAPPED);
     }
   });
@@ -223,7 +266,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
     for (const [label, typed] of SOFT_BREAK_POSITIONS_AFTER) {
       const root = mdastOf(paragraph(schema.text(typed)));
       expect(format(root), label).toBe(WRAPPED);
-      expect(format(root), label).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(format(root), label);
       expect(format(parse(format(root))), label).toBe(WRAPPED);
     }
   });
@@ -237,7 +280,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       { type: "paragraph", children: [{ type: "text", value: "one\ntwo" }] },
     ]);
     expect(format(root)).toBe("one\ntwo\n");
-    expect(format(root)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(root));
     // The block was not split: one paragraph before, one paragraph after the round trip.
     expect(parse(format(root)).children).toHaveLength(1);
     expect(format(parse(format(root)))).toBe(format(root));
@@ -292,7 +335,7 @@ describe("the whitespace boundaries micromark normalises, one guard per boundary
       root.children[0].children[row].children.map((c) => c.children);
     expect(cells(0)).toEqual([[{ type: "text", value: "a" }], [{ type: "text", value: "b" }]]);
     expect(cells(1)).toEqual([[{ type: "text", value: "c" }], [{ type: "text", value: "d" }]]);
-    expect(format(root)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(root));
   });
 
   it("a heading's ends are stripped too (the third block the strip runs on)", () => {
@@ -370,7 +413,7 @@ function textValues(root: Root): string[] {
 function expectBytes(root: Root, bytes: string, label?: string): void {
   expect(format(root), label).toBe(bytes);
   expect(format(parse(format(root))), label).toBe(format(root));
-  expect(format(root), label).not.toMatch(ENTITY);
+  expectNoForbiddenEntity(format(root), label);
 }
 
 describe("the block's end and an atom (task 1.29): one guard per position, on paragraph and on heading", () => {
@@ -509,7 +552,7 @@ describe("the block's end and an atom (task 1.29): one guard per position, on pa
       },
     ]);
     expect(format(root)).toBe("| a b |\n| --- |\n");
-    expect(format(root)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(root));
     expect(format(parse(format(root)))).toBe(format(root));
     // Two line endings in one run are still one space: the run collapses, whatever it holds.
     expect(format(mdastOf(cell(schema.text("a\n\nb"))))).toBe("| a b |\n| --- |\n");
@@ -530,7 +573,7 @@ describe("the block's end and an atom (task 1.29): one guard per position, on pa
       },
     ]);
     expect(format(root)).toBe("| a |\n| - |\n");
-    expect(format(root)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(root));
     expect(format(parse(format(root)))).toBe(format(root));
     // …and a break last in a cell is dropped like any block's (position 1 on the third block).
     const withBreak = mdastOf(cell(schema.text("a"), schema.node("hard_break")));
@@ -763,7 +806,7 @@ describe("the mark edge (task 1.30): one guard per edge of CommonMark §6.2's fl
       },
     ]);
     expect(format(parse(format(withCode)))).toBe(format(withCode));
-    expect(format(withCode)).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(format(withCode));
     // An image first in the run: the space after it is inside the run, not at its edge.
     const image = schema.node("image", { url: "a.png", alt: "", title: null }, undefined, [em]);
     const withImage = mdastOf(paragraph(image, schema.text(" b", [em]), schema.text(" c")));
@@ -843,7 +886,7 @@ describe("the mark edge (task 1.30): one guard per edge of CommonMark §6.2's fl
     );
     const out = format(pmToMdast({ doc: typed.doc, frontMatter: null }));
     expect(out).toBe("a *b*  c\n");
-    expect(out).not.toMatch(ENTITY);
+    expectNoForbiddenEntity(out);
   });
 });
 
@@ -859,7 +902,7 @@ function expectBreakSurvives(doc: PMNode, bytes: string, label?: string): void {
   expect(format(parse(out)), label).toBe(out);
   expect(breaksIn(parse(out)), label).toBe(hardBreaksIn(doc));
   expect(hardBreaksIn(doc), label).toBeGreaterThan(0);
-  for (const value of textValues(parse(out))) expect(value, label).not.toMatch(ENTITY);
+  expectNoForbiddenEntity(out, label);
 }
 
 /** A depth-1 heading: the serializer writes one that holds a break in setext form. */
@@ -1277,7 +1320,7 @@ describe("editor fixed point over the corpus", () => {
       const out = format(pmToMdast({ doc: typed.doc, frontMatter }));
       expect(out).toBe(canonical);
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(out);
     });
 
     it(`${name} is an editor fixed point after a letter is typed inside every block`, () => {
@@ -1297,7 +1340,7 @@ describe("editor fixed point over the corpus", () => {
       expect(out.split(letter).join("")).toBe(canonical);
       expect(out.length - canonical.length).toBe(typed.typed);
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(out);
     });
 
     it(`${name} is an editor fixed point unchanged (the absence case)`, () => {
@@ -1305,7 +1348,7 @@ describe("editor fixed point over the corpus", () => {
       const out = format(pmToMdast(mdastToPM(parse(read(name)))));
       expect(out).toBe(canonical);
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(out);
     });
 
     it(`${name} is an editor fixed point after deletion: the continuation after every hard break, then the last character of every block's last run`, () => {
@@ -1324,7 +1367,7 @@ describe("editor fixed point over the corpus", () => {
       // Before this task, a block the deletion left ending in a break serialised to a bare
       // trailing backslash that `parse` read as a literal one, and this was not a fixed point.
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(out);
     });
 
     it(`${name} is an editor fixed point after deletion to the end of every marked run that holds a hard break (the atom at the mark edge)`, () => {
@@ -1346,7 +1389,7 @@ describe("editor fixed point over the corpus", () => {
       // marks a fixed point whose parse held no break at all.
       expect(format(parse(out))).toBe(out);
       expect(breaksIn(parse(out))).toBe(breaksIn(root));
-      expect(out).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(out);
     });
 
     it(`${name} is an editor fixed point after a space is typed inside every marked run, at its end (the mark edge)`, () => {
@@ -1361,13 +1404,21 @@ describe("editor fixed point over the corpus", () => {
       // Before this task, every space typed inside a mark was written as a character reference
       // (and, for strikethrough, the tildes stopped being a delimiter at all).
       expect(format(parse(out))).toBe(out);
-      expect(out).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(out);
       // Only spaces differ: the moved space is now after (or before) the mark, or dropped at a
-      // boundary that does not keep one, and nothing else about the bytes — the delimiters, the
-      // escapes, the mark's own text — has moved.
-      expect(out.split(" ").join("")).toBe(canonical.split(" ").join(""));
-      expect(out.length).toBeGreaterThanOrEqual(canonical.length);
-      expect(out.length - canonical.length).toBeLessThanOrEqual(typed.runs);
+      // boundary that does not keep one, and nothing else about the text — the delimiters, the
+      // escapes, the mark's own text — has moved. Compared with every reference decoded (1.40):
+      // a space moved out to sit between the mark and its neighbour un-encodes that neighbour
+      // (`~~a.~~&#x62;` typed into is `~~a.~~ b`, one `delete`, a fixed point), so the reference
+      // and its letter are the same text here.
+      expect(decodeReferences(out).split(" ").join("")).toBe(
+        decodeReferences(canonical).split(" ").join(""),
+      );
+      // …and at most one character per run typed into, counted over the same decoded texts (a
+      // reference is six bytes for one character, and the un-encoded neighbour is one).
+      const decoded = decodeReferences(out).length - decodeReferences(canonical).length;
+      expect(decoded).toBeGreaterThanOrEqual(0);
+      expect(decoded).toBeLessThanOrEqual(typed.runs);
     });
 
     it(`${name} is an editor fixed point after a space is typed at the end of every link's text, inside the link (the link edge)`, () => {
@@ -1384,8 +1435,7 @@ describe("editor fixed point over the corpus", () => {
       // are asserted beside it.
       expect(format(parse(out))).toBe(out);
       expect(linksIn(parse(out))).toBe(linksIn(parse(read(name))));
-      expect(out).not.toMatch(ENTITY);
-      for (const value of textValues(parse(out))) expect(value).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(out);
     });
   }
 
@@ -1411,7 +1461,7 @@ describe("editor fixed point over the corpus", () => {
       expect(pasted.doc.eq(doc)).toBe(pasted.items === 0);
       const pastedOut = format(pmToMdast({ doc: pasted.doc, frontMatter }));
       expect(format(parse(pastedOut))).toBe(pastedOut);
-      expect(pastedOut).not.toMatch(ENTITY);
+      expectNoForbiddenEntity(pastedOut);
       // Every item the paste reached holds its two paragraphs in the reparse: the structure the
       // paste built survives, item for item.
       expect(itemsWithTwoParagraphs(parse(pastedOut))).toBe(pasted.items);
@@ -1519,5 +1569,25 @@ describe("editor fixed point over the corpus", () => {
     // …and that is what the corpus leg above compares against `format(parse(x))`, so removing the
     // strip turns every fixture with a paragraph or heading red.
     expect(format(parse("hello\n"))).toBe("hello\n");
+  });
+
+  it("the rule's other side (1.40): a reference that decodes to the mark's neighbour is the serializer's correct output, beside the family's `&#x20;` member the legs forbid", () => {
+    // `x *a.*b`, the emphasis twin of `~~a.~~b`: the run closes on punctuation with a letter
+    // directly outside, and the serializer encodes the letter so the delimiter can close — a
+    // fixed point whose parsed text is the plain `b`. This is the shape `strikethrough-punctuation.md`
+    // brings into every corpus leg, and it passes the rule.
+    const em = schema.marks.emphasis.create();
+    const root = mdastOf(paragraph(schema.text("x "), schema.text("a.", [em]), schema.text("b")));
+    const out = format(root);
+    expect(out).toBe("x *a.*&#x62;\n");
+    expect(out).toMatch(ENTITY);
+    expect(format(parse(out))).toBe(out);
+    expect(textValues(parse(out))).toEqual(["x ", "a.", "b"]);
+    expect(decodeReferences(out)).toBe("x *a.*b\n");
+    expectNoForbiddenEntity(out);
+    // …and the two forbidden members go red on the same rule: the space the strip owns (the
+    // presence case above, decoded whitespace) and the escaped line ending the parsed text keeps.
+    expect(() => expectNoForbiddenEntity("hello&#x20;\n")).toThrow();
+    expect(() => expectNoForbiddenEntity("*a\\&#xA;b* c\n")).toThrow();
   });
 });

@@ -736,6 +736,21 @@
       1
     ]
   },
+  "strikethrough-punctuation.md": {
+    "nodeTypes": [
+      "delete",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 3,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      3,
+      5
+    ]
+  },
   "strong.md": {
     "nodeTypes": [
       "paragraph",
