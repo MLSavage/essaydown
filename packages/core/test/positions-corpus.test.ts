@@ -93,36 +93,13 @@ describe("formatWithMap over fixtures/markdown (task 1.2)", () => {
     expect(withNone.length).toBeGreaterThan(0);
   });
 
-  /**
-   * Fixtures holding a text node whose edge character `containerPhrasing` encodes *after* the
-   * node's handler returned (`mdast-util-to-markdown/lib/util/container-phrasing.js`: the
-   * `outside` case of `encode-info.js`, a letter beside a punctuation edge of an attention run —
-   * `~~a.~~&#x62;`, and `*a.*&#x62;` / `**a.**&#x62;` the same way). `placeChildren` looks
-   * the child's emission up in its parent's output and the emission (`b`) is not there
-   * (`&#x62;` is), so the node is reported in `unresolved`. A limitation of `formatWithMap`
-   * (task 1.2) for every attention run, met by the corpus for the first time through task 1.40's
-   * fixture; recorded in `docs/V1.1-BACKLOG.md` (`[1.40, found outside scope]`) and asserted below
-   * as `it.fails`, so the fix turns this file red until the fixture is folded back into the
-   * ordinary case.
-   */
-  const OUTSIDE_ENCODED_NEIGHBOUR = ["strikethrough-punctuation.md"];
-
-  it("the known-defect fixtures below are in the index, so the pinned case is not vacuous", () => {
-    for (const name of OUTSIDE_ENCODED_NEIGHBOUR) expect(names).toContain(name);
-  });
-
-  it.fails(
-    "known defect (docs/V1.1-BACKLOG.md, task 1.40): a text node whose edge character containerPhrasing encoded beside an attention run is placed, and nothing is unresolved",
-    () => {
-      // Asserted as the *correct* expectation and marked failing. `it.fails` passes on *any*
-      // throw, so this body is the one assertion and nothing else; the fixture's other clauses
-      // (the canonical text, the paragraph lines, nesting, purity) run in the ordinary cases.
-      for (const name of OUTSIDE_ENCODED_NEIGHBOUR)
-        expect(formatWithMap(parse(sourceOf(name))).map.unresolved, name).toEqual([]);
-    },
-  );
-
-  it.each(names.filter((name) => !OUTSIDE_ENCODED_NEIGHBOUR.includes(name)))(
+  // Every fixture in the index, the ones holding an attention run's encoded neighbour included:
+  // task 1.40's `strikethrough-punctuation.md` (`~~a.~~&#x62;`) was pinned here as an expected failure
+  // from 1.40 to 1.45 (docs/V1.1-BACKLOG.md `[1.40, found outside scope]`, DECISIONS
+  // #review-1-r5 K2) until `placeChildren` learned the rewrite `containerPhrasing` makes after a
+  // text child's handler returned (task 1.46; the shapes are enumerated in
+  // `positions-encoded-neighbour.test.ts`). No fixture is excluded from this case.
+  it.each(names)(
     "%s: maps every node of the tree, and nothing is unresolved",
     (name) => {
       const root = parse(sourceOf(name));

@@ -18,6 +18,7 @@ import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
 import { cursorMap } from "../src/toggle.js";
 import {
   deleteAtEveryBlockEnd,
+  deleteBesideEveryMarkedRun,
   letterFor,
   splitEveryListItemParagraph,
   typeInsideEveryBlock,
@@ -52,6 +53,14 @@ import {
  * asks the same three entry points about the tree that comes back — this time against the output
  * bytes themselves (micromark's positions on the reparse), because a deletion can move a block
  * and `index.json`'s recorded lines no longer say where the blocks are.
+ *
+ * Task 1.46 (DECISIONS #review-1-r5 K2) adds the deletion leg's **mark's-neighbour clause**: the
+ * corpus seeded by 1.41's `deleteBesideEveryMarkedRun` (the Backspace over the whitespace beside a
+ * flanking run, which leaves a letter flush against the run's delimiter and makes the serializer
+ * write it as a character reference), plus one hand-seeded astral document, asking `cursorMap`
+ * about every position of every text node the deletion left directly against a flanking mark —
+ * the node `placeChildren` could not place before 1.46, so `toSource` fell to the end of the run
+ * before it and the toggle put a typed character inside the marked run.
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -539,6 +548,105 @@ function deletionLegDocument(doc: PMNode): {
   return { split, deleted };
 }
 
+/** The marks whose runs `encodeInfo` decides about — `typing-legs.ts`'s own list, restated. */
+const FLANKING_MARKS = [schema.marks.emphasis, schema.marks.strong, schema.marks.delete];
+
+/** One text node of the editor's document that sits directly against a flanking-marked run. */
+interface MarkNeighbour {
+  /** The node's text, byte for byte. */
+  text: string;
+  /** The ProseMirror position before its first character. */
+  start: number;
+}
+
+/**
+ * The text nodes of `doc`'s inline-content blocks that are directly against a flanking mark: an
+ * unmarked (for that mark) text child whose next or previous sibling carries the mark — the
+ * neighbour `containerPhrasing` encodes when the run's inner edge is punctuation or whitespace.
+ * Found from the editor's own tree, not from the bytes, so a neighbour the map lost is still
+ * asked about.
+ */
+function markNeighbours(doc: PMNode): MarkNeighbour[] {
+  const out = new Map<number, MarkNeighbour>();
+  doc.descendants((node, pos) => {
+    if (!INLINE_CONTENT.has(node.type)) return true;
+    const children: PMNode[] = [];
+    const starts: number[] = [];
+    node.forEach((child, offset) => {
+      children.push(child);
+      starts.push(pos + 1 + offset);
+    });
+    children.forEach((child, index) => {
+      if (!child.isText) return;
+      const beside = [children[index - 1], children[index + 1]].filter(
+        (sibling): sibling is PMNode => sibling !== undefined,
+      );
+      const against = FLANKING_MARKS.some(
+        (mark) =>
+          mark.isInSet(child.marks) === undefined &&
+          beside.some((sibling) => mark.isInSet(sibling.marks) !== undefined),
+      );
+      if (against) out.set(starts[index], { text: child.text as string, start: starts[index] });
+    });
+    return false;
+  });
+  return [...out.values()];
+}
+
+/** Whether the position `offset` units into `text` falls between the two units of a surrogate pair. */
+function splitsPair(text: string, offset: number): boolean {
+  if (offset <= 0 || offset >= text.length) return false;
+  const before = text.charCodeAt(offset - 1);
+  const after = text.charCodeAt(offset);
+  return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+}
+
+/** Whether `a` is at or before `b` in the source. */
+function sourceLE(a: { line: number; ch: number }, b: { line: number; ch: number }): boolean {
+  return a.line < b.line || (a.line === b.line && a.ch <= b.ch);
+}
+
+/**
+ * **The mark's-neighbour clause** (task 1.46): for every text node the deletion left directly
+ * against a flanking mark, `toSource` is monotone over the node's positions (its start, after
+ * each unit, its end — the position between a pair's two units excluded, as the editor never
+ * offers it) and `toRendered` takes each answer back to the position it came from. Returns how
+ * many neighbours were asked about and how many of them the bytes hold as a character reference,
+ * so the caller can assert the corpus reached both.
+ */
+function assertMarkNeighbourCursors(
+  label: string,
+  doc: PMNode,
+  root: Root,
+  text: string,
+): { neighbours: number; encoded: number } {
+  const cursors = cursorMap(root, doc);
+  const lines = text.split("\n");
+  let encoded = 0;
+  const neighbours = markNeighbours(doc);
+  for (const { text: nodeText, start } of neighbours) {
+    const at = `${label}: the neighbour ${JSON.stringify(nodeText)} at ${start}`;
+    let previous: { line: number; ch: number } | null = null;
+    let sawReference = false;
+    for (let offset = 0; offset <= nodeText.length; offset += 1) {
+      if (splitsPair(nodeText, offset)) continue;
+      const pos = start + offset;
+      const source = cursors.toSource(pos);
+      if (previous !== null) expect(sourceLE(previous, source), `${at}, ${pos}`).toBe(true);
+      previous = source;
+      expect(cursors.toRendered(source), `${at}, ${pos} → ${source.line}:${source.ch}`).toBe(pos);
+      // The bytes at the answer: a position after a character the serializer encoded sits right
+      // after its `;`, a reference this node's own text does not hold.
+      if (offset > 0 && lines[source.line - 1].slice(0, source.ch).endsWith(";")) {
+        const before = lines[source.line - 1].slice(0, source.ch);
+        if (/&#x[0-9A-F]+;$/.test(before)) sawReference = true;
+      }
+    }
+    if (sawReference) encoded += 1;
+  }
+  return { neighbours: neighbours.length, encoded };
+}
+
 describe("the position-map round-trip family, seeded from the editor's own output after deletion (task 1.37)", () => {
   const deletionChecked: string[] = [];
   let fixturesTheDeletionChanged = 0;
@@ -559,6 +667,52 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
    */
   let blocksEndingPastCorrespondence = 0;
   let splitParagraphsPastCorrespondence = 0;
+  /** The mark's-neighbour clause's reach: fixtures with a neighbour, and encoded neighbours. */
+  const fixturesWithMarkNeighbours: string[] = [];
+  let markNeighboursChecked = 0;
+  let encodedNeighboursChecked = 0;
+  const neighbourChecked: string[] = [];
+
+  for (const name of names) {
+    it(`${name}: the cursor map over every text node the deletion beside every marked run left against a flanking mark (task 1.46)`, () => {
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+      const deleted = deleteBesideEveryMarkedRun(doc);
+      // Presence: the transaction changed the document exactly where it had a space to take.
+      expect(deleted.doc.eq(doc), name).toBe(deleted.deleted === 0);
+      const { root, text, map } = mapOfEditorOutput(deleted.doc, frontMatter);
+      const label = `${name} (mark's neighbour)`;
+      expect(text, label).toBe(format(root));
+      expect(format(parse(text)), label).toBe(text);
+      // The whole map, first: the neighbour is placed, like every other node.
+      expect(map.unresolved, label).toEqual([]);
+      const { neighbours, encoded } = assertMarkNeighbourCursors(label, deleted.doc, root, text);
+      if (neighbours > 0) fixturesWithMarkNeighbours.push(name);
+      markNeighboursChecked += neighbours;
+      encodedNeighboursChecked += encoded;
+      neighbourChecked.push(name);
+    });
+  }
+
+  it("the hand-seeded astral document `~~a.~~&#x1F600;`: the neighbour is one surrogate pair written as one reference (task 1.46)", () => {
+    // Asserted here by hand until 1.47's `astral-neighbour.md` joins the index: the same clause,
+    // over the document the editor builds for the parser's tree of the astral shape.
+    const { doc, frontMatter } = mdastToPM(parse("~~a.~~&#x1F600;\n"));
+    const deleted = deleteBesideEveryMarkedRun(doc);
+    expect(deleted.deleted).toBe(0);
+    const { root, text, map } = mapOfEditorOutput(deleted.doc, frontMatter);
+    expect(text).toBe("~~a.~~&#x1F600;\n");
+    expect(map.unresolved).toEqual([]);
+    const { neighbours, encoded } = assertMarkNeighbourCursors("astral", deleted.doc, root, text);
+    expect(neighbours).toBe(1);
+    expect(encoded).toBe(1);
+    // The pair's two units are one ProseMirror node of two positions; the position between them
+    // is the one the clause skips, and its answer is the reference's end all the same.
+    const cursors = cursorMap(root, deleted.doc);
+    const start = markNeighbours(deleted.doc)[0].start;
+    expect(cursors.toSource(start)).toEqual({ line: 1, ch: "~~a.~~".length });
+    expect(cursors.toSource(start + 1)).toEqual({ line: 1, ch: "~~a.~~&#x1F600;".length });
+    expect(cursors.toSource(start + 2)).toEqual({ line: 1, ch: "~~a.~~&#x1F600;".length });
+  });
 
   for (const name of names) {
     it(`${name}: the position map of the editor's output after deletion — every list item's first paragraph split, then the continuation after every hard break and the last character of every block's last run deleted`, () => {
@@ -685,6 +839,16 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
     // deletion exists to build), and an item the split gave an empty second paragraph.
     expect(blocksEndingPastCorrespondence).toBeGreaterThan(0);
     expect(splitParagraphsPastCorrespondence).toBeGreaterThan(0);
+  });
+
+  it("ran the mark's-neighbour clause over every fixture in the index, and the corpus reached an encoded neighbour — strikethrough-punctuation.md among the fixtures with one", () => {
+    expect(neighbourChecked.sort()).toEqual(names);
+    // Non-vacuous reach, from the loop and never a literal: some text node sat against a flanking
+    // mark, some of them were written as a character reference, and the fixture 1.40 built for
+    // this shape (`~~a.~~&#x62;`) is one of the fixtures reached.
+    expect(markNeighboursChecked).toBeGreaterThan(0);
+    expect(encodedNeighboursChecked).toBeGreaterThan(0);
+    expect(fixturesWithMarkNeighbours).toContain("strikethrough-punctuation.md");
   });
 
   it("the deletion leg can fail: a map whose lines are shifted by one is caught by the byte clause", () => {

@@ -55,8 +55,20 @@ export interface PositionMap {
  * character and never inside its escape. What lies between two spellings — `ends[i]` up to
  * `starts[i + 1]`, which is a continuation prefix (`> `, a list item's indentation) and nothing
  * else — is owned by no character; {@link spellingIndex} gives it to the character after it,
- * because that character is the first on the prefix's own line. A character whose spelling is
- * empty cannot arise: every rule in {@link spellingOffsets} consumes at least one character.
+ * because that character is the first on the prefix's own line.
+ *
+ * Exactly one character has an empty spelling: the trailing UTF-16 unit of a surrogate pair the
+ * serializer wrote as one character reference (`&#x1F600;` for 😀 — the neighbour of an attention
+ * run, task 1.45's whole-scalar form). `value` counts the pair as two characters and the bytes
+ * hold one indivisible spelling, so the leading unit owns the whole reference (`starts[i]` at
+ * `&`, `ends[i]` one past `;`) and the trailing unit is a zero-width item at the reference's end
+ * (`starts[i + 1]` and `ends[i + 1]` both equal to `ends[i]`). {@link spellingPoint} of the
+ * position between the two units — a position ProseMirror can name, counting units, but the
+ * editor never offers — is therefore the reference's end, and every other position of the node is
+ * monotone; {@link spellingIndex} never answers the trailing unit (an offset at the reference's
+ * end is past both, and belongs to the character after). A raw surrogate pair in plain text keeps
+ * its two one-unit spellings. Every other rule in {@link spellingOffsets} consumes at least one
+ * character.
  */
 export interface SpellingTable {
   /** `starts[i]` is where value character `i`'s spelling begins; `starts[n]` is the last end. */
@@ -242,10 +254,22 @@ export function spellingOffsets(
     ) {
       at += 1;
     }
-    const end = spellingEnd(written, at, character);
+    let end = spellingEnd(written, at, character);
+    // A surrogate pair written as one reference: the leading unit takes the whole reference and
+    // the trailing unit is the zero-width item {@link SpellingTable}'s ownership rule names. The
+    // raw pair was tried first (one unit at a time), so it keeps its two one-unit spellings.
+    const trailing = value[index + 1];
+    const pair =
+      end === undefined && isHighSurrogate(character) && trailing !== undefined && isLowSurrogate(trailing);
+    if (pair) end = referenceEnd(written, at, character + trailing);
     if (end === undefined) return undefined;
     starts.push(at);
     ends.push(end);
+    if (pair) {
+      starts.push(end);
+      ends.push(end);
+      index += 1;
+    }
     at = end;
     afterLineEnding = character === "\n";
   }
@@ -259,15 +283,39 @@ const CONTINUATION = new Set([" ", "\t", ">"]);
 /** A numeric character reference, hexadecimal or decimal — the two spellings `safe` can emit. */
 const REFERENCE = /^&#(?:x([0-9a-f]+)|([0-9]+));/i;
 
-/** One past the end of `character`'s spelling at `at` in `written`, or `undefined` for no match. */
+/**
+ * One past the end of `character`'s spelling at `at` in `written`, or `undefined` for no match.
+ * `character` is one UTF-16 unit: a reference is read here only for a BMP character, and
+ * {@link spellingOffsets} asks {@link referenceEnd} about a whole surrogate pair itself.
+ */
 function spellingEnd(written: string, at: number, character: string): number | undefined {
   if (written.startsWith(`\\${character}`, at)) return at + 2;
   if (written.startsWith(character, at)) return at + 1;
+  return referenceEnd(written, at, character);
+}
+
+/**
+ * One past the end of the numeric character reference at `at` in `written` that decodes to
+ * `spelled` (one code point, as one or two UTF-16 units), or `undefined` when none does.
+ */
+function referenceEnd(written: string, at: number, spelled: string): number | undefined {
   const reference = REFERENCE.exec(written.slice(at, at + REFERENCE_LIMIT));
   if (reference === null) return undefined;
   const [hexadecimal, decimal] = [reference[1], reference[2]];
   const code = hexadecimal === undefined ? Number(decimal) : Number.parseInt(hexadecimal, 16);
-  return String.fromCodePoint(code) === character ? at + reference[0].length : undefined;
+  return String.fromCodePoint(code) === spelled ? at + reference[0].length : undefined;
+}
+
+/** Whether `unit` (one UTF-16 unit) is the leading half of a surrogate pair. */
+function isHighSurrogate(unit: string): boolean {
+  const code = unit.charCodeAt(0);
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+/** Whether `unit` (one UTF-16 unit) is the trailing half of a surrogate pair. */
+function isLowSurrogate(unit: string): boolean {
+  const code = unit.charCodeAt(0);
+  return code >= 0xdc00 && code <= 0xdfff;
 }
 
 /** Longer than any reference `safe` writes (`&#x10FFFF;`), so the match never scans the rest. */
@@ -434,11 +482,14 @@ function patchIndentLines(state: ToMarkdownState, instrumentation: Instrumentati
  * `indentLines`, and {@link indentOffsetMap} maps that string's offsets to the indented one's.
  *
  * A child whose output cannot be found from the cursor is skipped with its subtree; it surfaces
- * as an `unresolved` path rather than as a wrong range.
+ * as an `unresolved` path rather than as a wrong range. The lookup lives here, in one place
+ * ({@link locateEmission}); {@link wrapHandle} stays transparent and records only what the
+ * handler returned, which for a `text` child beside an attention run is not always what the parent
+ * wrote (DECISIONS #review-1-r5 K2) — see {@link rewrittenEmissions} for the forms retried.
  *
  * A `text` child also has its characters placed one by one into `spellings`, from the string it
- * was found in and the same `local` map, so the escapes the serializer added and the prefixes its
- * ancestors added are both carried (see {@link SpellingTable}).
+ * was found in and the same `local` map, so the escapes the serializer added, the references the
+ * parent wrote and the prefixes its ancestors added are all carried (see {@link SpellingTable}).
  */
 function placeChildren(
   emission: Emission,
@@ -452,9 +503,9 @@ function placeChildren(
   const local: OffsetMap = shift ? (offset) => toAbsolute(shift(offset)) : toAbsolute;
   let cursor = 0;
   for (const child of lastPerNode(emission.children)) {
-    const at = container.indexOf(child.value, cursor);
-    if (at < 0) continue;
-    const length = child.value.length;
+    const found = locateEmission(container, child, cursor);
+    if (found === undefined) continue;
+    const { at, length } = found;
     const start = local(at);
     spans.set(child.node, { start, end: length === 0 ? start : local(at + length - 1) + 1 });
     cursor = at + length;
@@ -468,6 +519,70 @@ function placeChildren(
     // range can be widened to cover them.
     if (child.node.type === "table") placeTableGrid(child.node, child.value, inside, spans);
   }
+}
+
+/** Where one child's emission was found in its parent's string, and how long it is there. */
+interface Located {
+  at: number;
+  length: number;
+}
+
+/**
+ * Locate `child`'s emission in `container`, searching forward from `cursor` — the emission as the
+ * handler returned it, or, for a `text` child, as the parent rewrote it afterwards (see
+ * {@link rewrittenEmissions}). Every candidate is searched from `cursor` and the earliest match
+ * wins, so a later repeated literal is never mistaken for this child: the child's own bytes start
+ * at the cursor or right after the parent's own delimiters, and nothing the parent writes there
+ * spells a candidate. Two candidates cannot start at the same offset (they differ in their first
+ * or last bytes), so the tie-break is never reached; the span's length is the matched string's.
+ */
+function locateEmission(container: string, child: Emission, cursor: number): Located | undefined {
+  const candidates =
+    child.node.type === "text" ? [child.value, ...rewrittenEmissions(child.value)] : [child.value];
+  let best: Located | undefined;
+  for (const candidate of candidates) {
+    const at = container.indexOf(candidate, cursor);
+    if (at < 0 || (best !== undefined && at >= best.at)) continue;
+    best = { at, length: candidate.length };
+  }
+  return best;
+}
+
+/**
+ * The forms a `text` child's emission can take in its parent's string after the parent rewrote
+ * an edge of it, in the order they are tried. `mdast-util-to-markdown/lib/util/container-phrasing.js`
+ * encodes the neighbour of an attention run *after* the child's handler returned — the first
+ * UTF-16 unit of the child after the run (`encodeAfter`) and the last unit of the child before
+ * it (`encodingInfo.before`), each as `encodeCharacterReference(unit.charCodeAt(0))` — and the
+ * `emphasis`, `strong` and `delete` handlers do the same to the inner edge of their own
+ * `containerPhrasing` result; task 1.45's wrapper (`format.ts`) widens a unit of a surrogate pair
+ * to the pair's code point, so what reaches the bytes is one code point replaced by its numeric
+ * character reference at the value's first position, at its last, or at both. No other rewrite of a
+ * handler's output exists in the installed package (`safe()` runs inside the handler, and
+ * punctuation is never encoded), so these three are the whole enumeration: the value with its
+ * first code point replaced, with its last replaced, and with both — collapsing, for a value of
+ * one code point, to the whole value as the reference. The reference is spelled the way
+ * `encode-character-reference.js` and the wrapper spell it: `&#x`, the code point in upper-case
+ * hexadecimal without padding, `;`.
+ */
+function rewrittenEmissions(value: string): string[] {
+  const points = [...value];
+  if (points.length === 0) return [];
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (points.length === 1) return [characterReference(first)];
+  const head = characterReference(first) + value.slice(first.length);
+  const tail = value.slice(0, value.length - last.length) + characterReference(last);
+  const both =
+    characterReference(first) +
+    value.slice(first.length, value.length - last.length) +
+    characterReference(last);
+  return [head, tail, both];
+}
+
+/** The numeric character reference `encode-character-reference.js` writes for `point`. */
+function characterReference(point: string): string {
+  return `&#x${(point.codePointAt(0) as number).toString(16).toUpperCase()};`;
 }
 
 /**
