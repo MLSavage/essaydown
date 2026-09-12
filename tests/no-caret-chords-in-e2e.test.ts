@@ -16,9 +16,12 @@ import { describe, expect, it } from "vitest";
  * from the directory (never a literal file list), and checks each one.
  *
  * A bare Home or End press is allowed at exactly the sites in `ALLOWED_BARE_PRESSES`, all in the
- * **source** view, where the key is CodeMirror's own keymap (`standardKeymap`: line start, line
- * end), handled in JS before the OS layer sees it. The counts are exact, so a fourth use fails and
- * so does a site that moved out of its file without this list following it.
+ * **source** view, where the key reaches Blink's native line motion in CodeMirror's contenteditable
+ * — no key-binding extension is installed (`pnpm why @codemirror/commands` is empty;
+ * packages/editor/src/source.ts installs none), so there is no JS handler between the press and
+ * Blink, and the three-OS gate (green on macos-latest at 1.verify.r4.g1h a1) proves the motion
+ * lands the same way there. The counts are exact, so a fourth use fails and so does a site that
+ * moved out of its file without this list following it.
  */
 
 const e2eWebDir = join(dirname(fileURLToPath(import.meta.url)), "..", "e2e", "web");
@@ -26,8 +29,13 @@ const e2eWebDir = join(dirname(fileURLToPath(import.meta.url)), "..", "e2e", "we
 /** Directories under `e2e/web/` that hold no spec of ours (installs and Playwright's own output). */
 const SKIPPED_DIRS = new Set(["node_modules", "playwright-report", "test-results"]);
 
-/** A modifier chord with Home or End: the construct #022 removed. */
-const CHORD = /\b(ControlOrMeta|Control|Meta)\+(Home|End)\b/g;
+/**
+ * A modifier chord with Home or End: the construct #022 removed, in the quoted key-name form
+ * `keyboard.press` takes — any chain of modifiers ending in Home or End (`"Shift+End"`,
+ * `"Alt+Home"`, `"ControlOrMeta+Shift+End"`), not only the `ControlOrMeta`/`Control`/`Meta` chords
+ * named at the time #022 was written.
+ */
+const CHORD = /"(?:[A-Za-z]+\+)+(Home|End)"/g;
 
 /** A bare Home or End key name as `keyboard.press` takes it. */
 const BARE_PRESS = /"(Home|End)"/g;
@@ -40,12 +48,12 @@ const ALLOWED_BARE_PRESSES: Record<string, { count: number; reason: string }> = 
   "editor-cursor.spec.ts": {
     count: 1,
     reason:
-      "source view (`toColumn`, a Home press in `.cm-content`): CodeMirror's keymap handles the key in JS before the OS layer",
+      "source view (`toColumn`, a Home press in `.cm-content`): Blink's native line motion in CodeMirror's contenteditable (no key-binding extension is installed — `pnpm why @codemirror/commands` is empty); proven by the three-OS gate",
   },
   "editor-toggle.spec.ts": {
     count: 2,
     reason:
-      "source view (two End presses after a `.cm-content` click): CodeMirror's keymap handles the key in JS before the OS layer",
+      "source view (two End presses after a `.cm-content` click): Blink's native line motion in CodeMirror's contenteditable (no key-binding extension is installed — `pnpm why @codemirror/commands` is empty); proven by the three-OS gate",
   },
 };
 
@@ -81,6 +89,22 @@ describe("the e2e/web directory was read, not listed", () => {
       expect(files).toContain(file);
     }
   });
+});
+
+describe("CHORD matches every modifier chain ending in Home or End, not only ControlOrMeta/Control/Meta", () => {
+  const matching = [`"Shift+End"`, `"Alt+Home"`, `"ControlOrMeta+Shift+End"`, `"ControlOrMeta+Home"`];
+  for (const sample of matching) {
+    it(`matches ${sample}`, () => {
+      expect(count(sample, CHORD)).toBe(1);
+    });
+  }
+
+  const nonMatching = [`"Home"`, `"ArrowLeft"`];
+  for (const sample of nonMatching) {
+    it(`does not match ${sample}`, () => {
+      expect(count(sample, CHORD)).toBe(0);
+    });
+  }
 });
 
 describe("no e2e/web file places the caret with a modifier chord on Home or End", () => {
