@@ -548,24 +548,15 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
   let zeroWidthEntries = 0;
   let cursorsChecked = 0;
   /**
-   * The cursors the leg placed at a position **past every node the correspondence knows** —
-   * collected for the known-defect case after the loop. `cursorMap` pairs the editor's inline
-   * nodes with the mdast block's children by their widths, so a block whose end the conversion
-   * moved (a `hard_break` left last, the tree 1.29 is about; trailing whitespace the strip drops)
-   * has editor positions no inline correspondence covers, and the empty paragraph the split opens
-   * inside a list item is a block no correspondence covers at all; `toSource` answers both with
-   * the *start* of the innermost container it does know (the block, the item) where the bytes
-   * put the cursor at the end of what precedes it. Recorded in `docs/V1.1-BACKLOG.md` by this
-   * task; asserted below as `it.fails` against the byte position, so that the fix turns this file
-   * red until the cases are folded back into clause 3.
+   * The two shapes of clause 3 where the cursor sits **past every node the correspondence
+   * knows**, counted so that the reach assertion after the loop can say the corpus held both.
+   * `cursorMap` pairs the editor's inline nodes with the mdast block's children by their widths,
+   * so a block whose end the conversion moved (a `hard_break` left last, the tree 1.29 is about;
+   * trailing whitespace the strip drops) has editor positions no inline correspondence covers,
+   * and the empty paragraph the split opens inside a list item is a placeholder no
+   * correspondence covers at all; both are answered by `toSource`'s second clause (task 1.43)
+   * with the byte end of what precedes them, as the ordinary assertions below check.
    */
-  const pastCorrespondence: {
-    at: string;
-    root: Root;
-    doc: PMNode;
-    pos: number;
-    expected: { line: number; ch: number };
-  }[] = [];
   let blocksEndingPastCorrespondence = 0;
   let splitParagraphsPastCorrespondence = 0;
 
@@ -604,6 +595,9 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
       // bytes put it at. "Changed" is decided block by block against the document the deletion
       // ran on (it neither adds nor removes a block); the split's first paragraphs are among
       // them wherever they end in text, because the deletion takes their last character too.
+      // Shape (a) of the past-correspondence case is in here: a block the conversion narrowed
+      // (a dropped trailing `hard_break`, stripped whitespace) has its cursor past every inline
+      // node the map knows, and the answer is still the byte end of what precedes it.
       const before = inlineBlocks(split.doc);
       const after = inlineBlocks(deleted.doc);
       expect(after.length, label).toBe(before.length);
@@ -621,25 +615,24 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
         // The conversion only ever drops or moves what the editor holds, never adds to it.
         const width = mdastInlineWidth(entry.node);
         expect(width, at).toBeLessThanOrEqual(node.content.size);
-        if (width < node.content.size) {
-          blocksEndingPastCorrespondence += 1;
-          pastCorrespondence.push({ at, root, doc: deleted.doc, pos: end, expected });
-          return;
-        }
-        // The bytes themselves: the character before the cursor is the block's last character
-        // (nothing was dropped, so the editor's last character is the one the bytes end in).
-        const last = lastCharacterOf(node);
-        if (last !== null) {
-          const line = lines[expected.line - 1];
-          expect(line.slice(expected.ch - last.length, expected.ch), at).toBe(last);
+        if (width < node.content.size) blocksEndingPastCorrespondence += 1;
+        else {
+          // The bytes themselves: the character before the cursor is the block's last character
+          // (nothing was dropped, so the editor's last character is the one the bytes end in).
+          const last = lastCharacterOf(node);
+          if (last !== null) {
+            const line = lines[expected.line - 1];
+            expect(line.slice(expected.ch - last.length, expected.ch), at).toBe(last);
+          }
         }
         expect(cursors.toSource(end), at).toEqual(expected);
         cursorsChecked += 1;
       });
 
-      // The split's own cursor: inside the empty paragraph the split opened, the bytes put the
-      // cursor at the end of the paragraph before it — `toggle.test.ts`'s "a position no node
-      // owns" rule — and today `toSource` answers with the item's start (the known-defect case).
+      // Shape (b), the split's own cursor: inside the empty paragraph the split opened, the bytes
+      // put the cursor at the end of the paragraph before it — `toggle.test.ts`'s "a position no
+      // node owns" rule — and `toSource` answers so through the item's correspondence, which
+      // covers the placeholder no correspondence of its own does.
       deleted.doc.descendants((node, pos) => {
         if (node.type !== schema.nodes.list_item) return true;
         const first = node.firstChild;
@@ -663,12 +656,9 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
         const at = `${label}: cursor inside the empty paragraph split off ${path}`;
         const position = positionOf(reparsed.get(path) as Nodes, at);
         splitParagraphsPastCorrespondence += 1;
-        pastCorrespondence.push({
-          at,
-          root,
-          doc: deleted.doc,
-          pos: pos + 1 + first.nodeSize + 1,
-          expected: { line: position.end.line, ch: position.end.column - 1 },
+        expect(cursors.toSource(pos + 1 + first.nodeSize + 1), at).toEqual({
+          line: position.end.line,
+          ch: position.end.column - 1,
         });
         return true;
       });
@@ -690,30 +680,12 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
     expect(blocksCompared).toBeGreaterThan(0);
     expect(zeroWidthEntries).toBeGreaterThan(0);
     expect(cursorsChecked).toBeGreaterThan(0);
-    // Both shapes of the known-defect case below are in the corpus, so it is not vacuous: a
-    // block the deletion left ending past its correspondence (the tree 1.29's deletion exists to
-    // build), and an item the split gave an empty second paragraph.
+    // Both past-correspondence shapes of clause 3 are in the corpus, so the clause is not
+    // vacuous there: a block the deletion left ending past its correspondence (the tree 1.29's
+    // deletion exists to build), and an item the split gave an empty second paragraph.
     expect(blocksEndingPastCorrespondence).toBeGreaterThan(0);
     expect(splitParagraphsPastCorrespondence).toBeGreaterThan(0);
-    expect(pastCorrespondence.length).toBe(
-      blocksEndingPastCorrespondence + splitParagraphsPastCorrespondence,
-    );
   });
-
-  it.fails(
-    "known defect (docs/V1.1-BACKLOG.md, task 1.37): a cursor past every node the correspondence knows — after a dropped break or stripped whitespace, or inside a split item's empty paragraph — maps to the byte end of what precedes it",
-    () => {
-      // Asserted as the *correct* expectation and marked failing: today `toSource` answers with
-      // the innermost known container's start, so this case passes only while the defect stands,
-      // and fixing it turns this case red; the fix then deletes the width branch and the split's
-      // collector above and this case, folding both shapes into clause 3. `it.fails` passes on
-      // *any* throw, so this body is the one assertion and nothing else — the collection's
-      // non-emptiness and its two shapes are asserted in the ordinary case above, and `cursorMap`
-      // was already called on every one of these (root, doc) pairs by clause 3.
-      for (const { at, root, doc, pos, expected } of pastCorrespondence)
-        expect(cursorMap(root, doc).toSource(pos), at).toEqual(expected);
-    },
-  );
 
   it("the deletion leg can fail: a map whose lines are shifted by one is caught by the byte clause", () => {
     // The shape of the case above it: a hand-built two-paragraph document, the positive control

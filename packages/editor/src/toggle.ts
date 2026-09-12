@@ -235,6 +235,27 @@ function correspondences(root: Root, doc: PMNode): Correspondence[] {
 
 /* ------------------------------------------------------------------ the cursor map ------- */
 
+/**
+ * Whether {@link walkBlock} walked `node`'s children, so that a position it covers but no child
+ * does lies *past* its children rather than inside an atom: the phrasing-bearing blocks and the
+ * containers, and never a leaf block or a phrasing node.
+ */
+function isEntered(node: Nodes): boolean {
+  switch (node.type) {
+    case "paragraph":
+    case "heading":
+    case "tableCell":
+    case "blockquote":
+    case "listItem":
+    case "list":
+    case "table":
+    case "tableRow":
+      return true;
+    default:
+      return false;
+  }
+}
+
 /** The innermost correspondence covering `pos`, or `null`. A boundary belongs to the later node. */
 function innermostAt(entries: readonly Correspondence[], pos: number): Correspondence | null {
   let best: Correspondence | null = null;
@@ -242,6 +263,34 @@ function innermostAt(entries: readonly Correspondence[], pos: number): Correspon
     if (entry.pmStart <= pos && pos <= entry.pmEnd) best = entry;
   }
   return best;
+}
+
+/**
+ * The end of the last node that ends at or before `pos`, or `null` when no node does. Only the
+ * entries starting after `from` are candidates, so a caller can keep the search inside one
+ * block's descendants (they are exactly the entries that start after it and end at or before a
+ * position it covers). Among nodes ending at the same position — a mark and its last child, the
+ * only nodes whose ProseMirror extents coincide — the innermost wins (`entries` is in pre-order,
+ * so it comes last): the text's end is before the mark's closing delimiter, where the spelling
+ * table puts a cursor at the end of the run, since inside and outside a mark are one ProseMirror
+ * position.
+ */
+function lastNodeEnd(
+  entries: readonly Correspondence[],
+  map: PositionMap,
+  pos: number,
+  from = -1,
+): SourcePosition | null {
+  let best: NodeRange | null = null;
+  let bestEnd = -1;
+  for (const entry of entries) {
+    const range = map.ranges[entry.path];
+    if (range === undefined || entry.pmStart <= from || entry.pmEnd > pos || entry.pmEnd < bestEnd)
+      continue;
+    best = range;
+    bestEnd = entry.pmEnd;
+  }
+  return best === null ? null : { line: best.endLine, ch: best.endCol - 1 };
 }
 
 /**
@@ -254,15 +303,7 @@ function afterLastNode(
   map: PositionMap,
   pos: number,
 ): SourcePosition {
-  let best: NodeRange | null = null;
-  let bestEnd = -1;
-  for (const entry of entries) {
-    const range = map.ranges[entry.path];
-    if (range === undefined || entry.pmEnd > pos || entry.pmEnd < bestEnd) continue;
-    best = range;
-    bestEnd = entry.pmEnd;
-  }
-  return best === null ? { line: 1, ch: 0 } : { line: best.endLine, ch: best.endCol - 1 };
+  return lastNodeEnd(entries, map, pos) ?? { line: 1, ch: 0 };
 }
 
 /**
@@ -328,12 +369,25 @@ export interface CursorMap {
  * The cursor mapping between `doc`'s positions and `format(root)`'s (line, ch) pairs.
  *
  * Both directions share one position map and one correspondence list, so a toggle pays for the
- * serialisation once. Inside a `text` node the offset is carried across through that node's
- * spelling table, so an escaped character (`\*`) and a continuation prefix (`> `, a list item's
- * indentation) are counted as the serializer wrote them and not as one character each. Every
- * other node is answered with its own start — the map places nodes, and only a text node's bytes
- * are its text (see {@link walkBlock}) — except on the delimiters of a mark, where
- * {@link delimiterPosition} tells the opening one from the closing one.
+ * serialisation once. The mapping has three clauses, innermost node first:
+ *
+ * 1. Inside a `text` node the offset is carried across through that node's spelling table, so an
+ *    escaped character (`\*`) and a continuation prefix (`> `, a list item's indentation) are
+ *    counted as the serializer wrote them and not as one character each.
+ * 2. Inside a block that {@link walkBlock} *entered* (a paragraph, heading or cell whose phrasing
+ *    children were walked; a container whose blocks were) but past every child it knows, the
+ *    position goes after the last of the block's own descendants ending at or before it
+ *    ({@link lastNodeEnd} from the block's start). The editor's block can be wider than the
+ *    mdast one — a `hard_break` left last by a deletion is dropped by the conversion, and the
+ *    empty paragraph a split opens in a list item is a placeholder no correspondence covers —
+ *    and the bytes put that cursor at the end of what precedes it, never at the block's first
+ *    column. A block with nothing of its own before the position (a cell the deletion emptied)
+ *    falls through to clause 3, and a zero-width cell's start is its end.
+ * 3. Every other node is answered with its own start — an inline atom (`image`, `break`, inline
+ *    `html`) when it is the innermost node, and a leaf block (`code`, `thematicBreak`, `html`)
+ *    that is placed but never entered, because the map places nodes and only a text node's bytes
+ *    are its text — except on the delimiters of a mark, where {@link delimiterPosition} tells the
+ *    opening one from the closing one.
  */
 export function cursorMap(root: Root, doc: PMNode): CursorMap {
   const { map, spellings, lineStarts } = formatWithMap(root);
@@ -347,6 +401,10 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
         if (table !== undefined) {
           const { line, column } = spellingPoint(lineStarts, table, pos - inside.pmStart);
           return { line, ch: column - 1 };
+        }
+        if (isEntered(inside.node)) {
+          const before = lastNodeEnd(entries, map, pos, inside.pmStart);
+          if (before !== null) return before;
         }
         if (range !== undefined) return { line: range.startLine, ch: range.startCol - 1 };
       }
