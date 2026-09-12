@@ -587,6 +587,10 @@ function blockToMdast(node: PMNode): RootContent {
     case n.thematic_break:
       return { type: "thematicBreak" } satisfies ThematicBreak;
     case n.list:
+      // A list's `spread` is copied: the parser reads it back from the blank lines *between
+      // items*, which the serializer writes from this flag alone, and an item's own spread does
+      // not make its list spread (`listItemSpread` says why; `list-spread.test.ts` confirms it
+      // against `parse(format(·))`).
       return {
         type: "list",
         ordered: node.attrs.ordered as boolean,
@@ -594,13 +598,15 @@ function blockToMdast(node: PMNode): RootContent {
         spread: node.attrs.spread as boolean,
         children: childrenOf(node).map(blockToMdast) as ListItem[],
       } satisfies List;
-    case n.list_item:
+    case n.list_item: {
+      const children = blocksToMdast(node) as ListItem["children"];
       return {
         type: "listItem",
-        spread: node.attrs.spread as boolean,
+        spread: listItemSpread(node.attrs.spread as boolean, children),
         checked: null,
-        children: blocksToMdast(node) as ListItem["children"],
+        children,
       } satisfies ListItem;
+    }
     case n.table:
       return {
         type: "table",
@@ -622,6 +628,84 @@ function blockToMdast(node: PMNode): RootContent {
     default:
       return unsupported(node.type.name);
   }
+}
+
+/**
+ * A list item's `spread`, derived from its edited children the way `parse` will derive it from the
+ * bytes `format` writes (task 1.36, DECISIONS #review-1-r3 I2). The parser reads an item as
+ * spread when a blank line separates two of its children; the serializer writes that blank line
+ * when the item is spread — and, whatever the flag says, between two paragraphs, which is how a
+ * two-line paste into a tight item (`- a` → `- aX` + `Y`, then the nested list) came back with
+ * one blank line the flag did not know about: `parse` read the item as spread and `format`
+ * wrote a second blank line before the nested list, so Copy Markdown's bytes were not a fixed
+ * point. The parsed flag (`spread`, from the node attrs, which are left as they are) is kept,
+ * because a loose item stays loose; and the item is spread when any two adjacent children
+ * **need** the blank line ({@link needsBlankLine}), so that the bytes reparse to the tree they
+ * were written from. An item whose children `parse` would read as tight stays tight.
+ */
+function listItemSpread(spread: boolean, children: readonly RootContent[]): boolean {
+  if (spread) return true;
+  for (let i = 1; i < children.length; i++) {
+    if (needsBlankLine(children[i - 1], children[i])) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether two adjacent blocks of a list item, written tight (one line ending between them), come
+ * back from `parse` as something other than the two blocks they are. The rule is stated here
+ * once and `list-spread.test.ts` confirms every pair of block kinds against `parse(format(·))`
+ * rather than assuming it; the pairs are:
+ *
+ * 1. After a paragraph: another paragraph (the serializer's own join rule writes the blank line
+ *    whatever the flag says, and the parser reads it as spread — the certain case); a thematic
+ *    break (its `---` under a paragraph line is a setext underline); a list that cannot interrupt
+ *    a paragraph — ordered with a start other than 1, or whose first item is empty (a bare `-`
+ *    under a paragraph is a setext underline too).
+ * 2. Before a paragraph or a table: a blockquote or a list whose **last leaf** — the last child
+ *    of every blockquote, list and list item, descended — is a paragraph, because the first line
+ *    of the block after it is then a lazy continuation of that paragraph. A container whose
+ *    last leaf is anything else (a fence, a heading, an empty item) ends itself.
+ * 3. Before a paragraph or a table: a table, which continues over any non-blank line.
+ * 4. Before a blockquote: a blockquote, because adjacent `>` lines are one quote.
+ *
+ * `html` on either side is not the rule's: a raw block reaches the item only from the parser,
+ * whose bytes already decided whether the block ends by itself (`<pre>` … `</pre>`, then a
+ * paragraph, is a tight pair the parser produces) or at a blank line, and the editor cannot
+ * create one.
+ */
+function needsBlankLine(left: RootContent, right: RootContent): boolean {
+  if (left.type === "paragraph") {
+    if (right.type === "paragraph" || right.type === "thematicBreak") return true;
+    return right.type === "list" && !canInterruptParagraph(right);
+  }
+  if (left.type === "blockquote" || left.type === "list") {
+    if (right.type === "blockquote") return left.type === "blockquote";
+    return (
+      (right.type === "paragraph" || right.type === "table") && lastLeaf(left)?.type === "paragraph"
+    );
+  }
+  if (left.type === "table") return right.type === "paragraph" || right.type === "table";
+  return false;
+}
+
+/** CommonMark §5.2: a list interrupts a paragraph only if it starts at 1 and its first item is not empty. */
+function canInterruptParagraph(list: List): boolean {
+  const first = list.children[0];
+  if (first === undefined || first.children.length === 0) return false;
+  return !list.ordered || (list.start ?? 1) === 1;
+}
+
+/** The last leaf block of a container: the last child of every blockquote, list and list item, descended. */
+function lastLeaf(block: RootContent): RootContent | undefined {
+  let node: RootContent | undefined = block;
+  while (
+    node !== undefined &&
+    (node.type === "blockquote" || node.type === "list" || node.type === "listItem")
+  ) {
+    node = node.children[node.children.length - 1];
+  }
+  return node;
 }
 
 /**

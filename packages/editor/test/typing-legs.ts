@@ -1,5 +1,6 @@
 import type { Node as PMNode } from "prosemirror-model";
-import { EditorState } from "prosemirror-state";
+import { Fragment, Slice } from "prosemirror-model";
+import { EditorState, TextSelection } from "prosemirror-state";
 import { expect } from "vitest";
 import { schema } from "../src/schema.js";
 
@@ -23,7 +24,11 @@ import { schema } from "../src/schema.js";
  * Task 1.35 (DECISIONS #review-1-r3 I3/I4) adds {@link typeSpaceAtEveryLinkEnd}, the **link
  * edge**: a space typed at the end of every link's text, inside the link, so that the link's edge
  * whitespace meets whatever boundary the link's own edge is at — a flanking mark's, the block's,
- * or none.
+ * or none. Task 1.36 (DECISIONS #review-1-r3 I2) adds the first **block-level** transactions,
+ * {@link splitEveryListItemParagraph} and {@link pasteIntoEveryListItemParagraph}: every inline
+ * leg above leaves the block tree as the parser built it, so a parsed block attribute that
+ * outlives the structure it described (`listItem.spread` after a paste adds a paragraph) was
+ * outside all of them.
  */
 
 /** {@link typeSpaceAtEveryBlockEnd}'s result: the changed document, and how many blocks it typed in. */
@@ -328,4 +333,79 @@ export function typeSpaceAtEveryLinkEnd(doc: PMNode): LinkEdgeLeg {
   for (const [pos, node] of [...ends].reverse())
     tr = tr.setStoredMarks([...node.marks]).insertText(" ", pos);
   return { doc: tr.doc, links: ends.length };
+}
+
+/**
+ * {@link splitEveryListItemParagraph}'s and {@link pasteIntoEveryListItemParagraph}'s result: the
+ * changed document and how many list items it reached.
+ */
+export interface ListSplitLeg {
+  doc: PMNode;
+  items: number;
+}
+
+/** The end position of every list item's first paragraph, ascending. */
+function firstParagraphEnds(doc: PMNode): number[] {
+  const ends: number[] = [];
+  doc.descendants((node, pos) => {
+    if (node.type !== schema.nodes.list_item) return true;
+    const first = node.firstChild;
+    if (first !== null && first.type === schema.nodes.paragraph)
+      ends.push(pos + 2 + first.content.size);
+    return true;
+  });
+  return ends;
+}
+
+/**
+ * A ProseMirror transaction shaped like Sol's fuzz probe (DECISIONS #review-1-r3 I2, the first 25
+ * mismatches of 11,955 single transactions were all a `split` inside a list item's paragraph):
+ * `tr.split` at the end of every list item's first paragraph, applied back-to-front so that each
+ * split leaves the positions still to come unmoved. The split at the *end* leaves an empty
+ * paragraph as the item's second child — the paragraph `blocksToMdast` drops before the item's
+ * `spread` is derived — so the bytes a caller expects are the fixture's own: the leg is the
+ * absence case, a second child that does not make the item spread, and a derivation that counted
+ * the editor's children instead of the serialized ones would write a blank line before every
+ * nested list.
+ */
+export function splitEveryListItemParagraph(doc: PMNode): ListSplitLeg {
+  const ends = firstParagraphEnds(doc);
+  let tr = EditorState.create({ doc }).tr;
+  for (const pos of [...ends].reverse()) tr = tr.split(pos);
+  return { doc: tr.doc, items: ends.length };
+}
+
+/**
+ * The slice `prosemirror-view` builds from a two-line plain-text paste: one paragraph per line,
+ * open one level at each end (`Slice.maxOpen`), which the fitter places as a continuation of
+ * the paragraph under the caret and a second paragraph after it.
+ */
+export function twoLinePasteSlice(first: string, second: string): Slice {
+  return new Slice(
+    Fragment.from([
+      schema.node("paragraph", null, schema.text(first)),
+      schema.node("paragraph", null, schema.text(second)),
+    ]),
+    1,
+    1,
+  );
+}
+
+/**
+ * A ProseMirror transaction shaped like the route Sol's finding took (DECISIONS #review-1-r3 I2):
+ * a two-line plain-text paste with the caret at the end of a list item's paragraph — Enter there
+ * is `splitListItem`, which opens a new item, so the paste is the one keystroke that gives an item
+ * a second paragraph. `replaceSelection` with {@link twoLinePasteSlice} is the call
+ * `prosemirror-view`'s paste handler makes; it runs at the end of every list item's first
+ * paragraph, back-to-front so that each replacement leaves the positions still to come unmoved.
+ */
+export function pasteIntoEveryListItemParagraph(doc: PMNode): ListSplitLeg {
+  const ends = firstParagraphEnds(doc);
+  let tr = EditorState.create({ doc }).tr;
+  for (const pos of [...ends].reverse()) {
+    tr = tr
+      .setSelection(TextSelection.create(tr.doc, pos))
+      .replaceSelection(twoLinePasteSlice("X", "Y"));
+  }
+  return { doc: tr.doc, items: ends.length };
 }

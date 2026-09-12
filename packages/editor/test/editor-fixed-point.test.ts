@@ -10,6 +10,8 @@ import {
   deleteAtEveryBlockEnd,
   deleteToEveryMarkedRunEnd,
   letterFor,
+  pasteIntoEveryListItemParagraph,
+  splitEveryListItemParagraph,
   typeInsideEveryBlock,
   typeSpaceAtEveryBlockEnd,
   typeSpaceAtEveryLinkEnd,
@@ -87,6 +89,14 @@ import {
  * emphasis written outside the link. Each asserts the bytes, the fixed point, and that the parsed
  * output holds exactly one `link` (the defect's held two). The corpus gains a leg titled for the
  * **link edge**, which types a space inside every link, at the end of its text.
+ *
+ * Task 1.36 (DECISIONS #review-1-r3 I2) adds the first block-level leg. Every leg above changes
+ * inline content and leaves the block tree as the parser built it, so a parsed block attribute
+ * that outlives the structure it described — `list_item.spread` after a two-line paste adds a
+ * paragraph to a tight item — was outside all of them. The guards and the two `parse(format(·))`
+ * confirmations are in `list-spread.test.ts`; the corpus gains a leg titled for the **list
+ * split**, which splits every list item's first paragraph at its end and, separately, replaces
+ * its end with the two-paragraph slice a two-line plain-text paste builds.
  */
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -1235,6 +1245,20 @@ describe("the link edge (task 1.35): one guard per position of a link's edge whi
   });
 });
 
+/** The list items of `root` whose first two children are paragraphs, counted at every depth. */
+function itemsWithTwoParagraphs(root: Root): number {
+  let count = 0;
+  const walk = (node: { type: string; children?: unknown[] }): void => {
+    if (node.type === "listItem") {
+      const [first, second] = node.children as { type: string }[];
+      if (first?.type === "paragraph" && second?.type === "paragraph") count += 1;
+    }
+    for (const child of node.children ?? []) walk(child as { type: string; children?: unknown[] });
+  };
+  walk(root);
+  return count;
+}
+
 describe("editor fixed point over the corpus", () => {
   it("asserts one editor fixed point per fixture listed in the index", () => {
     // The count is the index's own length, never a literal (see schema-roundtrip.test.ts).
@@ -1364,6 +1388,45 @@ describe("editor fixed point over the corpus", () => {
       for (const value of textValues(parse(out))) expect(value).not.toMatch(ENTITY);
     });
   }
+
+  for (const name of names) {
+    it(`${name} is an editor fixed point after the list split: every item's first paragraph split at its end, and separately its end replaced by a two-line paste's slice`, () => {
+      const canonical = format(parse(read(name)));
+      const { doc, frontMatter } = mdastToPM(parse(read(name)));
+
+      // The split at the paragraph's end leaves an empty paragraph, which the conversion drops
+      // before the item's spread is derived: the bytes are the fixture's own (the absence case —
+      // a derivation over the editor's children would write a blank line before every nested
+      // list).
+      const split = splitEveryListItemParagraph(doc);
+      expect(split.doc.eq(doc)).toBe(split.items === 0);
+      const splitOut = format(pmToMdast({ doc: split.doc, frontMatter }));
+      expect(splitOut).toBe(canonical);
+      expect(format(parse(splitOut))).toBe(splitOut);
+
+      // The paste gives every item a second paragraph. Before this task the item kept its
+      // parsed `spread`, so an item holding a nested list was written tight after the blank line
+      // the two paragraphs need, and `parse` read it as loose.
+      const pasted = pasteIntoEveryListItemParagraph(doc);
+      expect(pasted.doc.eq(doc)).toBe(pasted.items === 0);
+      const pastedOut = format(pmToMdast({ doc: pasted.doc, frontMatter }));
+      expect(format(parse(pastedOut))).toBe(pastedOut);
+      expect(pastedOut).not.toMatch(ENTITY);
+      // Every item the paste reached holds its two paragraphs in the reparse: the structure the
+      // paste built survives, item for item.
+      expect(itemsWithTwoParagraphs(parse(pastedOut))).toBe(pasted.items);
+    });
+  }
+
+  it("at least one fixture in the index holds a list item the list-split leg splits and pastes into", () => {
+    // Without this, the list-split leg could be green because no fixture in the corpus holds a
+    // list — the reason `nested-lists.md` carries the claim.
+    const reached = names.filter(
+      (name) => pasteIntoEveryListItemParagraph(mdastToPM(parse(read(name))).doc).items > 0,
+    );
+    expect(reached.length).toBeGreaterThan(0);
+    expect(reached).toContain("nested-lists.md");
+  });
 
   it("at least one fixture in the index holds a link the link-edge leg types into", () => {
     // Without this, the link-edge leg could be green because no fixture in the corpus carries a
