@@ -19,22 +19,24 @@ import { expect, test, type Page } from "@playwright/test";
  * to reach `format`, whose `unsafe` table encodes a space before a line ending as a numeric
  * character reference.
  *
- * Caret placement (DECISIONS #022, the rule stated in `editor-mark-edge.spec.ts`; task 1.38 after
- * #review-1-r3 I6): the rendered caret is placed only by motions Blink decides by itself, so a
- * pass in the Linux container is a pass for every OS — `ArrowUp`/`ArrowDown`, which on a block's
- * first/last visual line are Blink's motion to the editable root's start/end (no line to move to,
- * so the caret goes to the content's edge), then a counted `ArrowRight`/`ArrowLeft`. Never a Home
- * or End key and never a modifier chord for caret motion in the rendered view: a contenteditable
- * resolves those through the OS's key-binding layer (Cocoa scrolls on them; its document motion is
- * a Cmd+Arrow), so the 1.verify.r3h gate typed where the seed had left the caret, the block's end.
- * `toDocumentStart`/`toDocumentEnd` press the vertical arrow once per visual line the block
- * renders (a soft break is a literal `\n` in the text node and a forced line break under the
- * editor's `white-space: pre-wrap`; a hard break is a `<br>`); once the edge is reached the extra
- * presses change nothing. Counting characters from the edge is what makes these cases mean the
- * position their titles claim — and each case asserts that position, as the DOM selection's
- * anchor text and offset (byte-exact), before it types: the bytes of a space typed at a line's
- * *end* and at a paragraph's end are the same (CommonMark strips both), so only the location
- * assertion can fail on a wrong-end placement.
+ * Caret placement (DECISIONS #022 and #024, the rule stated in `editor-mark-edge.spec.ts`; task
+ * 1.38 after #review-1-r3 I6, repaired by task 1.39 after the 1.verify.r4h gate): in the rendered
+ * view a position is reached by counted horizontal arrows (`ArrowLeft`/`ArrowRight`) from an anchor
+ * the case asserts first — the block's end, where `seedFromSource`'s click and the `.ProseMirror`
+ * click leave the caret on every OS. The count is a property of the document's characters: under
+ * the editor's `white-space: pre-wrap` a soft break is one LF in the text node, a hard break one
+ * `<br>`, each a single caret position. A vertical arrow (up or down) is used only in a one-line
+ * block, where it has no line to move to and Blink's motion goes to the block's edge; in a block
+ * that renders more than one line a vertical arrow lands by the caret's x, the wrapping and the
+ * font metrics, so two presses left the 1.verify.r4h gate at offset 3 on ubuntu and 11 on windows
+ * in the two-line paragraph below. Never a Home or End key and never a modifier chord for caret
+ * motion in the rendered view: a contenteditable resolves those through the OS's key-binding
+ * layer (Cocoa scrolls on them; its document motion is a Cmd+Arrow), so the 1.verify.r3h gate
+ * typed where the seed had left the caret. "Blink-only" means decided from the document's
+ * characters alone, not merely handled by Blink. Each case asserts its position, as the DOM
+ * selection's anchor text and offset (byte-exact), at the anchor and again before it types: the
+ * bytes of a space typed at a line's *end* and at a paragraph's end are the same (CommonMark
+ * strips both), so only the location assertion can fail on a wrong-end placement.
  *
  * Run against the branch base (`git checkout e038619 -- packages/editor/src/schema.ts`), the first
  * three cases go red and the absence case stays green; recorded in the journal for task 1.25.
@@ -68,16 +70,6 @@ async function seedFromSource(page: Page, text: string): Promise<void> {
 
 async function press(page: Page, key: string, times: number): Promise<void> {
   for (let step = 0; step < times; step += 1) await page.keyboard.press(key);
-}
-
-/** To the document's start: `ArrowUp` once per visual line the document renders (see the file comment). */
-async function toDocumentStart(page: Page, lines: number): Promise<void> {
-  await press(page, "ArrowUp", lines);
-}
-
-/** To the document's end: `ArrowDown` once per visual line the document renders (see the file comment). */
-async function toDocumentEnd(page: Page, lines: number): Promise<void> {
-  await press(page, "ArrowDown", lines);
 }
 
 /**
@@ -123,13 +115,19 @@ test.describe("a soft line break survives typing, and the whitespace around it n
     await seedFromSource(page, "alpha\nbeta gamma");
     await expect.poll(() => markdown(page)).toBe("alpha\nbeta gamma\n");
 
-    // To the document start (two visual lines, the seed's caret on the second), then five
-    // characters right: after `alpha`, before the break. The location assertion is the one that
-    // can fail on a wrong-end placement: a space typed at the paragraph's end gives the same
-    // bytes as one typed here (both are stripped), so "bytes unchanged" alone proves nothing
-    // about the first line.
-    await toDocumentStart(page, 2);
-    await press(page, "ArrowRight", "alpha".length);
+    // The anchor: the paragraph's end, where the source view left the caret, asserted first. Then
+    // left across the second line and the break (the LF is one character in the text node):
+    // after `alpha`, before the break. The location assertion is the one that can fail on a
+    // wrong-end placement: a space typed at the paragraph's end gives the same bytes as one typed
+    // here (both are stripped), so "bytes unchanged" alone proves nothing about the first line.
+    await expect
+      .poll(() => caret(page))
+      .toEqual({
+        kind: "text",
+        text: "alpha\nbeta gamma",
+        offset: "alpha\nbeta gamma".length,
+      });
+    await press(page, "ArrowLeft", "beta gamma".length + 1);
     await expect
       .poll(() => caret(page))
       .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: "alpha".length });
@@ -150,16 +148,17 @@ test.describe("a soft line break survives typing, and the whitespace around it n
       .poll(() => markdown(page))
       .toBe("First line of the paragraph\\\nSecond line after a hard break.\n");
 
-    // To the document end (two visual lines, the click's caret on either), asserted as the end
-    // of the continuation line's text, then left across the whole continuation line: the caret
-    // lands immediately after the hard break, which is where Claude's reproduction types.
+    // The anchor: the click's caret at the block's end, asserted as the end of the continuation
+    // line's text, then left across the whole continuation line: the caret lands immediately
+    // after the hard break, which is where Claude's reproduction types.
     await page.locator(".ProseMirror").click();
-    await toDocumentEnd(page, 2);
-    await expect.poll(() => caret(page)).toEqual({
-      kind: "text",
-      text: "Second line after a hard break.",
-      offset: "Second line after a hard break.".length,
-    });
+    await expect
+      .poll(() => caret(page))
+      .toEqual({
+        kind: "text",
+        text: "Second line after a hard break.",
+        offset: "Second line after a hard break.".length,
+      });
     await press(page, "ArrowLeft", "Second line after a hard break.".length);
     await page.keyboard.type(" ", { delay: 10 });
 
