@@ -10,6 +10,7 @@ import {
   deleteAtEveryBlockEnd,
   deleteBesideEveryMarkedRun,
   deleteToEveryMarkedRunEnd,
+  INLINE_CONTENT,
   letterFor,
   pasteIntoEveryListItemParagraph,
   punctuateThenDeleteAfterEveryMarkedRun,
@@ -407,15 +408,65 @@ function hardBreaksIn(doc: PMNode): number {
   return count;
 }
 
-/** The value of every `text` node under `root`, wherever it is. */
+/**
+ * The value of every `text` node under `root`, wherever it is, plus every `inlineCode`'s own
+ * `value` — the ProseMirror schema realises `inline_code` as a mark on ordinary text (its value
+ * flows through `.textContent` like any other text), so a comparison against the editor's own
+ * document counts it the same way here.
+ */
 function textValues(root: Root): string[] {
   const out: string[] = [];
   const walk = (node: { type: string; value?: string; children?: unknown[] }): void => {
-    if (node.type === "text") out.push(node.value as string);
+    if (node.type === "text" || node.type === "inlineCode") out.push(node.value as string);
     for (const child of (node.children ?? []) as (typeof node)[]) walk(child);
   };
   walk(root);
   return out;
+}
+
+/** The mdast counterparts of {@link INLINE_CONTENT} — a block never nests inside another one. */
+const INLINE_BLOCK_TYPES = new Set(["paragraph", "heading", "tableCell"]);
+
+/**
+ * The joined text of every inline-content block under `root` (a `paragraph`, `heading` or
+ * `tableCell`), in document order — the mdast half of {@link expectTextMatchesEditor}'s
+ * comparison; text inside a mark, a link or an image's alt still counts, via {@link textValues}.
+ */
+function inlineBlockTexts(node: { type: string; children?: unknown[] }): string[] {
+  if (INLINE_BLOCK_TYPES.has(node.type)) return [textValues(node as unknown as Root).join("")];
+  const out: string[] = [];
+  for (const child of (node.children ?? []) as (typeof node)[]) out.push(...inlineBlockTexts(child));
+  return out;
+}
+
+/**
+ * The joined `textContent` of every {@link INLINE_CONTENT} block under `doc`, in document order —
+ * the editor half of {@link expectTextMatchesEditor}'s comparison.
+ */
+function editorBlockTexts(doc: PMNode): string[] {
+  const out: string[] = [];
+  doc.descendants((node) => {
+    if (INLINE_CONTENT.has(node.type)) {
+      out.push(node.textContent);
+      return false;
+    }
+    return true;
+  });
+  return out;
+}
+
+/**
+ * K4 (DECISIONS #review-1-r5, task 1.47): per inline block, `out`'s parsed text equals the text
+ * the editor's own document (`doc`, after the leg's transaction) holds — the comparison
+ * {@link decodeReferences} cannot make for an astral character split by a serializer defect
+ * (`String.fromCodePoint(0xD83D)` and a raw low surrogate concatenate back to the emoji in a JS
+ * string even where the real parse produced two lone surrogates, U+FFFD each); `textValues` over
+ * `parse(out)` sees the replacement character where `decodeReferences` would not.
+ */
+function expectTextMatchesEditor(doc: PMNode, out: string, label?: string): void {
+  expect(inlineBlockTexts(parse(out) as unknown as { type: string; children?: unknown[] }), label).toEqual(
+    editorBlockTexts(doc),
+  );
 }
 
 /**
@@ -1327,6 +1378,28 @@ function itemsWithTwoParagraphs(root: Root): number {
   return count;
 }
 
+describe("the inside-a-block leg types after the first character whole, one code point wide (task 1.47, corpus half of DECISIONS #review-1-r5 K1)", () => {
+  it("a paragraph whose first character is an astral one gets the letter after both of its surrogate units", () => {
+    const doc = paragraph(schema.text("😀bc"));
+    const typed = typeInsideEveryBlock(doc, "X");
+    expect(typed.typed).toBe(1);
+    // Before this task `first + 1` (one UTF-16 unit) put the letter between 😀's two surrogate
+    // units, splitting the pair; `[...text][0].length` is 2 for an astral first character, so the
+    // letter now lands after the whole code point.
+    const root = mdastOf(typed.doc);
+    expect(root.children).toEqual([
+      { type: "paragraph", children: [{ type: "text", value: "😀Xbc" }] },
+    ]);
+    const out = format(root);
+    expect(out).toBe("😀Xbc\n");
+    expect(format(parse(out))).toBe(out);
+    expectNoForbiddenEntity(out);
+    // The reported position is the one the letter actually occupies in the returned document —
+    // two positions past the run's start, not one.
+    expect(typed.positions).toEqual([3]);
+  });
+});
+
 describe("editor fixed point over the corpus", () => {
   it("asserts one editor fixed point per fixture listed in the index", () => {
     // The count is the index's own length, never a literal (see schema-roundtrip.test.ts).
@@ -1482,6 +1555,7 @@ describe("editor fixed point over the corpus", () => {
       expect(format(parse(out))).toBe(out);
       expect(flankingMarkNodesIn(parse(out))).toBe(before);
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditor(deleted.doc, out, name);
     });
 
     it(`${name} is an editor fixed point after a period is typed at the end of every marked run and the whitespace after it deleted (the mark's neighbour, the certain case)`, () => {
@@ -1499,8 +1573,21 @@ describe("editor fixed point over the corpus", () => {
       expect(format(parse(out))).toBe(out);
       expect(flankingMarkNodesIn(parse(out))).toBe(before);
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditor(punctuated.doc, out, name);
     });
   }
+
+  it("the corpus fixture set whose text is compared by every leg above includes an astral neighbour shape (task 1.47, K4)", () => {
+    // Without this, the text-equality assertion above could be green on every fixture only
+    // because none of them held an astral character on either side of a flanking mark's run —
+    // the shape 1.45 fixed and 1.46 mapped, and the one {@link decodeReferences} cannot compare
+    // (see {@link expectTextMatchesEditor}'s doc comment). Neither mark's-neighbour leg finds
+    // whitespace beside a run in this fixture (its marks all sit flush against an encoded or raw
+    // astral neighbour), so `deleted`/`punctuated` are legitimately 0 here — the presence
+    // assertions above already cover that — but the text-equality comparison still runs on it
+    // every time the corpus loop reaches its name, which this asserts it does.
+    expect(names).toContain("astral-neighbour.md");
+  });
 
   for (const name of names) {
     it(`${name} is an editor fixed point after the list split: every item's first paragraph split at its end, and separately its end replaced by a two-line paste's slice`, () => {

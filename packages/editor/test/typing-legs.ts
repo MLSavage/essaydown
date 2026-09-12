@@ -36,6 +36,11 @@ import { schema } from "../src/schema.js";
  * whitespace *between* a flanking-marked run and its neighbour — the one-keystroke route both r4
  * reviewers found (`~~beta.~~` then a space, `~~…](essay.md)~~` then a space) — was outside all of
  * them, and 1.40's `delete` handler had no corpus leg reaching the tree it exists for.
+ *
+ * One character is one code point, throughout this file: a leg that types after or deletes "the
+ * first character" or "the last character" of a run reads it with `[...text]`, never by UTF-16
+ * length, so an astral character at that edge is typed after, or deleted, whole — never split
+ * between its two surrogate units (task 1.47, DECISIONS #review-1-r5 K1's corpus half).
  */
 
 /** {@link typeSpaceAtEveryBlockEnd}'s result: the changed document, and how many blocks it typed in. */
@@ -88,7 +93,7 @@ export function letterFor(canonical: string): string {
 }
 
 /** The three node types whose content is inline text; the only places a soft break can live. */
-const INLINE_CONTENT = new Set([
+export const INLINE_CONTENT = new Set([
   schema.nodes.paragraph,
   schema.nodes.heading,
   schema.nodes.table_cell,
@@ -107,14 +112,19 @@ export function typeInsideEveryBlock(doc: PMNode, letter: string): InsideBlockLe
     if (node.type === schema.nodes.code_block || node.type === schema.nodes.raw) return false;
     if (node.type === schema.nodes.paragraph) {
       let first: number | null = null;
+      let firstCharWidth = 1;
       node.descendants((child, childPos) => {
         if (first !== null) return false;
-        if (child.isText) first = pos + 1 + childPos;
+        if (child.isText) {
+          first = pos + 1 + childPos;
+          // One character is one code point: an astral first character is two positions wide.
+          firstCharWidth = ([...(child.text as string)][0] as string).length;
+        }
         return true;
       });
       // After the first character of the run, never before it: the position before it is the
       // block start, which the other leg already types at.
-      if (first !== null) at.push((first as number) + 1);
+      if (first !== null) at.push((first as number) + firstCharWidth);
     }
     if (node.isText && parent !== null && INLINE_CONTENT.has(parent.type)) {
       const text = node.text as string;

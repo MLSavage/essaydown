@@ -1,4 +1,21 @@
 {
+  "astral-neighbour.md": {
+    "nodeTypes": [
+      "delete",
+      "emphasis",
+      "paragraph",
+      "root",
+      "strong",
+      "text"
+    ],
+    "blockCount": 3,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      3,
+      5
+    ]
+  },
   "autolink-literal.md": {
     "nodeTypes": [
       "link",
