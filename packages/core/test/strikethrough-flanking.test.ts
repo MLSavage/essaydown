@@ -176,6 +176,21 @@ describe("strikethrough flanking (task 1.40, J1): the `delete` handler encodes t
       expect(countDeletes(parse(bytes))).toBe(1);
       expect(format(parse(bytes))).toBe(bytes);
     });
+
+    it("whitespace outside a whitespace edge encodes both, the `*` twin's own shape (encodeInfo's outside-whitespace × inside-whitespace cell, format.ts:94-95)", () => {
+      // The opening side is whitespace outside (`"a "`'s last character) against whitespace
+      // inside (`" b"`'s first): both encoded, as `emphasis` does for the same tree with `*`.
+      // The closing side is a letter inside (`"b"`) against whitespace outside (`" c"`'s first
+      // character): the built-in table's letter-inside row encodes neither, so it is unchanged.
+      const emRoot = paragraph(text("a "), { type: "emphasis", children: [text(" b")] }, text(" c"));
+      const emBytes = format(emRoot);
+      expect(emBytes).toBe("a&#x20;*&#x20;b* c\n");
+      const root = paragraph(text("a "), del(text(" b")), text(" c"));
+      const bytes = format(root);
+      expect(bytes).toBe("a&#x20;~~&#x20;b~~ c\n");
+      expect(countDeletes(parse(bytes))).toBe(1);
+      expect(format(parse(bytes))).toBe(bytes);
+    });
   });
 
   describe("invariant A on the parser's own tree", () => {

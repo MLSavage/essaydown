@@ -30,15 +30,17 @@ const e2eWebDir = join(dirname(fileURLToPath(import.meta.url)), "..", "e2e", "we
 const SKIPPED_DIRS = new Set(["node_modules", "playwright-report", "test-results"]);
 
 /**
- * A modifier chord with Home or End: the construct #022 removed, in the quoted key-name form
- * `keyboard.press` takes — any chain of modifiers ending in Home or End (`"Shift+End"`,
- * `"Alt+Home"`, `"ControlOrMeta+Shift+End"`), not only the `ControlOrMeta`/`Control`/`Meta` chords
- * named at the time #022 was written.
+ * A modifier chord with Home or End: the construct #022 removed, in any of the three quoted
+ * key-name forms `keyboard.press` takes — double quotes, single quotes or a backtick — any chain
+ * of modifiers ending in Home or End (`"Shift+End"`, `'Alt+Home'`, `` `ControlOrMeta+Shift+End` ``),
+ * not only the `ControlOrMeta`/`Control`/`Meta` chords named at the time #022 was written. The two
+ * quote characters around the key name must match (a capture group and a backreference), so a
+ * mismatched pair (`'Shift+End"`) is not a use of the construct.
  */
-const CHORD = /"(?:[A-Za-z]+\+)+(Home|End)"/g;
+const CHORD = /(['"`])(?:[A-Za-z]+\+)+(Home|End)\1/g;
 
-/** A bare Home or End key name as `keyboard.press` takes it. */
-const BARE_PRESS = /"(Home|End)"/g;
+/** A bare Home or End key name as `keyboard.press` takes it, in any of the three quote forms. */
+const BARE_PRESS = /(['"`])(Home|End)\1/g;
 
 /**
  * The allowed bare presses, per file (relative to `e2e/web/`), with the number of sites and the
@@ -91,8 +93,15 @@ describe("the e2e/web directory was read, not listed", () => {
   });
 });
 
-describe("CHORD matches every modifier chain ending in Home or End, not only ControlOrMeta/Control/Meta", () => {
-  const matching = [`"Shift+End"`, `"Alt+Home"`, `"ControlOrMeta+Shift+End"`, `"ControlOrMeta+Home"`];
+describe("CHORD matches every modifier chain ending in Home or End, not only ControlOrMeta/Control/Meta, in any of the three quote forms", () => {
+  const matching = [
+    `"Shift+End"`,
+    `"Alt+Home"`,
+    `"ControlOrMeta+Shift+End"`,
+    `"ControlOrMeta+Home"`,
+    `'Shift+End'`,
+    "`Shift+End`",
+  ];
   for (const sample of matching) {
     it(`matches ${sample}`, () => {
       expect(count(sample, CHORD)).toBe(1);
@@ -107,9 +116,25 @@ describe("CHORD matches every modifier chain ending in Home or End, not only Con
   }
 });
 
+describe("BARE_PRESS matches a bare Home or End key name in any of the three quote forms", () => {
+  const matching = [`"Home"`, `"End"`, `'Home'`, "`End`"];
+  for (const sample of matching) {
+    it(`matches ${sample}`, () => {
+      expect(count(sample, BARE_PRESS)).toBe(1);
+    });
+  }
+
+  const nonMatching = [`"ArrowLeft"`];
+  for (const sample of nonMatching) {
+    it(`does not match ${sample}`, () => {
+      expect(count(sample, BARE_PRESS)).toBe(0);
+    });
+  }
+});
+
 describe("no e2e/web file places the caret with a modifier chord on Home or End", () => {
   for (const [file, text] of contents) {
-    it(`${file} has no ControlOrMeta, Control or Meta chord with Home or End`, () => {
+    it(`${file} has no modifier chord ending in Home or End`, () => {
       expect(count(text, CHORD)).toBe(0);
     });
   }

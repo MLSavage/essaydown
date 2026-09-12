@@ -128,6 +128,11 @@ const KINDS: Record<string, () => BlockContent> = {
     depth: 2,
     children: [text("h"), { type: "break" }, text("x")],
   }),
+  "ATX heading, depth 3, a line ending in its text": () => ({
+    type: "heading",
+    depth: 3,
+    children: [text("h\nx")],
+  }),
 };
 
 /** A one-item bullet list holding `children` in an item parsed as tight. */
@@ -303,6 +308,17 @@ describe("the two parse(format(·)) confirmations the derivation is built on (ta
     );
     const out = format(through(root));
     expect(out).toBe("- a\n\n  \\\n  ![h](u)\n  =======\n\n  - i\n");
+    expectFixedPoint(out);
+  });
+
+  it("clause (setext heading), depth clause: a depth-3 heading with a line ending in its text fails `isSetextHeading`'s depth check, so unlike the depth-1 twin it gets no blank line before it, nor before the nested list after it", () => {
+    const root = tightItem(
+      paragraph("a"),
+      { type: "heading", depth: 3, children: [text("h\nx")] },
+      list([item(false, paragraph("i"))]),
+    );
+    const out = format(through(root));
+    expect(out).toBe("- a\n  ### h&#xA;x\n  - i\n");
     expectFixedPoint(out);
   });
 });
