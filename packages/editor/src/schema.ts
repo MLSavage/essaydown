@@ -661,12 +661,20 @@ function listItemSpread(spread: boolean, children: readonly RootContent[]): bool
  *    whatever the flag says, and the parser reads it as spread — the certain case); a thematic
  *    break (its `---` under a paragraph line is a setext underline); a list that cannot interrupt
  *    a paragraph — ordered with a start other than 1, or whose first item is empty (a bare `-`
- *    under a paragraph is a setext underline too).
- * 2. Before a paragraph or a table: a blockquote or a list whose **last leaf** — the last child
- *    of every blockquote, list and list item, descended — is a paragraph, because the first line
- *    of the block after it is then a lazy continuation of that paragraph. A container whose
- *    last leaf is anything else (a fence, a heading, an empty item) ends itself.
- * 3. Before a paragraph or a table: a table, which continues over any non-blank line.
+ *    under a paragraph is a setext underline too); a heading `formatHeadingAsSetext`
+ *    (`mdast-util-to-markdown`'s `lib/util/format-heading-as-setext.js`) chooses to write as
+ *    setext — depth ≤ 2, non-empty text, and a line ending in any literal descendant or a
+ *    `break` — because the serializer's join rule writes the blank line before it whatever the
+ *    flag says too, exactly as for two paragraphs (this project never sets `state.options.setext`,
+ *    so that half of the upstream predicate is always false here).
+ * 2. Before a paragraph, a table, or a setext heading (the same predicate as item 1's fourth
+ *    member): a blockquote or a list whose **last leaf** — the last child of every blockquote,
+ *    list and list item, descended — is a paragraph, because the first line of the block after
+ *    it is then a lazy continuation of that still-open paragraph, and a setext heading's opening
+ *    text line is exactly as absorbable as a paragraph's or a table row's. A container whose last
+ *    leaf is anything else (a fence, a heading, an empty item) ends itself.
+ * 3. Before a paragraph, a table, or a setext heading: a table, which continues over any
+ *    non-blank line — the heading's opening text line reads as one more (single-cell) row.
  * 4. Before a blockquote: a blockquote, because adjacent `>` lines are one quote.
  *
  * `html` on either side is not the rule's: a raw block reaches the item only from the parser,
@@ -675,18 +683,50 @@ function listItemSpread(spread: boolean, children: readonly RootContent[]): bool
  * create one.
  */
 function needsBlankLine(left: RootContent, right: RootContent): boolean {
+  const setext = right.type === "heading" && isSetextHeading(right);
   if (left.type === "paragraph") {
-    if (right.type === "paragraph" || right.type === "thematicBreak") return true;
+    if (right.type === "paragraph" || right.type === "thematicBreak" || setext) return true;
     return right.type === "list" && !canInterruptParagraph(right);
   }
   if (left.type === "blockquote" || left.type === "list") {
     if (right.type === "blockquote") return left.type === "blockquote";
     return (
-      (right.type === "paragraph" || right.type === "table") && lastLeaf(left)?.type === "paragraph"
+      (right.type === "paragraph" || right.type === "table" || setext) &&
+      lastLeaf(left)?.type === "paragraph"
     );
   }
-  if (left.type === "table") return right.type === "paragraph" || right.type === "table";
+  if (left.type === "table") return right.type === "paragraph" || right.type === "table" || setext;
   return false;
+}
+
+/**
+ * Mirrors `mdast-util-to-markdown`'s `formatHeadingAsSetext` (`lib/util/format-heading-as-setext.js`)
+ * with its `state.options.setext` branch dropped, since `format.ts` always passes `setext: false`:
+ * depth 1 or 2, non-empty text (`mdast-util-to-string`'s `toString`, whose default counts an
+ * `image`'s `alt` towards the text), and a line ending somewhere inside — a literal descendant
+ * (`text`, `inlineCode`, `html`) whose value holds `\r` or `\n`, or a `break` anywhere in the tree
+ * (an `image` has no `value`, so its `alt` cannot supply the line ending, only the non-empty text).
+ */
+function isSetextHeading(node: Heading): boolean {
+  if (node.depth > 2) return false;
+  let text = "";
+  let hasLineEnding = false;
+  const walk = (nodes: readonly PhrasingContent[]): void => {
+    for (const child of nodes) {
+      if (child.type === "break") {
+        hasLineEnding = true;
+      } else if (child.type === "text" || child.type === "inlineCode" || child.type === "html") {
+        text += child.value;
+        if (/\r|\n/.test(child.value)) hasLineEnding = true;
+      } else if (child.type === "image") {
+        text += child.alt ?? "";
+      } else if ("children" in child) {
+        walk(child.children);
+      }
+    }
+  };
+  walk(node.children);
+  return text.length > 0 && hasLineEnding;
 }
 
 /** CommonMark §5.2: a list interrupts a paragraph only if it starts at 1 and its first item is not empty. */

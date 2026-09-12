@@ -118,6 +118,16 @@ const KINDS: Record<string, () => BlockContent> = {
   "ordered list starting at 2": () => list([item(false, paragraph("i"))], true, 2),
   "list whose first item is empty": () => list([item(false), item(false, paragraph("i"))]),
   table: () => table,
+  "setext heading, depth 1, a line ending in its text": () => ({
+    type: "heading",
+    depth: 1,
+    children: [text("h\nx")],
+  }),
+  "setext heading, depth 2, a break": () => ({
+    type: "heading",
+    depth: 2,
+    children: [text("h"), { type: "break" }, text("x")],
+  }),
 };
 
 /** A one-item bullet list holding `children` in an item parsed as tight. */
@@ -241,6 +251,58 @@ describe("the two parse(format(·)) confirmations the derivation is built on (ta
     expect(parsedItem.spread).toBe(false);
     const out = format(through(parsed));
     expect(out).toBe(source);
+    expectFixedPoint(out);
+  });
+
+  it("clause (setext heading), present: a paragraph then a setext heading spreads the whole item, including the blank line before a nested list after it", () => {
+    const root = tightItem(
+      paragraph("a"),
+      { type: "heading", depth: 1, children: [text("h\nx")] },
+      list([item(false, paragraph("i"))]),
+    );
+    const out = format(through(root));
+    expect(out).toBe("- a\n\n  h\n  x\n  =\n\n  - i\n");
+    expectFixedPoint(out);
+  });
+
+  it("clause (setext heading), absent: a paragraph then a setext heading with no list after it still gets its own blank line, and nothing more", () => {
+    const root = tightItem(paragraph("a"), {
+      type: "heading",
+      depth: 2,
+      children: [text("h"), { type: "break" }, text("x")],
+    });
+    const out = format(through(root));
+    expect(out).toBe("- a\n\n  h\\\n  x\n  -\n");
+    expectFixedPoint(out);
+  });
+
+  it("clause (setext heading), a line ending nested inside a mark: the break is found through the emphasis wrapping it, not only among the heading's direct children, so the blank line before a nested list after it is still present", () => {
+    const root = tightItem(
+      paragraph("a"),
+      {
+        type: "heading",
+        depth: 1,
+        children: [{ type: "emphasis", children: [text("h"), { type: "break" }, text("x")] }],
+      },
+      list([item(false, paragraph("i"))]),
+    );
+    const out = format(through(root));
+    expect(out).toBe("- a\n\n  *h\\\n  x*\n  ==\n\n  - i\n");
+    expectFixedPoint(out);
+  });
+
+  it("clause (setext heading), text supplied only by an image's alt: `toString`'s non-empty-text half of the predicate counts the alt, not only a literal's value, so the blank line before a nested list after it is still present", () => {
+    const root = tightItem(
+      paragraph("a"),
+      {
+        type: "heading",
+        depth: 1,
+        children: [{ type: "break" }, { type: "image", url: "u", alt: "h" }],
+      },
+      list([item(false, paragraph("i"))]),
+    );
+    const out = format(through(root));
+    expect(out).toBe("- a\n\n  \\\n  ![h](u)\n  =======\n\n  - i\n");
     expectFixedPoint(out);
   });
 });
