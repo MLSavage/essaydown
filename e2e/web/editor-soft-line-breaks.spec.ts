@@ -26,10 +26,15 @@ import { expect, test, type Page } from "@playwright/test";
  * click leave the caret on every OS. The count is a property of the document's characters: under
  * the editor's `white-space: pre-wrap` a soft break is one LF in the text node, a hard break one
  * `<br>`, each a single caret position. A vertical arrow (up or down) is used only in a one-line
- * block, where it has no line to move to and Blink's motion goes to the block's edge; in a block
- * that renders more than one line a vertical arrow lands by the caret's x, the wrapping and the
- * font metrics, so two presses left the 1.verify.r4h gate at offset 3 on ubuntu and 11 on windows
- * in the two-line paragraph below. Never a Home or End key and never a modifier chord for caret
+ * block, where it has no line to move to and Blink's motion goes to the block's edge, or from a
+ * line's left edge, where the landing is the previous line's start whatever the font measures
+ * (G4 below, task 1.55 after the 1.verify.r7h gate, DECISIONS #035 — the landing is asserted);
+ * anywhere else in a block that renders more than one line a vertical arrow lands by the caret's
+ * x, the wrapping and the font metrics, so two presses left the 1.verify.r4h gate at offset 3 on
+ * ubuntu and 11 on windows in the two-line paragraph below. A counted route never crosses a soft
+ * break leftwards when the same position is reachable within its own line from an asserted anchor
+ * (#035: that one step is the press the per-step poll named on windows-latest at the r6h and r7h
+ * gates). Never a Home or End key and never a modifier chord for caret
  * motion in the rendered view: a contenteditable resolves those through the OS's key-binding
  * layer (Cocoa scrolls on them; its document motion is a Cmd+Arrow), so the 1.verify.r3h gate
  * typed where the seed had left the caret. "Blink-only" means decided from the document's
@@ -130,11 +135,14 @@ test.describe("a soft line break survives typing, and the whitespace around it n
     await seedFromSource(page, "alpha\nbeta gamma");
     await expect.poll(() => markdown(page)).toBe("alpha\nbeta gamma\n");
 
-    // The anchor: the paragraph's end, where the source view left the caret, asserted first. Then
-    // left across the second line and the break (the LF is one character in the text node):
-    // after `alpha`, before the break. The location assertion is the one that can fail on a
-    // wrong-end placement: a space typed at the paragraph's end gives the same bytes as one typed
-    // here (both are stripped), so "bytes unchanged" alone proves nothing about the first line.
+    // The anchor: the paragraph's end, where the source view left the caret, asserted first. The
+    // route to the end of the first line never crosses the soft break leftwards (task 1.55 after
+    // the 1.verify.r7h gate, DECISIONS #035: that one step — offset 6 to offset 5 across the LF —
+    // is the press 1.54's per-step poll named on windows-latest, twice in a row, and the container
+    // cannot see that runner). Left across the second line only, to its start, asserted; one
+    // `ArrowUp` from the line's left edge, which lands at the first line's start on every OS (the
+    // x is the left edge, not a metric; the landing is asserted, DECISIONS #024); then right
+    // within the first line: after `alpha`, before the break, the same position as before.
     await expect
       .poll(() => caret(page))
       .toEqual({
@@ -142,11 +150,27 @@ test.describe("a soft line break survives typing, and the whitespace around it n
         text: "alpha\nbeta gamma",
         offset: "alpha\nbeta gamma".length,
       });
-    await press(page, "ArrowLeft", "beta gamma".length + 1);
+    await press(page, "ArrowLeft", "beta gamma".length);
+    await expect
+      .poll(() => caret(page))
+      .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: "alpha\n".length });
+    await page.keyboard.press("ArrowUp");
+    await expect
+      .poll(() => caret(page))
+      .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: 0 });
+    await press(page, "ArrowRight", "alpha".length);
     await expect
       .poll(() => caret(page))
       .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: "alpha".length });
     await page.keyboard.type(" ", { delay: 10 });
+
+    // The discriminator the bytes cannot give (DECISIONS #022: a case whose bytes cannot tell two
+    // trees apart asserts the tree): a space typed at the paragraph's end, at the second line's
+    // start or here gives the same Markdown (CommonMark strips all three), so the rendered text
+    // node is asserted to hold the space before the LF — the end of the first line.
+    await expect
+      .poll(() => caret(page).then((c) => c.text))
+      .toBe("alpha \nbeta gamma");
 
     // CommonMark §6.8 removes the space at the end of the line, so the bytes are unchanged.
     await expect.poll(() => markdown(page)).toBe("alpha\nbeta gamma\n");

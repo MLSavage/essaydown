@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { format, parse } from "../../packages/core/src/index.js";
 
@@ -28,18 +27,17 @@ import { format, parse } from "../../packages/core/src/index.js";
  *
  * The copy case asserts the string the app handed `navigator.clipboard.writeText`, recorded by an
  * init-script spy, never the OS clipboard read back (task 1.28, DECISIONS #021); the bytes are
- * asserted with `toBe`, never a normalising matcher (DECISIONS #022); the fixed point is computed
- * twice, in this process from `packages/core` and in the page from the same module served by Vite
- * (Sol's instrument); and the parsed text values joined are compared to the paragraph's own text
- * — the one instrument that sees U+FFFD. Helpers are copied from
- * `editor-astral-neighbour.spec.ts` and `editor-toggle-encoded-neighbour.spec.ts`.
+ * asserted with `toBe`, never a normalising matcher (DECISIONS #022); the fixed point of the pane
+ * and of the copied bytes is asserted in this process with `format(parse(·))` from `packages/core`,
+ * the shape `editor-astral-neighbour.spec.ts` has (task 1.55 after the 1.verify.r7h gate, DECISIONS
+ * #035: the earlier page-side import through Vite's filesystem route built its URL from a Node
+ * path, which carries a drive letter and no leading slash on Windows); and the parsed text values
+ * joined are compared to the paragraph's own text — the one instrument that sees U+FFFD. Helpers
+ * are copied from `editor-astral-neighbour.spec.ts` and `editor-toggle-encoded-neighbour.spec.ts`.
  */
 
 /** The arguments of the `writeText` calls the app made, newest last, recorded on the window. */
 type WriteTextSpy = { calls: string[] };
-
-/** `packages/core/src/index.ts` on disk, for the page-side import through Vite's `/@fs/` route. */
-const CORE_INDEX = fileURLToPath(new URL("../../packages/core/src/index.ts", import.meta.url));
 
 function markdown(page: Page): Promise<string | null> {
   return page.getByTestId("markdown").textContent();
@@ -139,20 +137,6 @@ function textValuesOf(bytes: string): string {
   return out.join("");
 }
 
-/** `format(parse(bytes))` computed inside the page, from the core module Vite serves. */
-function formatParseInPage(page: Page, bytes: string): Promise<string> {
-  return page.evaluate(
-    async ({ modulePath, source }) => {
-      const core = (await import(/* @vite-ignore */ `/@fs${modulePath}`)) as {
-        parse: (value: string) => unknown;
-        format: (root: unknown) => string;
-      };
-      return core.format(core.parse(source));
-    },
-    { modulePath: CORE_INDEX, source: bytes },
-  );
-}
-
 test.describe("an astral character left flush between two emphasis runs reaches the Markdown whole", () => {
   test("Sol's reproduction: `*a.* 😀 *(b)*` loaded, the two spaces around the emoji taken by Backspace and Delete — the emoji is one code-point reference, the pane and the copy are the guard's bytes, a fixed point, and the parsed text equals the paragraph's", async ({
     page,
@@ -191,7 +175,6 @@ test.describe("an astral character left flush between two emphasis runs reaches 
     const pane = (await markdown(page)) as string;
     expect(pane).not.toContain("&#xD");
     expect(format(parse(pane))).toBe(pane);
-    expect(await formatParseInPage(page, pane)).toBe(pane);
 
     await expect(page.locator(".ProseMirror em")).toHaveCount(2);
     const paragraphText = await documentText(page);
