@@ -509,3 +509,173 @@ describe("astral neighbours (task 1.45, K1): a non-BMP character outside a flank
     });
   });
 });
+
+/*
+ * Task 1.49 (DECISIONS #review-1-r6 L1 — Sol finding 1, Grok finding 1): one astral character that
+ * is the closing neighbour of one flanking run and the opening neighbour of the next. Read in
+ * `mdast-util-to-markdown@2.1.2/lib/util/container-phrasing.js`: the assembler rewrites a child's
+ * output after its handler returned at two places — `encodeAfter` encodes the child's first UTF-16
+ * unit when the run before it asked for its neighbour, and `encodingInfo.before` encodes the
+ * previous result's last unit when the run after it asks — and both fire on the *same* one-character
+ * child when it sits between two runs whose inner edges are punctuation. A two-unit child then
+ * comes out as `&#xD83D;&#xDE00;`, the join of the two forms task 1.45's `SPLIT_PAIR` named (a
+ * reference beside a *raw* mate), which reparses to U+FFFD U+FFFD. The guards are enumerated over
+ * every ordered (mark1, mark2) pair × three astral characters, each asserting the bytes, exactly
+ * two marks of the named types, the parsed text values equal to the built tree's (the instrument
+ * that sees U+FFFD), the fixed point and an empty `unresolved` in `formatWithMap`.
+ */
+
+/** The three astral characters the reconciliation reproduced with: a symbol, a letter, a letter. */
+const BETWEEN_ASTRAL = {
+  "😀 U+1F600": { raw: "😀", encoded: "&#x1F600;" },
+  "𐐀 U+10400": { raw: "𐐀", encoded: "&#x10400;" },
+  "𝕒 U+1D552": { raw: "𝕒", encoded: "&#x1D552;" },
+} as const;
+type BetweenAstral = keyof typeof BETWEEN_ASTRAL;
+
+/** `mark1(text("a.")) text(c) mark2(text("(b)"))`: the inner edges punctuation on both sides. */
+function betweenRuns(mark1: MarkType, mark2: MarkType, c: string): PhrasingContent[] {
+  return [MARKS[mark1].build(text("a.")), text(c), MARKS[mark2].build(text("(b)"))];
+}
+
+/** The bytes {@link betweenRuns} is written with when the astral neighbour is encoded whole. */
+function betweenRunsBytes(mark1: MarkType, mark2: MarkType, encoded: string): string {
+  return `${MARKS[mark1].marker}a.${MARKS[mark1].marker}${encoded}${MARKS[mark2].marker}(b)${MARKS[mark2].marker}`;
+}
+
+/** Every guard's assertions for one tree whose only inline content is {@link betweenRuns}. */
+function expectWholeBetweenRuns(root: Root, bytes: string, mark1: MarkType, mark2: MarkType): void {
+  expect(format(root)).toBe(bytes);
+  const reparsed = parse(bytes);
+  if (mark1 === mark2) {
+    expect(countType(reparsed, mark1)).toBe(2);
+  } else {
+    expect(countType(reparsed, mark1)).toBe(1);
+    expect(countType(reparsed, mark2)).toBe(1);
+  }
+  expect(textValues(reparsed)).toBe(textValues(root));
+  expect(format(reparsed)).toBe(bytes);
+  expect(formatWithMap(root).map.unresolved).toEqual([]);
+}
+
+describe("one astral character between two flanking runs (task 1.49, L1): both of container-phrasing.js's rewrites on one child are widened to one scalar", () => {
+  const marks = Object.keys(MARKS) as MarkType[];
+
+  describe("every ordered pair of marks × every astral character, in a paragraph", () => {
+    for (const mark1 of marks) {
+      for (const mark2 of marks) {
+        for (const name of Object.keys(BETWEEN_ASTRAL) as BetweenAstral[]) {
+          const { raw, encoded } = BETWEEN_ASTRAL[name];
+          it(`(${mark1}, ${mark2}, ${name}): bytes, two marks, text equal, fixed point, nothing unresolved`, () => {
+            const root = paragraph(...betweenRuns(mark1, mark2, raw));
+            expectWholeBetweenRuns(root, `${betweenRunsBytes(mark1, mark2, encoded)}\n`, mark1, mark2);
+          });
+        }
+      }
+    }
+  });
+
+  describe("the five other position classes the wrapper reaches (one pair, one character each)", () => {
+    // The wrapper is on `state.containerPhrasing`; every phrasing parent's assembler calls it,
+    // the table cell's included (`mdast-util-gfm-table/lib/index.js`, `serializeData`).
+    const inline = (): PhrasingContent[] => betweenRuns("emphasis", "emphasis", "😀");
+    const bytes = betweenRunsBytes("emphasis", "emphasis", "&#x1F600;");
+
+    it("a heading", () => {
+      const root: Root = { type: "root", children: [{ type: "heading", depth: 1, children: inline() }] };
+      expectWholeBetweenRuns(root, `# ${bytes}\n`, "emphasis", "emphasis");
+    });
+
+    it("a table cell", () => {
+      const root: Root = {
+        type: "root",
+        children: [
+          {
+            type: "table",
+            children: [{ type: "tableRow", children: [{ type: "tableCell", children: inline() }] }],
+          },
+        ],
+      };
+      expectWholeBetweenRuns(root, `| ${bytes} |\n| ${"-".repeat(bytes.length)} |\n`, "emphasis", "emphasis");
+    });
+
+    it("a link's text", () => {
+      const root = paragraph({ type: "link", url: "u", children: inline() });
+      expectWholeBetweenRuns(root, `[${bytes}](u)\n`, "emphasis", "emphasis");
+    });
+
+    it("a blockquote", () => {
+      const root: Root = {
+        type: "root",
+        children: [{ type: "blockquote", children: [{ type: "paragraph", children: inline() }] }],
+      };
+      expectWholeBetweenRuns(root, `> ${bytes}\n`, "emphasis", "emphasis");
+    });
+
+    it("a list item", () => {
+      const root: Root = {
+        type: "root",
+        children: [
+          {
+            type: "list",
+            ordered: false,
+            children: [{ type: "listItem", children: [{ type: "paragraph", children: inline() }] }],
+          },
+        ],
+      };
+      expectWholeBetweenRuns(root, `- ${bytes}\n`, "emphasis", "emphasis");
+    });
+  });
+
+  describe("absence cases", () => {
+    it("the BMP twin: a one-unit letter between two runs is one reference, `&#x62;`, unchanged by the widening", () => {
+      const root = paragraph(...betweenRuns("emphasis", "emphasis", "b"));
+      expectWholeBetweenRuns(root, "*a.*&#x62;*(b)*\n", "emphasis", "emphasis");
+      expect(format(root)).not.toContain("&#xD");
+    });
+
+    it("the whitespace-inner twin `x *a *&#x1F600;* b* y`: the parser nests the runs around the emoji, no encoding is decided for it, the raw emoji is kept", () => {
+      const source = "x *a *&#x1F600;* b* y\n";
+      const root = parse(source);
+      expect(textValues(root)).toContain("😀");
+      const bytes = format(root);
+      expect(bytes).toBe("x *a *😀* b* y\n");
+      expect(bytes).not.toContain("&#x");
+      expect(textValues(parse(bytes))).toBe(textValues(root));
+      expect(format(parse(bytes))).toBe(bytes);
+    });
+
+    it("the 1.45 both-sides guard is unchanged: two different emoji, each split once, `😀~~(a.)~~😀`", () => {
+      const root = paragraph(text("😀"), del(text("(a.)")), text("😀"));
+      const bytes = format(root);
+      expect(bytes).toBe("&#x1F600;~~(a.)~~&#x1F600;\n");
+      expect(countDeletes(parse(bytes))).toBe(1);
+      expect(textValues(parse(bytes))).toBe(textValues(root));
+      expect(format(parse(bytes))).toBe(bytes);
+    });
+  });
+
+  describe("invariant A on the parser's own trees", () => {
+    const SOURCES: [string, MarkType, MarkType][] = [
+      ["*a.*&#x1F600;*(b)*\n", "emphasis", "emphasis"],
+      ["**a.**&#x10400;**(b)**\n", "strong", "strong"],
+      ["~~a.~~&#x1D552;~~(b)~~\n", "delete", "delete"],
+      ["**a.**&#x1F600;~~(b)~~\n", "strong", "delete"],
+      ["# *a.*&#x1F600;*(b)*\n", "emphasis", "emphasis"],
+    ];
+    for (const [source, mark1, mark2] of SOURCES) {
+      it(`${JSON.stringify(source)} — a ${mark1} and a ${mark2} the parser holds — formats to itself`, () => {
+        const root = parse(source);
+        if (mark1 === mark2) {
+          expect(countType(root, mark1)).toBe(2);
+        } else {
+          expect(countType(root, mark1)).toBe(1);
+          expect(countType(root, mark2)).toBe(1);
+        }
+        expect(textValues(root)).not.toContain("�");
+        expect(format(root)).toBe(source);
+        expect(formatWithMap(root).map.unresolved).toEqual([]);
+      });
+    }
+  });
+});

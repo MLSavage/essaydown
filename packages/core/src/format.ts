@@ -185,31 +185,73 @@ const PHRASING_TYPES: ReadonlySet<string> = new Set([
 type WidenedState = ToMarkdownState & { astralWidened?: true };
 
 /**
- * A high surrogate written as a lone character reference (`&#xD83D;`, `D800`–`DBFF`) directly
- * followed by the raw low surrogate it was split from, and the mirror: a raw high surrogate
- * directly followed by its low surrogate's lone reference (`&#xDE00;`, `DC00`–`DFFF`). The
- * hexadecimal is upper-case with no padding, as `encode-character-reference.js` writes it.
+ * The three forms a surrogate pair split by `container-phrasing.js` can take, one per rewrite and
+ * one for their join on a single child (the join is DECISIONS #review-1-r6 L1, task 1.49): a high
+ * surrogate written as a lone character reference (`&#xD83D;`, `D800`–`DBFF`) directly followed
+ * by the raw low surrogate it was split from (`encodeAfter` alone); a raw high surrogate directly
+ * followed by its low surrogate's lone reference (`&#xDE00;`, `DC00`–`DFFF`; `encodingInfo.before`
+ * alone); and a high-surrogate reference directly followed by a low-surrogate reference
+ * (`&#xD83D;&#xDE00;`; both rewrites on one two-unit child). The hexadecimal is upper-case with
+ * no padding, as `encode-character-reference.js` writes it.
  */
-const SPLIT_PAIR = /&#x(D[89AB][0-9A-F]{2});([\uDC00-\uDFFF])|([\uD800-\uDBFF])&#x(D[C-F][0-9A-F]{2});/g;
+const SPLIT_PAIR = new RegExp(
+  [
+    // `encodeAfter` alone: the high unit's reference, the raw low unit.
+    "&#x(D[89AB][0-9A-F]{2});([\\uDC00-\\uDFFF])",
+    // `encodingInfo.before` alone: the raw high unit, the low unit's reference.
+    "([\\uD800-\\uDBFF])&#x(D[C-F][0-9A-F]{2});",
+    // Both on one child: the high unit's reference, the low unit's reference.
+    "&#x(D[89AB][0-9A-F]{2});&#x(D[C-F][0-9A-F]{2});",
+  ].join("|"),
+  "g",
+);
 
 /**
  * Widen every lone-surrogate character reference `value` holds at a child boundary to the
- * code-point reference of the pair it split: `&#xD83D;` + U+DE00 → `&#x1F600;`, and U+D83D +
- * `&#xDE00;` → `&#x1F600;`. These are the only two forms `container-phrasing.js`'s two rewrites
- * can produce — the first UTF-16 unit of the child after an attention run (`encodeAfter`) and the
- * last unit of the child before one (`encodingInfo.before`) — and nothing else in the serializer
- * writes a surrogate reference: `safe()` encodes only the ASCII characters its `unsafe` patterns
- * match, and the handlers' own inside encoding sees a letter (a lone surrogate classifies as
- * "other") at an astral edge and leaves it. The widening is by code point, computed from the two
- * units (`0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)`, the value `codePointAt` returns).
+ * code-point reference of the pair it split: `&#xD83D;` + U+DE00 → `&#x1F600;`, U+D83D +
+ * `&#xDE00;` → `&#x1F600;`, and `&#xD83D;&#xDE00;` → `&#x1F600;`. These are the three forms
+ * `container-phrasing.js`'s two rewrites can produce, read in the installed package (2.1.2): the
+ * first UTF-16 unit of the child after an attention run (`encodeAfter`, applied to `value` right
+ * after the child's handler returns) and the last unit of the child before one
+ * (`encodingInfo.before`, applied to the previous result once the run's handler has set
+ * `attentionEncodeSurroundingInfo`) — and, when one two-unit child sits between two runs whose
+ * inner edges both ask for their neighbour to be encoded, both rewrites on that one child: the
+ * first fires on its high unit, the second on its low unit, and the raw mate each of the first two
+ * forms relies on is a reference too. Nothing else in the serializer writes a surrogate reference:
+ * `safe()` encodes only the ASCII characters its `unsafe` patterns match, and the handlers' own
+ * inside encoding sees a letter (a lone surrogate classifies as "other") at an astral edge and
+ * leaves it. The widening is by code point, computed from the two units
+ * (`0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)`, the value `codePointAt` returns), the
+ * same arithmetic for all three forms.
  */
 function widenSplitSurrogateReferences(value: string): string {
-  return value.replace(SPLIT_PAIR, (_match, highHex?: string, low?: string, high?: string, lowHex?: string) => {
-    const highUnit = highHex !== undefined ? parseInt(highHex, 16) : (high as string).charCodeAt(0);
-    const lowUnit = lowHex !== undefined ? parseInt(lowHex, 16) : (low as string).charCodeAt(0);
-    const codePoint = 0x10000 + ((highUnit - 0xd800) << 10) + (lowUnit - 0xdc00);
-    return encodeCharacterReference(codePoint);
-  });
+  return value.replace(
+    SPLIT_PAIR,
+    (
+      _match,
+      highHex?: string,
+      low?: string,
+      high?: string,
+      lowHex?: string,
+      bothHighHex?: string,
+      bothLowHex?: string,
+    ) => {
+      const highUnit =
+        bothHighHex !== undefined
+          ? parseInt(bothHighHex, 16)
+          : highHex !== undefined
+            ? parseInt(highHex, 16)
+            : (high as string).charCodeAt(0);
+      const lowUnit =
+        bothLowHex !== undefined
+          ? parseInt(bothLowHex, 16)
+          : lowHex !== undefined
+            ? parseInt(lowHex, 16)
+            : (low as string).charCodeAt(0);
+      const codePoint = 0x10000 + ((highUnit - 0xd800) << 10) + (lowUnit - 0xdc00);
+      return encodeCharacterReference(codePoint);
+    },
+  );
 }
 
 /**

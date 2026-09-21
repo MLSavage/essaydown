@@ -1,4 +1,21 @@
 {
+  "astral-between-runs.md": {
+    "nodeTypes": [
+      "delete",
+      "emphasis",
+      "heading",
+      "paragraph",
+      "root",
+      "strong",
+      "text"
+    ],
+    "blockCount": 3,
+    "sectionCount": 1,
+    "paragraphStartLines": [
+      1,
+      3
+    ]
+  },
   "astral-neighbour.md": {
     "nodeTypes": [
       "delete",
