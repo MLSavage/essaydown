@@ -709,7 +709,9 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
     // is the one the clause skips, and its answer is the reference's end all the same.
     const cursors = cursorMap(root, deleted.doc);
     const start = markNeighbours(deleted.doc)[0].start;
-    expect(cursors.toSource(start)).toEqual({ line: 1, ch: "~~a.~~".length });
+    // The boundary after `a.` belongs to the run per `$pos.marks()` (`delete` is inclusive), so the
+    // source caret lands inside the closing `~~` (DECISIONS #review-1-r6 L6, #033).
+    expect(cursors.toSource(start)).toEqual({ line: 1, ch: "~~a.".length });
     expect(cursors.toSource(start + 1)).toEqual({ line: 1, ch: "~~a.~~&#x1F600;".length });
     expect(cursors.toSource(start + 2)).toEqual({ line: 1, ch: "~~a.~~&#x1F600;".length });
   });

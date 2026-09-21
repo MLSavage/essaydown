@@ -22,7 +22,7 @@ import type {
 } from "@codemirror/state";
 import { keymap as codeMirrorKeymap, type KeyBinding } from "@codemirror/view";
 import { keymap as proseMirrorKeymap } from "prosemirror-keymap";
-import type { Node as PMNode } from "prosemirror-model";
+import { Mark, type Node as PMNode } from "prosemirror-model";
 import { TextSelection, type Command, type Plugin, type Selection } from "prosemirror-state";
 import { schema } from "./schema.js";
 import type { DocumentStore } from "./store.js";
@@ -256,13 +256,64 @@ function isEntered(node: Nodes): boolean {
   }
 }
 
-/** The innermost correspondence covering `pos`, or `null`. A boundary belongs to the later node. */
-function innermostAt(entries: readonly Correspondence[], pos: number): Correspondence | null {
+/**
+ * The two inline nodes a position sits between, when it does: `pos` is inside a textblock and
+ * has a node on each side. `marks` is what a character typed at `pos` in the rendered view
+ * receives — `ResolvedPos.marks()`, read in `prosemirror-model` (dist/index.js, `marks()`), the
+ * set `insertText` gives the text (prosemirror-state, `Transaction.insertText`): inside a text
+ * node the node's marks; at a boundary the marks of the node *before* (the node after only at
+ * the parent's start, where nothing is before), less every mark whose spec says
+ * `inclusive: false` and which the other side lacks. `null` at a block's start, at its end, and
+ * everywhere that is not a textblock position.
+ */
+interface InlineBoundary {
+  readonly before: PMNode;
+  readonly after: PMNode;
+  readonly marks: readonly Mark[];
+}
+
+function inlineBoundary(doc: PMNode, pos: number): InlineBoundary | null {
+  if (pos < 0 || pos > doc.content.size) return null;
+  const $pos = doc.resolve(pos);
+  if (!$pos.parent.isTextblock) return null;
+  const before = $pos.nodeBefore;
+  const after = $pos.nodeAfter;
+  if (before === null || after === null) return null;
+  return { before, after, marks: $pos.marks() };
+}
+
+/**
+ * The innermost correspondence covering `pos`, or `null`.
+ *
+ * A boundary between two inline nodes of an entered block — one node's `pmEnd` and the next
+ * node's `pmStart`, one ProseMirror position whichever side the source caret takes — belongs to
+ * the node whose ProseMirror marks are the marks a character typed there receives, which is
+ * `doc.resolve(pos).marks()` ({@link InlineBoundary}; the rule is prosemirror-model's own and is
+ * never restated here as a list of mark types): the *earlier* node when the marks at the boundary
+ * equal the node before's, so that a caret at the end of an inclusive run (`~~beta.~~`, the
+ * default `inclusive`) goes inside the closing delimiter, where a letter extends the run as it
+ * does in the rendered view, and a caret after unmarked text before a run (`Alpha |~~beta.~~`)
+ * stays before the opening delimiter; the *later* node otherwise — after a `link`, whose spec
+ * says `inclusive: false`, the marks at the boundary are the plain neighbour's, and the caret
+ * leaves the link. Among the nodes ending at a boundary (a mark and its last child) the innermost
+ * wins, as it does among those starting there; `entries` is in pre-order, so it comes last.
+ * Everywhere else — inside a node, at a block's start (no node before) and at a block's end (no
+ * node after; task 1.52's rule for a trailing leaf) — the last entry covering `pos` is the answer,
+ * as before (DECISIONS #review-1-r6 L6, task 1.53).
+ */
+function innermostAt(
+  entries: readonly Correspondence[],
+  pos: number,
+  boundary: InlineBoundary | null,
+): Correspondence | null {
   let best: Correspondence | null = null;
+  let ending: Correspondence | null = null;
   for (const entry of entries) {
     if (entry.pmStart <= pos && pos <= entry.pmEnd) best = entry;
+    if (entry.pmStart < pos && entry.pmEnd === pos) ending = entry;
   }
-  return best;
+  if (boundary === null || best === null || ending === null || best.pmStart !== pos) return best;
+  return Mark.sameSet(boundary.marks, boundary.before.marks) ? ending : best;
 }
 
 /**
@@ -387,11 +438,14 @@ export interface CursorMap {
  *    `html`) when it is the innermost node, and a leaf block (`code`, `thematicBreak`, `html`)
  *    that is placed but never entered, because the map places nodes and only a text node's bytes
  *    are its text — with one exception each way. An atom is the innermost node at its own `pmEnd`
- *    only when nothing follows it in its block (a boundary belongs to the later node), and that
- *    position is the caret *after* the atom: it is answered with the atom's end, so a block ending
- *    in an image or an inline tag round-trips at its end as a block ending in text does, and an
- *    `inlineCode` run at its own `pmEnd` the same, after its closing fence ({@link isLeafEnd};
- *    task 1.52, DECISIONS #030 Decision 2). And on the delimiters of a mark
+ *    when nothing follows it in its block, or when the marks at the boundary after it are its own
+ *    ({@link innermostAt}), and that position is the caret *after* the atom: it is answered with
+ *    the atom's end, so a block ending in an image or an inline tag round-trips at its end as a
+ *    block ending in text does, and an `inlineCode` run at its block's end the same, after its
+ *    closing fence ({@link isLeafEnd}; task 1.52, DECISIONS #030 Decision 2). Which node a
+ *    boundary between two inline nodes belongs to is decided in {@link innermostAt} by
+ *    `doc.resolve(pos).marks()`, the marks a typed character takes there (task 1.53). And on the
+ *    delimiters of a mark
  *    {@link delimiterPosition} tells the opening one from the closing one; on a container's own
  *    columns {@link containerEnd} tells a block's end from the container's start.
  */
@@ -400,11 +454,12 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
   const entries = correspondences(root, doc);
   return {
     toSource(pos) {
-      const inside = innermostAt(entries, pos);
+      const boundary = inlineBoundary(doc, pos);
+      const inside = innermostAt(entries, pos, boundary);
       if (inside !== null) {
         const range = map.ranges[inside.path];
         const table = spellings[inside.path];
-        if (range !== undefined && isLeafEnd(inside, pos)) {
+        if (range !== undefined && isLeafEnd(inside, pos, boundary, table !== undefined)) {
           return { line: range.endLine, ch: range.endCol - 1 };
         }
         if (table !== undefined) {
@@ -438,16 +493,30 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
 
 /**
  * Whether `pos` is the caret *after* the inline leaf `entry` — an atom (`image`, `break`, inline
- * `html`) or an `inlineCode` run, found innermost at its own `pmEnd`. A boundary belongs to the
- * later node, so this only happens when nothing follows the leaf in its block, and that caret is
- * after the leaf's last byte: after `)`, after `</i>`, after the closing backtick fence — not
- * before the fence, where the spelling table puts the run's last offset, because the caret
- * after a code span is outside it (a space typed there is plain text, as it is in the editor).
- * A `text` node's end is its table's end already, and every other position a leaf covers (its
- * start; a run's interior) is placed as before.
+ * `html`) or an `inlineCode` run, found innermost at its own `pmEnd` — and answered with the
+ * leaf's last byte: after `)`, after `</i>`, after the closing backtick fence. At a block's end
+ * (no `boundary`) that is task 1.52's rule for every leaf: not before the fence, where the
+ * spelling table puts the run's last offset, because the caret after a code span at its block's
+ * end is outside it (a space typed there is plain text, as it is in the editor). At a boundary
+ * the leaf is innermost only when {@link innermostAt} gave it the boundary — the marks a
+ * character typed there receives are the leaf's — and then a leaf *with* a table (`inlineCode`)
+ * is answered by that table, before the closing fence, where a typed character joins the run as
+ * it does in the rendered view; a leaf without one (an atom) has no inside, and its end is the
+ * later node's start either way. A `text` node's end is its table's end already, and every other
+ * position a leaf covers (its start; a run's interior) is placed as before.
  */
-function isLeafEnd(entry: Correspondence, pos: number): boolean {
-  return entry.node.type !== "text" && !isEntered(entry.node) && pos === entry.pmEnd;
+function isLeafEnd(
+  entry: Correspondence,
+  pos: number,
+  boundary: InlineBoundary | null,
+  hasTable: boolean,
+): boolean {
+  return (
+    entry.node.type !== "text" &&
+    !isEntered(entry.node) &&
+    pos === entry.pmEnd &&
+    (boundary === null || !hasTable)
+  );
 }
 
 /**

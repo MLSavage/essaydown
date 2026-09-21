@@ -14,7 +14,7 @@ import {
 } from "@essaydown/core";
 import { EditorState as CMState, type TransactionSpec } from "@codemirror/state";
 import { EditorState, Selection, TextSelection } from "prosemirror-state";
-import { mdastToPM, schema } from "../src/schema.js";
+import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
 import {
   bindProseMirror,
   createDocumentStore,
@@ -1249,7 +1249,10 @@ describe("cursorMap: characters the serializer did not write as themselves (task
     expect(map.toRendered({ line: 1, ch: 4 })).toBe(4);
     // Opening delimiter (ch 2): before its first, which is also the end of `a `.
     expect(map.toRendered({ line: 1, ch: 2 })).toBe(3);
-    expect(map.toSource(3)).toEqual({ line: 1, ch: 3 });
+    // Position 3 is the boundary between `a ` and the run: `$pos.marks()` there is the unmarked
+    // side's, so the source caret stays before the opening `*` (ch 2; it was ch 3, inside the
+    // delimiter, until task 1.53 — see "a boundary between marked and unmarked text" below).
+    expect(map.toSource(3)).toEqual({ line: 1, ch: 2 });
     // A link's `](url)` is the same shape: the whole tail is its closing delimiter.
     const link = pair("x [a](u) y\n");
     const linkMap = cursorMap(link.root, link.doc);
@@ -1365,6 +1368,200 @@ describe("cursorMap: toRendered ∘ toSource is the identity over every text pos
     expect(charAt(doc, 6)).toBe("\n");
     expect(map.toSource(6)).toEqual({ line: 1, ch: 5 });
     expect(map.toRendered({ line: 1, ch: 5 })).toBe(6);
+  });
+});
+
+describe("a boundary between marked and unmarked text is resolved by `$pos.marks()` (task 1.53, DECISIONS #review-1-r6 L6)", () => {
+  // A boundary between two inline nodes is one ProseMirror position, and the rendered view types
+  // there with `doc.resolve(pos).marks()` (prosemirror-model's `ResolvedPos.marks()`, the set
+  // `Transaction.insertText` gives the text): the node before's marks, less every mark whose spec
+  // says `inclusive: false` that the node after lacks. The source caret must land where a typed
+  // character takes the same marks — inside the closing delimiter at an inclusive run's end,
+  // before the opening delimiter at its start — or the two views disagree about one caret:
+  // `~~beta.~~X` cannot close (CommonMark §6.2, `X` is not right-flanking after `.`), so the
+  // toggle back showed `\~\~beta.\~\~X`.
+  //
+  // The matrix: the three flanking marks × a punctuation edge and a letter edge × the run's end
+  // and the run's start. Each tuple asserts the column and the semantic instrument — `X` written
+  // into the source at that column and formatted through a reparse equals `X` inserted at `pos` in
+  // the ProseMirror doc with `$pos.marks()` and run through `pmToMdast` and `format`.
+  const DELIMITERS: Record<"emphasis" | "strong" | "delete", string> = {
+    emphasis: "*",
+    strong: "**",
+    delete: "~~",
+  };
+  const EDGES: Record<"punctuation" | "letter", string> = { punctuation: "(beta.)", letter: "beta" };
+  const HEAD = "Alpha ";
+  const TAIL = " gamma";
+
+  /** `X` at `pos` in `doc`, with the marks the rendered view gives a character typed there. */
+  function typedInRendered(doc: ReturnType<typeof mdastToPM>["doc"], pos: number): string {
+    const marks = doc.resolve(pos).marks();
+    const tr = EditorState.create({ doc }).tr.replaceWith(pos, pos, schema.text("X", marks));
+    return format(pmToMdast({ doc: tr.doc, frontMatter: null }));
+  }
+
+  /** `X` at `position` in `text`, reparsed and formatted: what the source view's keystroke yields. */
+  function typedInSource(text: string, position: { line: number; ch: number }): string {
+    const lines = text.split("\n");
+    const line = lines[position.line - 1];
+    lines[position.line - 1] = `${line.slice(0, position.ch)}X${line.slice(position.ch)}`;
+    return format(parse(lines.join("\n")));
+  }
+
+  /** The nodes of `type` in `root`, with their plain text. */
+  function runsOf(root: Root, type: string): string[] {
+    const out: string[] = [];
+    const walk = (node: { type: string; children?: unknown[]; value?: string }): void => {
+      if (node.type === type) out.push(plainText(node));
+      for (const child of (node.children ?? []) as (typeof node)[]) walk(child);
+    };
+    walk(root);
+    return out;
+  }
+
+  function plainText(node: { children?: unknown[]; value?: string }): string {
+    if (node.value !== undefined) return node.value;
+    return ((node.children ?? []) as (typeof node)[]).map(plainText).join("");
+  }
+
+  function assertInverseEverywhere(doc: ReturnType<typeof mdastToPM>["doc"], map: ReturnType<typeof cursorMap>): void {
+    const positions = textPositions(doc);
+    expect(positions.length).toBeGreaterThan(0);
+    const failures = positions
+      .map((pos) => ({ pos, back: map.toRendered(map.toSource(pos)) }))
+      .filter(({ pos, back }) => back !== pos);
+    expect(failures).toEqual([]);
+  }
+
+  for (const [mark, delimiter] of Object.entries(DELIMITERS)) {
+    for (const [edge, run] of Object.entries(EDGES)) {
+      const source = `${HEAD}${delimiter}${run}${delimiter}${TAIL}\n`;
+      const runStart = 1 + HEAD.length;
+      const runEnd = runStart + run.length;
+
+      it(`${mark}, ${edge} edge, the run's end (${JSON.stringify(source.trimEnd())}): the caret goes inside the closing delimiter, and a letter typed there extends the run in both views`, () => {
+        const { root, doc } = pair(source);
+        expect(format(root)).toBe(source);
+        const map = cursorMap(root, doc);
+        expect(doc.resolve(runEnd).marks().map((m) => m.type.name)).toEqual([mark]);
+        expect(doc.textBetween(runStart, runEnd)).toBe(run);
+        const column = HEAD.length + delimiter.length + run.length;
+        expect(map.toSource(runEnd)).toEqual({ line: 1, ch: column });
+        const rendered = typedInRendered(doc, runEnd);
+        expect(typedInSource(source, { line: 1, ch: column })).toBe(rendered);
+        expect(rendered).toBe(`${HEAD}${delimiter}${run}X${delimiter}${TAIL}\n`);
+        // The mark count survives: one run, holding the letter; no escaped delimiter.
+        expect(runsOf(parse(rendered), mark)).toEqual([`${run}X`]);
+        expect(rendered).not.toContain("\\");
+        assertInverseEverywhere(doc, map);
+      });
+
+      it(`${mark}, ${edge} edge, the run's start (${JSON.stringify(source.trimEnd())}): the caret stays before the opening delimiter, and a letter typed there does not extend the run in either view`, () => {
+        const { root, doc } = pair(source);
+        const map = cursorMap(root, doc);
+        expect(doc.resolve(runStart).marks()).toEqual([]);
+        expect(map.toSource(runStart)).toEqual({ line: 1, ch: HEAD.length });
+        const rendered = typedInRendered(doc, runStart);
+        const typed = typedInSource(source, { line: 1, ch: HEAD.length });
+        if (edge === "letter") {
+          // `X*beta*`: the opening delimiter is still left-flanking (CommonMark §6.2: followed by a
+          // letter), so the raw keystroke and the rendered view spell the same bytes.
+          expect(typed).toBe(rendered);
+          expect(rendered).toBe(`${HEAD}X${delimiter}${run}${delimiter}${TAIL}\n`);
+          expect(runsOf(parse(typed), mark)).toEqual([run]);
+        } else {
+          // `X*(beta.)*`: an opening delimiter followed by punctuation is left-flanking only after
+          // whitespace or punctuation (CommonMark §6.2), so no column agrees byte-for-byte — the
+          // rendered view keeps the run by writing the letter as a character reference (the
+          // encoded-neighbour rule, tasks 1.45/1.49), while the source view is the bytes and
+          // CommonMark un-forms the run under the raw keystroke. The two views agree on what the
+          // map decides — the letter is unmarked and the run is not extended in either — and each
+          // view's bytes are pinned as they are (journal [1.53]).
+          expect(rendered).toBe(`${HEAD}&#x58;${delimiter}${run}${delimiter}${TAIL}\n`);
+          expect(runsOf(parse(rendered), mark)).toEqual([run]);
+          expect(typed).toBe(`${HEAD}X${delimiter.replace(/./g, "\\$&")}${run}${delimiter.replace(/./g, "\\$&")}${TAIL}\n`);
+          expect(runsOf(parse(typed), mark)).toEqual([]);
+        }
+        // In neither view does a run hold the letter.
+        for (const out of [rendered, typed]) {
+          expect(runsOf(parse(out), mark).some((text) => text.includes("X"))).toBe(false);
+        }
+        assertInverseEverywhere(doc, map);
+      });
+    }
+  }
+
+  it("a `link` end (`inclusive: false`): the caret leaves the link on both sides, after `](u)` at the end and before `[` at the start", () => {
+    const source = "Alpha [beta](u) gamma\n";
+    const { root, doc } = pair(source);
+    expect(format(root)).toBe(source);
+    const map = cursorMap(root, doc);
+    const runStart = 1 + HEAD.length;
+    const runEnd = runStart + "beta".length;
+    expect(doc.textBetween(runStart, runEnd)).toBe("beta");
+    // `marks()` drops the non-inclusive link on both sides: the boundary's marks are the plain
+    // neighbour's, so the end belongs to the later node.
+    expect(doc.resolve(runEnd).marks()).toEqual([]);
+    expect(doc.resolve(runStart).marks()).toEqual([]);
+    const afterLink = HEAD.length + "[beta](u)".length;
+    expect(map.toSource(runEnd)).toEqual({ line: 1, ch: afterLink });
+    const renderedEnd = typedInRendered(doc, runEnd);
+    expect(typedInSource(source, { line: 1, ch: afterLink })).toBe(renderedEnd);
+    expect(renderedEnd).toBe("Alpha [beta](u)X gamma\n");
+    expect(map.toSource(runStart)).toEqual({ line: 1, ch: HEAD.length });
+    const renderedStart = typedInRendered(doc, runStart);
+    expect(typedInSource(source, { line: 1, ch: HEAD.length })).toBe(renderedStart);
+    expect(renderedStart).toBe("Alpha X[beta](u) gamma\n");
+    expect(runsOf(parse(renderedEnd), "link")).toEqual(["beta"]);
+    assertInverseEverywhere(doc, map);
+  });
+
+  it("an `inline_code` end: the mark is inclusive (`code: true` says nothing about boundaries), so the caret goes before the closing fence and a letter typed there joins the span in both views", () => {
+    const source = "a `cd` b\n";
+    const { root, doc } = pair(source);
+    expect(format(root)).toBe(source);
+    const map = cursorMap(root, doc);
+    // a=1, c=3, d=4 in the doc; the boundary after `d` is 5.
+    expect(doc.textBetween(3, 5)).toBe("cd");
+    expect(doc.resolve(5).marks().map((m) => m.type.name)).toEqual(["inline_code"]);
+    // Canonical `a `cd` b`: a=0, ' '=1, `=2, c=3, d=4, `=5 — before the closing fence is ch 5.
+    expect(map.toSource(5)).toEqual({ line: 1, ch: 5 });
+    const rendered = typedInRendered(doc, 5);
+    expect(typedInSource(source, { line: 1, ch: 5 })).toBe(rendered);
+    expect(rendered).toBe("a `cdX` b\n");
+    expect(runsOf(parse(rendered), "inlineCode")).toEqual(["cdX"]);
+    // The span's start is the plain side's, before the opening fence (a `2` in the doc is the
+    // boundary between `a ` and `cd`).
+    expect(doc.resolve(3).marks()).toEqual([]);
+    expect(map.toSource(3)).toEqual({ line: 1, ch: 2 });
+    expect(typedInSource(source, { line: 1, ch: 2 })).toBe(typedInRendered(doc, 3));
+    assertInverseEverywhere(doc, map);
+  });
+
+  it("an `inline_code` run at its block's end keeps task 1.52's answer, after the closing fence", () => {
+    const source = "see `foo`\n";
+    const { root, doc } = pair(source);
+    const map = cursorMap(root, doc);
+    expect(map.toSource(1 + "see foo".length)).toEqual({ line: 1, ch: "see `foo`".length });
+    assertInverseEverywhere(doc, map);
+  });
+
+  it("a one-character marked first run (`*a* y`, DECISIONS #031 (a)): a letter typed after `a` in the rendered view lands inside the run, and the source caret after it satisfies the letter leg's `ch - 1` model", () => {
+    const { root, doc } = pair("*a* y\n");
+    const map = cursorMap(root, doc);
+    // The boundary after `a` is doc position 2; `marks()` there is the emphasis.
+    expect(doc.textBetween(1, 2)).toBe("a");
+    expect(doc.resolve(2).marks().map((m) => m.type.name)).toEqual(["emphasis"]);
+    expect(map.toSource(2)).toEqual({ line: 1, ch: 2 });
+    const typed = EditorState.create({ doc }).tr.replaceWith(2, 2, schema.text("Q", doc.resolve(2).marks()));
+    const typedRoot = pmToMdast({ doc: typed.doc, frontMatter: null });
+    const text = format(typedRoot);
+    expect(text).toBe("*aQ* y\n");
+    const typedMap = cursorMap(typedRoot, typed.doc);
+    const after = typedMap.toSource(3);
+    expect(text.split("\n")[after.line - 1][after.ch - 1]).toBe("Q");
+    assertInverseEverywhere(typed.doc, typedMap);
   });
 });
 
