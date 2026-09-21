@@ -1267,6 +1267,114 @@ describe("cursorMap: characters the serializer did not write as themselves (task
   });
 });
 
+/**
+ * Every position of `doc` a caret can occupy: the ones whose parent is a textblock, computed from
+ * the doc itself (never a literal), so a source's shape decides the set — the positions between
+ * blocks are not caret positions and are not in it.
+ */
+function textPositions(doc: ReturnType<typeof mdastToPM>["doc"]): number[] {
+  const positions: number[] = [];
+  for (let pos = 0; pos <= doc.content.size; pos += 1) {
+    if (doc.resolve(pos).parent.isTextblock) positions.push(pos);
+  }
+  return positions;
+}
+
+/** `(line, ch)` as one number, for the monotonicity check. */
+function sourceKey(position: { line: number; ch: number }): number {
+  return position.line * 1_000_000 + position.ch;
+}
+
+/**
+ * The block-end positions after a trailing inline atom: every text position at the end of its
+ * textblock whose `nodeBefore` is a non-text atom (an inline `html` node of ProseMirror size 1,
+ * which has no spelling table). Computed from the doc, never a literal. At such a position
+ * `cursorMap.toSource` answers the atom's start — the non-mark branch of `delimiterPosition` in
+ * `toggle.ts`, the L5 class (a cell's end answering the row's start) — so it is a member of task
+ * 1.52's family, not of the L3 fix: DECISIONS #030 Decision 2, owner 1.52 (L5). The inverse cases
+ * below exclude exactly these positions by name until 1.52 lands.
+ */
+function trailingAtomBlockEnds(doc: ReturnType<typeof mdastToPM>["doc"]): number[] {
+  return textPositions(doc).filter((pos) => {
+    const $pos = doc.resolve(pos);
+    const before = $pos.nodeBefore;
+    return (
+      $pos.parentOffset === $pos.parent.content.size &&
+      before !== null &&
+      before.isAtom &&
+      !before.isText
+    );
+  });
+}
+
+describe("cursorMap: toRendered ∘ toSource is the identity over every text position (task 1.51, L3 and L4)", () => {
+  // The html sources of L3 (a soft line break before an inline tag; inside a mark's
+  // neighbourhood; the no-break control) and the inline-code sources of L4 (a span between text,
+  // a heading ending in a span, an unpadded and a padded value, a backtick-holding value with a
+  // two-backtick fence, an astral value). The position set is computed from each doc.
+  //
+  // `trailingAtomEnds` is how many block-end-after-atom positions the source's doc holds; those
+  // positions are excluded from the inverse by name (DECISIONS #030 Decision 2, owner 1.52 (L5):
+  // the block end after a trailing inline atom is an L5 member, `delimiterPosition`'s non-mark
+  // branch in toggle.ts, which this task does not touch). Two html sources end their block in an
+  // inline atom and hold one such position each; every other source holds none, so on every
+  // source without one the inverse is asserted over every text position.
+  const SOURCES: { source: string; trailingAtomEnds: number }[] = [
+    { source: "alpha beta\n<span>x</span> gamma\n", trailingAtomEnds: 0 },
+    { source: "alpha\n<i>beta</i>\n", trailingAtomEnds: 1 },
+    { source: "*a*\n<b>x</b>\n", trailingAtomEnds: 1 },
+    { source: "alpha <i>beta</i> gamma\n", trailingAtomEnds: 0 },
+    { source: "a `cd` b\n", trailingAtomEnds: 0 },
+    { source: "# h `c`\n", trailingAtomEnds: 0 },
+    { source: "` a`\n", trailingAtomEnds: 0 },
+    { source: "`  a  `\n", trailingAtomEnds: 0 },
+    { source: "``a`b``\n", trailingAtomEnds: 0 },
+    { source: "`😀`\n", trailingAtomEnds: 0 },
+  ];
+
+  for (const { source, trailingAtomEnds } of SOURCES) {
+    const exclusion =
+      trailingAtomEnds === 0
+        ? ""
+        : " except the block end after the trailing inline atom (#030, owner 1.52 (L5))";
+    it(`${JSON.stringify(source.trimEnd())}: the inverse holds at every text position${exclusion}, and toSource is monotone over them`, () => {
+      const { root, doc } = pair(source);
+      const map = cursorMap(root, doc);
+      const excluded = trailingAtomBlockEnds(doc);
+      expect(excluded).toHaveLength(trailingAtomEnds);
+      const positions = textPositions(doc).filter((pos) => !excluded.includes(pos));
+      expect(positions.length).toBeGreaterThan(0);
+      const failures = positions
+        .map((pos) => ({ pos, back: map.toRendered(map.toSource(pos)) }))
+        .filter(({ pos, back }) => back !== pos);
+      expect(failures).toEqual([]);
+      const keys = positions.map((pos) => sourceKey(map.toSource(pos)));
+      for (let index = 1; index < keys.length; index += 1) {
+        expect(keys[index], `position ${positions[index]}`).toBeGreaterThanOrEqual(keys[index - 1]);
+      }
+    });
+  }
+
+  it("`a `+\"`cd`\"+` b`: the position between `c` and `d` names the column between them (the L4 reproduction)", () => {
+    const { root, doc } = pair("a `cd` b\n");
+    const map = cursorMap(root, doc);
+    expect(charAt(doc, 3)).toBe("c");
+    expect(charAt(doc, 4)).toBe("d");
+    // Canonical `a `cd` b`: a=0, ' '=1, `=2, c=3, d=4, `=5 — between `c` and `d` is ch 4.
+    expect(map.toSource(4)).toEqual({ line: 1, ch: 4 });
+    expect(map.toRendered({ line: 1, ch: 4 })).toBe(4);
+  });
+
+  it("`alpha\\n<i>beta</i>`: the caret before the soft line break names the column of the space (the L3 reproduction)", () => {
+    const { root, doc } = pair("alpha\n<i>beta</i>\n");
+    const map = cursorMap(root, doc);
+    expect(formatWithMap(root).text).toBe("alpha <i>beta</i>\n");
+    expect(charAt(doc, 6)).toBe("\n");
+    expect(map.toSource(6)).toEqual({ line: 1, ch: 5 });
+    expect(map.toRendered({ line: 1, ch: 5 })).toBe(6);
+  });
+});
+
 describe("canonicalCursor: a live source buffer that is not canonical (task 1.16)", () => {
   it("extra blank lines: the cursor before `beta` is canonical line 3 ch 0", () => {
     // Sol's reproduction. `alpha\n\n\n\nbeta` serialises to `alpha\n\nbeta\n`, so the live line 5

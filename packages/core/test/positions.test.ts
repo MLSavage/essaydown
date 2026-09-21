@@ -635,11 +635,17 @@ describe("formatWithMap: the spelling table of each text node", () => {
     expect(spellingPoint(lineStarts, table, 3)).toEqual({ line: 1, column: 7 });
   });
 
-  it("has one table per text node and none for any other node", () => {
+  it("has one table per text and inlineCode node and none for any other node (task 1.51, L4: inlineCode joined text)", () => {
     const { map, spellings } = formatWithMap(parse("# H\n\n`code` and <b>x</b>\n"));
-    const texts = map.entries.filter((entry) => entry.node.type === "text").map((e) => e.path);
-    expect(texts.length).toBeGreaterThan(0);
-    expect(Object.keys(spellings).sort()).toEqual(texts.sort());
+    const valued = map.entries
+      .filter((entry) => entry.node.type === "text" || entry.node.type === "inlineCode")
+      .map((e) => e.path);
+    const others = map.entries.filter((entry) => !valued.includes(entry.path));
+    // Presence on both classes, and absence on the rest (`html`, the blocks, the root).
+    expect(map.entries.some((entry) => entry.node.type === "inlineCode")).toBe(true);
+    expect(map.entries.some((entry) => entry.node.type === "text")).toBe(true);
+    expect(others.some((entry) => entry.node.type === "html")).toBe(true);
+    expect(Object.keys(spellings).sort()).toEqual(valued.sort());
   });
 
   it("clamps an index and a column that are outside the value", () => {

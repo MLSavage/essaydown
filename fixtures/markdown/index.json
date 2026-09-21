@@ -475,6 +475,22 @@
       1
     ]
   },
+  "inline-html.md": {
+    "nodeTypes": [
+      "emphasis",
+      "html",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 3,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      3,
+      5
+    ]
+  },
   "link-in-emphasis.md": {
     "nodeTypes": [
       "delete",

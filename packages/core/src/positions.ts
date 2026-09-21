@@ -69,6 +69,27 @@ export interface PositionMap {
  * end is past both, and belongs to the character after). A raw surrogate pair in plain text keeps
  * its two one-unit spellings. Every other rule in {@link spellingOffsets} consumes at least one
  * character.
+ *
+ * **Line ending as space.** A `text` value ending in a line ending whose next sibling is `html`
+ * has that line ending written as one space by the parent (`container-phrasing.js` 66–75, the
+ * third branch {@link rewrittenEmissions} names). The line ending is one UTF-16 unit (`\n`, the
+ * only one `parse` leaves in a value) and the space is one unit, so the space is recorded as the
+ * line ending's spelling at the same offset — one unit for one unit — and every offset before and
+ * after it is unchanged. A `\r\n` value ending (never produced by `parse`, but a tree is any
+ * `Root`) follows the surrogate rule above: `\r` owns the space, `\n` is zero width at its end.
+ *
+ * **Inline code.** An `inlineCode` node's characters are its `value`, written one UTF-16 unit per
+ * unit between the fence and its optional padding (`lib/handle/inline-code.js`: the fence is as
+ * many backticks as it takes to differ from every backtick run in the value, lines 19–24; one
+ * space of padding on each side when the value starts *and* ends with a space or line ending, or
+ * starts or ends with a backtick, lines 26–33; a line ending followed by something that would open
+ * a block is written as a space, lines 42–66, one unit for one unit). The fence and the padding are
+ * owned by no character: the position before the first character maps to the offset after the
+ * opening fence and padding (`starts[0]`), and the position after the last character to the offset
+ * before the closing padding and fence (`starts[value.length]`), so `spellingPoint` and
+ * `spellingIndex` read the table exactly as they read a `text` node's, and an offset on the fence
+ * or the padding belongs to the character after it (the opening side) or to the end of the value
+ * (the closing side). See {@link inlineCodeSpelling}.
  */
 export interface SpellingTable {
   /** `starts[i]` is where value character `i`'s spelling begins; `starts[n]` is the last end. */
@@ -82,10 +103,11 @@ export interface FormatWithMapResult {
   text: string;
   map: PositionMap;
   /**
-   * One {@link SpellingTable} per `text` node of the tree, by path — the node's characters in
-   * `text`'s own offsets. A `text` node the serializer wrote in a way {@link spellingOffsets}
-   * cannot account for has no entry, and so does every node that is not `text`: only a `text`
-   * node's bytes are its characters (see {@link formatWithMap}).
+   * One {@link SpellingTable} per `text` and `inlineCode` node of the tree, by path — the node's
+   * characters in `text`'s own offsets. A node the serializer wrote in a way
+   * {@link spellingOffsets} or {@link inlineCodeSpelling} cannot account for has no entry, and so
+   * does every node of any other type: only a `text` node's and an `inlineCode` node's bytes are
+   * its characters (see {@link formatWithMap}).
    */
   spellings: Record<string, SpellingTable>;
   /** The offset each line of `text` starts at: 1-based line `n` is at index `n - 1`. */
@@ -232,12 +254,19 @@ export function pathDepth(path: string): number {
  * characters that can *be* a prefix, so a real mismatch is still a refusal rather than a silent
  * resynchronisation. {@link SpellingTable} states which character owns it.
  *
+ * `eolAsSpace` is set by {@link placeChildren} exactly when the child was found in the form the
+ * parent rewrote before an `html` sibling ({@link rewrittenEmissions}' fourth candidate): the
+ * value's trailing line ending is then spelled by the one space at its offset, the rule
+ * {@link SpellingTable} states. It is never tried otherwise, so a space in the bytes is not read
+ * as a line ending anywhere else.
+ *
  * Pure: it reads two strings and allocates two arrays.
  */
 export function spellingOffsets(
   value: string,
   written: string,
   from = 0,
+  eolAsSpace = false,
 ): SpellingTable | undefined {
   const starts: number[] = [];
   const ends: number[] = [];
@@ -245,6 +274,18 @@ export function spellingOffsets(
   let afterLineEnding = false;
   for (let index = 0; index < value.length; index += 1) {
     const character = value[index];
+    // The trailing line ending the parent wrote as one space: the first unit owns the space, a
+    // second unit (`\r\n`) is the zero-width item at its end, as for a surrogate pair.
+    if (eolAsSpace && written.charAt(at) === SPACE && isTrailingLineEnding(value, index)) {
+      starts.push(at);
+      ends.push(at + 1);
+      if (index + 1 < value.length) {
+        starts.push(at + 1);
+        ends.push(at + 1);
+      }
+      at += 1;
+      break;
+    }
     // The direct match is tried first, so a prefix character is only ever skipped where it does
     // not spell the character being placed.
     while (
@@ -279,6 +320,18 @@ export function spellingOffsets(
 
 /** The characters a continuation prefix is made of: a blockquote's marker and indentation. */
 const CONTINUATION = new Set([" ", "\t", ">"]);
+
+/** The one space `container-phrasing.js` writes for a line ending before `html`. */
+const SPACE = " ";
+
+/** The line endings `container-phrasing.js` replaces: `/(\r?\n|\r)$/`, read at line 72. */
+const TRAILING_LINE_ENDING = /(\r?\n|\r)$/;
+
+/** Whether the rest of `value` from `index` is exactly its trailing line ending. */
+function isTrailingLineEnding(value: string, index: number): boolean {
+  const rest = value.slice(index);
+  return rest === "\n" || rest === "\r" || rest === "\r\n";
+}
 
 /** A numeric character reference, hexadecimal or decimal — the two spellings `safe` can emit. */
 const REFERENCE = /^&#(?:x([0-9a-f]+)|([0-9]+));/i;
@@ -502,83 +555,180 @@ function placeChildren(
   const container = indent && shift ? indent.source : emission.value;
   const local: OffsetMap = shift ? (offset) => toAbsolute(shift(offset)) : toAbsolute;
   let cursor = 0;
-  for (const child of lastPerNode(emission.children)) {
-    const found = locateEmission(container, child, cursor);
-    if (found === undefined) continue;
+  const children = lastPerNode(emission.children);
+  children.forEach((child, index) => {
+    // The sibling `containerPhrasing` looks at before rewriting this child's trailing line ending
+    // is the next *dispatched* child: a `text` child is dispatched exactly once (it has `peek`),
+    // and `lastPerNode` keeps the emissions in document order.
+    const beforeHtml = children[index + 1]?.node.type === "html";
+    const found = locateEmission(container, child, cursor, beforeHtml);
+    if (found === undefined) return;
     const { at, length } = found;
     const start = local(at);
     spans.set(child.node, { start, end: length === 0 ? start : local(at + length - 1) + 1 });
     cursor = at + length;
     const inside: OffsetMap = (offset) => local(at + offset);
     if (child.node.type === "text") {
-      const table = spellingOffsets(child.node.value, container, at);
+      const table = spellingOffsets(child.node.value, container, at, found.eolAsSpace);
       if (table !== undefined) spellings.set(child.node, absoluteSpelling(table, local));
+    }
+    if (child.node.type === "inlineCode") {
+      const table = inlineCodeSpelling(child.node.value, child.value);
+      if (table !== undefined) spellings.set(child.node, absoluteSpelling(table, inside));
     }
     placeChildren(child, inside, spans, spellings);
     // After the recursion, so the cells' own contents are already placed and a cell's explicit
     // range can be widened to cover them.
     if (child.node.type === "table") placeTableGrid(child.node, child.value, inside, spans);
-  }
+  });
 }
 
 /** Where one child's emission was found in its parent's string, and how long it is there. */
 interface Located {
   at: number;
   length: number;
+  /** Whether the form found is one whose trailing line ending the parent wrote as a space. */
+  eolAsSpace: boolean;
+}
+
+/** One form a child's emission can take in its parent's string (see {@link rewrittenEmissions}). */
+interface Candidate {
+  text: string;
+  /** Whether this form's trailing line ending was replaced by one space. */
+  eolAsSpace: boolean;
 }
 
 /**
  * Locate `child`'s emission in `container`, searching forward from `cursor` — the emission as the
  * handler returned it, or, for a `text` child, as the parent rewrote it afterwards (see
- * {@link rewrittenEmissions}). Every candidate is searched from `cursor` and the earliest match
- * wins, so a later repeated literal is never mistaken for this child: the child's own bytes start
- * at the cursor or right after the parent's own delimiters, and nothing the parent writes there
- * spells a candidate. Two candidates cannot start at the same offset (they differ in their first
- * or last bytes), so the tie-break is never reached; the span's length is the matched string's.
+ * {@link rewrittenEmissions}; `beforeHtml` says whether the child's next sibling is `html`).
+ * Every candidate is searched from `cursor` and the earliest match wins, so a later repeated
+ * literal is never mistaken for this child: the child's own bytes start at the cursor or right
+ * after the parent's own delimiters, and nothing the parent writes there spells a candidate. Two
+ * candidates cannot start at the same offset (they differ in their first or last bytes), so the
+ * tie-break is never reached; the span's length is the matched string's.
  */
-function locateEmission(container: string, child: Emission, cursor: number): Located | undefined {
-  const candidates =
-    child.node.type === "text" ? [child.value, ...rewrittenEmissions(child.value)] : [child.value];
+function locateEmission(
+  container: string,
+  child: Emission,
+  cursor: number,
+  beforeHtml: boolean,
+): Located | undefined {
+  const candidates: Candidate[] =
+    child.node.type === "text"
+      ? [{ text: child.value, eolAsSpace: false }, ...rewrittenEmissions(child.value, beforeHtml)]
+      : [{ text: child.value, eolAsSpace: false }];
   let best: Located | undefined;
   for (const candidate of candidates) {
-    const at = container.indexOf(candidate, cursor);
+    const at = container.indexOf(candidate.text, cursor);
     if (at < 0 || (best !== undefined && at >= best.at)) continue;
-    best = { at, length: candidate.length };
+    best = { at, length: candidate.text.length, eolAsSpace: candidate.eolAsSpace };
   }
   return best;
 }
 
 /**
  * The forms a `text` child's emission can take in its parent's string after the parent rewrote
- * an edge of it, in the order they are tried. `mdast-util-to-markdown/lib/util/container-phrasing.js`
- * encodes the neighbour of an attention run *after* the child's handler returned — the first
- * UTF-16 unit of the child after the run (`encodeAfter`) and the last unit of the child before
- * it (`encodingInfo.before`), each as `encodeCharacterReference(unit.charCodeAt(0))` — and the
- * `emphasis`, `strong` and `delete` handlers do the same to the inner edge of their own
- * `containerPhrasing` result; task 1.45's wrapper (`format.ts`) widens a unit of a surrogate pair
- * to the pair's code point, so what reaches the bytes is one code point replaced by its numeric
- * character reference at the value's first position, at its last, or at both. No other rewrite of a
- * handler's output exists in the installed package (`safe()` runs inside the handler, and
- * punctuation is never encoded), so these three are the whole enumeration: the value with its
- * first code point replaced, with its last replaced, and with both — collapsing, for a value of
+ * an edge of it, in the order they are tried. The enumeration is derived from the branches of
+ * `mdast-util-to-markdown/lib/util/container-phrasing.js` (2.1.2, read in `node_modules`) that
+ * touch a child's string after its handler returned — three, and nothing else in that function
+ * rewrites a result (`safe()` runs inside the handler, and punctuation is never encoded):
+ *
+ * 1. Lines 88–94, `encodeAfter`: the first UTF-16 unit of the child after an attention run is
+ *    replaced by `encodeCharacterReference(unit.charCodeAt(0))` when the run asked for it.
+ * 2. Lines 100–115, `encodingInfo.before`: the last unit of the child before an attention run is
+ *    replaced the same way. The `emphasis`, `strong` and `delete` handlers do the same to the
+ *    inner edge of their own `containerPhrasing` result.
+ * 3. Lines 60–80, the line ending before `html`: when the next child is `html` and the previous
+ *    child's string ends in a line ending (`before === '\r' || before === '\n'`), that line
+ *    ending is replaced by one space — `results[results.length - 1].replace(/(\r?\n|\r)$/, ' ')`,
+ *    line 71 — so that the html is not read as flow html on a line of its own.
+ *
+ * Task 1.45's wrapper (`format.ts`, `widenSplitSurrogateReferences`) then widens a unit of a
+ * surrogate pair that branches 1 and 2 encoded to the pair's code point, in three forms: a
+ * reference beside its raw mate, in both orders (a leading unit encoded before its raw trailing
+ * unit, and a raw leading unit before its encoded trailing unit), and two adjacent references
+ * (one character between two runs, both branches on the same pair). So what reaches the bytes
+ * from branches 1 and 2 is one code point replaced by its numeric character reference at the
+ * value's first position, at its last, or at both — the first three candidates: the value with
+ * its first code point replaced, with its last replaced, and with both, collapsing, for a value of
  * one code point, to the whole value as the reference. The reference is spelled the way
  * `encode-character-reference.js` and the wrapper spell it: `&#x`, the code point in upper-case
  * hexadecimal without padding, `;`.
+ *
+ * Branch 3 gives the fourth candidate, tried only when `beforeHtml` says the child's next
+ * sibling is `html` (the flag is passed from {@link placeChildren}, which sees the siblings): the
+ * value with its trailing line ending replaced by one space. Branch 3 can combine with branch 1
+ * (a child after a run *and* before html), so the head form gets its line ending replaced too;
+ * the tail and both forms end in a reference, never a line ending, because a line ending before
+ * an attention run is never encoded and a child before html is not before a run. A `break`
+ * child before `html` is rewritten by the same branch and stays unresolved: its string is the
+ * serializer's, not a value's, and the map has no characters to spell for it.
  */
-function rewrittenEmissions(value: string): string[] {
+function rewrittenEmissions(value: string, beforeHtml: boolean): Candidate[] {
   const points = [...value];
   if (points.length === 0) return [];
   const first = points[0];
   const last = points[points.length - 1];
-  if (points.length === 1) return [characterReference(first)];
-  const head = characterReference(first) + value.slice(first.length);
-  const tail = value.slice(0, value.length - last.length) + characterReference(last);
-  const both =
-    characterReference(first) +
-    value.slice(first.length, value.length - last.length) +
-    characterReference(last);
-  return [head, tail, both];
+  const encoded: string[] = [];
+  if (points.length === 1) {
+    encoded.push(characterReference(first));
+  } else {
+    const head = characterReference(first) + value.slice(first.length);
+    const tail = value.slice(0, value.length - last.length) + characterReference(last);
+    const both =
+      characterReference(first) +
+      value.slice(first.length, value.length - last.length) +
+      characterReference(last);
+    encoded.push(head, tail, both);
+  }
+  const candidates: Candidate[] = encoded.map((text) => ({ text, eolAsSpace: false }));
+  if (beforeHtml) {
+    for (const text of [value, ...encoded]) {
+      if (!TRAILING_LINE_ENDING.test(text)) continue;
+      candidates.push({ text: text.replace(TRAILING_LINE_ENDING, SPACE), eolAsSpace: true });
+    }
+  }
+  return candidates;
 }
+
+/**
+ * The spelling table of an `inlineCode` node whose handler emitted `written`
+ * (`mdast-util-to-markdown/lib/handle/inline-code.js`): the fence, the optional padding, the
+ * value one UTF-16 unit per unit, the padding, the fence — the ownership rule
+ * {@link SpellingTable} states. `undefined` when `written` is not of that shape (a fence that
+ * does not close, an inner string of a length the value and the padding do not account for), so a
+ * caller is never handed a wrong alignment. The inner string is compared unit by unit against the
+ * value, a line ending in the value allowed to be the space the handler swaps it for.
+ */
+export function inlineCodeSpelling(value: string, written: string): SpellingTable | undefined {
+  let fence = 0;
+  while (fence < written.length && written[fence] === FENCE) fence += 1;
+  if (fence === 0 || written.length < 2 * fence || !written.endsWith(FENCE.repeat(fence))) {
+    return undefined;
+  }
+  const inner = written.slice(fence, written.length - fence);
+  const padding = inner.length === value.length + 2 ? 1 : 0;
+  if (inner.length !== value.length + 2 * padding) return undefined;
+  if (padding === 1 && (inner[0] !== SPACE || inner[inner.length - 1] !== SPACE)) return undefined;
+  const from = fence + padding;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value[index];
+    const spelled = written[from + index];
+    if (spelled !== unit && !(spelled === SPACE && (unit === "\n" || unit === "\r"))) return undefined;
+  }
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    starts.push(from + index);
+    ends.push(from + index + 1);
+  }
+  starts.push(from + value.length);
+  return { starts, ends };
+}
+
+/** The character an inline code fence is made of. */
+const FENCE = "`";
 
 /** The numeric character reference `encode-character-reference.js` writes for `point`. */
 function characterReference(point: string): string {
