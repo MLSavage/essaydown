@@ -65,8 +65,82 @@ async function seedFromSource(page: Page, text: string): Promise<void> {
   await page.locator(".ProseMirror").waitFor();
 }
 
+/**
+ * The rendered caret as the DOM selection reports it: the anchor text node's text, byte for byte,
+ * and the caret's offset in it (the shape `editor-astral-between-runs.spec.ts` uses).
+ */
+function caret(page: Page): Promise<{ text: string | null; offset: number }> {
+  return page.evaluate(() => {
+    const selection = document.getSelection();
+    if (selection === null || selection.anchorNode === null) return { text: null, offset: -1 };
+    if (!selection.isCollapsed) return { text: null, offset: -1 };
+    const anchor = selection.anchorNode;
+    const anchorOffset = selection.anchorOffset;
+    if (anchor.nodeType === Node.TEXT_NODE) return { text: anchor.textContent, offset: anchorOffset };
+    // Blink anchors the selection on an ancestor element, at the child index, when the caret
+    // sits right after text abutting a contenteditable="false" widget (a revealed delimiter) —
+    // the same position `textBeforeCaret` below already treats as equivalent to the end of the
+    // preceding text node, by walking the block's text nodes; without this a repeated Backspace
+    // that keeps the caret in that spot reads the same child count every time and `press`'s
+    // differ poll never sees it change.
+    const element = (anchor as Element).closest?.(".ProseMirror > *") ?? anchor.parentElement?.closest(".ProseMirror > *");
+    const block = element ?? null;
+    if (block === null) return { text: null, offset: anchorOffset };
+    const range = document.createRange();
+    range.setStart(anchor, anchorOffset);
+    range.collapse(true);
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let last: Text | null = null;
+    let node = walker.nextNode();
+    while (node !== null) {
+      if (range.comparePoint(node, node.textContent?.length ?? 0) > 0) break;
+      // A revealed delimiter's own text ("*", "**", ...) is a decoration, not document text —
+      // `textBeforeCaret` above excludes it the same way.
+      if (node.parentElement?.closest(".essaydown-delimiter") === null) last = node as Text;
+      node = walker.nextNode();
+    }
+    if (last === null) return { text: null, offset: anchorOffset };
+    return { text: last.textContent, offset: last.textContent?.length ?? 0 };
+  });
+}
+
+/**
+ * Fires `key` `times` times for a counted horizontal motion, waiting after each press for the DOM
+ * caret to differ from its reading taken before that press — the fix for the blind, unsynchronised
+ * press the 1.verify.r6h gate's a1 run caught one short (editor-soft-line-breaks.spec.ts:111,
+ * DECISIONS #review-1-r6 L7, #034). A count crossing a node boundary (the anchor text changes, the
+ * offset resets) is covered by "differs": the reading taken after a press never equals the one
+ * taken before it. This form is for `ArrowLeft`/`ArrowRight`/`Backspace`, which always move the
+ * caret on a genuine press; a vertical motion pressed past the edge it reaches never differs and
+ * uses `pressToEdge` below instead.
+ */
 async function press(page: Page, key: string, times: number): Promise<void> {
-  for (let step = 0; step < times; step += 1) await page.keyboard.press(key);
+  for (let step = 0; step < times; step += 1) {
+    const previous = JSON.stringify(await caret(page));
+    await page.keyboard.press(key);
+    await expect.poll(async () => JSON.stringify(await caret(page)) !== previous).toBe(true);
+  }
+}
+
+/**
+ * Fires `key` `times` times, waiting after each press for the DOM caret to settle (two consecutive
+ * reads agreeing) before firing the next one — the form for a vertical motion pressed more than
+ * once to reach a one-line block's edge regardless of which line the caret started on, where a
+ * later press genuinely leaves the caret in place and `press`'s differ-after-each form would time
+ * out waiting for a change that is never coming. The spec's own anchor assertion after the call is
+ * what checks the edge was actually reached (DECISIONS #review-1-r6 L7, #034).
+ */
+async function pressToEdge(page: Page, key: string, times: number): Promise<void> {
+  for (let step = 0; step < times; step += 1) {
+    await page.keyboard.press(key);
+    let previous: string | undefined;
+    await expect.poll(async () => {
+      const current = JSON.stringify(await caret(page));
+      const settled = previous === current;
+      previous = current;
+      return settled;
+    }).toBe(true);
+  }
 }
 
 /**
@@ -123,7 +197,7 @@ test.describe("a hard break left last in a marked run by a deletion never reache
     // The caret after `blue`: to the block's end by Blink's line motion (twice, so the count does
     // not depend on which line the toggle left the caret on), then back over the unmarked tail.
     await page.locator(".ProseMirror").click();
-    await press(page, "ArrowDown", 2);
+    await pressToEdge(page, "ArrowDown", 2);
     await press(page, "ArrowLeft", after.length);
     // The precondition, asserted on its own: the caret sits at the end of the verse's second
     // line (the block's text so far, the `<br>` contributing nothing), so the deletion below

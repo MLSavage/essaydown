@@ -76,13 +76,48 @@ async function seedFromSource(page: Page, text: string): Promise<void> {
   await page.locator(".ProseMirror").waitFor();
 }
 
+/**
+ * Fires `key` `times` times for a counted horizontal motion, waiting after each press for the DOM
+ * caret to differ from its reading taken before that press — the fix for the blind, unsynchronised
+ * press the 1.verify.r6h gate's a1 run caught one short (editor-soft-line-breaks.spec.ts:111,
+ * DECISIONS #review-1-r6 L7, #034). A count crossing a node boundary (the anchor text changes, the
+ * offset resets) is covered by "differs": the reading taken after a press never equals the one
+ * taken before it. This form is for `ArrowLeft`/`ArrowRight`/`Backspace`, which always move the
+ * caret on a genuine press; a vertical motion pressed past the edge it reaches never differs and
+ * uses `pressToEdge` below instead.
+ */
 async function press(page: Page, key: string, times: number): Promise<void> {
-  for (let step = 0; step < times; step += 1) await page.keyboard.press(key);
+  for (let step = 0; step < times; step += 1) {
+    const previous = JSON.stringify(await caret(page));
+    await page.keyboard.press(key);
+    await expect.poll(async () => JSON.stringify(await caret(page)) !== previous).toBe(true);
+  }
+}
+
+/**
+ * Fires `key` `times` times, waiting after each press for the DOM caret to settle (two consecutive
+ * reads agreeing) before firing the next one — the form for a vertical motion pressed more than
+ * once to reach a one-line block's edge regardless of which line the caret started on, where a
+ * later press genuinely leaves the caret in place and `press`'s differ-after-each form would time
+ * out waiting for a change that is never coming. The spec's own anchor assertion after the call is
+ * what checks the edge was actually reached (DECISIONS #review-1-r6 L7, #034).
+ */
+async function pressToEdge(page: Page, key: string, times: number): Promise<void> {
+  for (let step = 0; step < times; step += 1) {
+    await page.keyboard.press(key);
+    let previous: string | undefined;
+    await expect.poll(async () => {
+      const current = JSON.stringify(await caret(page));
+      const settled = previous === current;
+      previous = current;
+      return settled;
+    }).toBe(true);
+  }
 }
 
 /** To the document's end: `ArrowDown` once per visual line the document renders (see the file comment). */
 async function toDocumentEnd(page: Page, lines: number): Promise<void> {
-  await press(page, "ArrowDown", lines);
+  await pressToEdge(page, "ArrowDown", lines);
 }
 
 /**

@@ -66,8 +66,42 @@ async function seedFromSource(page: Page, text: string): Promise<void> {
   await page.locator(".ProseMirror").waitFor();
 }
 
-async function press(page: Page, key: string, times: number): Promise<void> {
-  for (let step = 0; step < times; step += 1) await page.keyboard.press(key);
+/**
+ * The rendered caret as the DOM selection reports it: the anchor text node's text, byte for byte,
+ * and the caret's offset in it (the shape `editor-astral-between-runs.spec.ts` uses).
+ */
+function caret(page: Page): Promise<{ text: string | null; offset: number }> {
+  return page.evaluate(() => {
+    const selection = document.getSelection();
+    if (selection === null || selection.anchorNode === null) return { text: null, offset: -1 };
+    if (!selection.isCollapsed) return { text: null, offset: -1 };
+    const node = selection.anchorNode;
+    if (node.nodeType !== Node.TEXT_NODE) return { text: null, offset: selection.anchorOffset };
+    return { text: node.textContent, offset: selection.anchorOffset };
+  });
+}
+
+/**
+ * Fires `key` `times` times, waiting after each press for the DOM caret to settle (two consecutive
+ * reads agreeing) before firing the next one — the form for a vertical motion pressed more than
+ * once to reach a one-line block's edge regardless of which line the caret started on, where a
+ * later press genuinely leaves the caret in place and a differ-after-each form (the counted
+ * horizontal `press` other specs in this directory use) would time out waiting for a change that
+ * is never coming; this file's two counted presses are both vertical, so it defines only this
+ * form. The spec's own anchor assertion after the call is what checks the edge was actually
+ * reached (DECISIONS #review-1-r6 L7, #034).
+ */
+async function pressToEdge(page: Page, key: string, times: number): Promise<void> {
+  for (let step = 0; step < times; step += 1) {
+    await page.keyboard.press(key);
+    let previous: string | undefined;
+    await expect.poll(async () => {
+      const current = JSON.stringify(await caret(page));
+      const settled = previous === current;
+      previous = current;
+      return settled;
+    }).toBe(true);
+  }
 }
 
 /**
@@ -140,7 +174,7 @@ test.describe("a link's edge whitespace is the link's, at a mark's edge and at a
     // The caret at the block's end by Blink's line motion (twice, so the count does not depend
     // on which line the toggle left the caret on); the precondition asserted on its own.
     await page.locator(".ProseMirror").click();
-    await press(page, "ArrowDown", 2);
+    await pressToEdge(page, "ArrowDown", 2);
     expect(await textBeforeCaret(page)).toBe("a b  c");
 
     // Before this task the pane read `*a [b](u)*[ ](u) cd`: the link's space moved out of the
@@ -160,7 +194,7 @@ test.describe("a link's edge whitespace is the link's, at a mark's edge and at a
     // The caret at the block's start by Blink's line motion (a one-line block, so `ArrowUp`
     // reaches its start on every OS); the precondition asserted on its own.
     await page.locator(".ProseMirror").click();
-    await press(page, "ArrowUp", 2);
+    await pressToEdge(page, "ArrowUp", 2);
     expect(await textBeforeCaret(page)).toBe("");
 
     // Before this task the pane read `Xsee [the essay](u)`: the block's end took the link's

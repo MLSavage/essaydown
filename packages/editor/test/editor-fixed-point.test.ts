@@ -469,6 +469,31 @@ function expectTextMatchesEditor(doc: PMNode, out: string, label?: string): void
   );
 }
 
+/** Every ASCII space, tab and line ending run in `value`, removed. */
+function withoutAsciiWhitespace(value: string): string {
+  return value.replace(/[ \t\n]+/g, "");
+}
+
+/**
+ * L8 (DECISIONS #review-1-r6, corpus-caller half): {@link expectTextMatchesEditor} compared exact
+ * texts, so 1.47 gave it only to the two mark's-neighbour legs — every other corpus leg types or
+ * deletes whitespace the editor's `textContent` still holds after the transaction but that
+ * `stripUnparsableWhitespace` (schema.ts) drops from the bytes `format` writes, and an exact
+ * comparison would fail on that whitespace alone, not on a lost character. Removing every ASCII
+ * whitespace run from both sides first is immune to that mismatch while still catching what
+ * {@link decodeReferences} cannot: a character the parse lost or replaced (U+FFFD for a split
+ * astral reference) still differs after the removal, because it is a difference of a non-whitespace
+ * character, not of whitespace.
+ */
+function expectTextMatchesEditorIgnoringWhitespace(doc: PMNode, out: string, label?: string): void {
+  expect(
+    inlineBlockTexts(parse(out) as unknown as { type: string; children?: unknown[] }).map(
+      withoutAsciiWhitespace,
+    ),
+    label,
+  ).toEqual(editorBlockTexts(doc).map(withoutAsciiWhitespace));
+}
+
 /**
  * The two assertions every guard below makes: the bytes `format` writes, and that those bytes are
  * a fixed point of `parse`∘`format` — the second is the round trip the finding is about, and the
@@ -1419,6 +1444,7 @@ describe("editor fixed point over the corpus", () => {
       expect(out).toBe(canonical);
       expect(format(parse(out))).toBe(out);
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditorIgnoringWhitespace(typed.doc, out, name);
     });
 
     it(`${name} is an editor fixed point after a letter is typed inside every block`, () => {
@@ -1439,14 +1465,17 @@ describe("editor fixed point over the corpus", () => {
       expect(out.length - canonical.length).toBe(typed.typed);
       expect(format(parse(out))).toBe(out);
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditorIgnoringWhitespace(typed.doc, out, name);
     });
 
     it(`${name} is an editor fixed point unchanged (the absence case)`, () => {
       const canonical = format(parse(read(name)));
-      const out = format(pmToMdast(mdastToPM(parse(read(name)))));
+      const converted = mdastToPM(parse(read(name)));
+      const out = format(pmToMdast(converted));
       expect(out).toBe(canonical);
       expect(format(parse(out))).toBe(out);
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditorIgnoringWhitespace(converted.doc, out, name);
     });
 
     it(`${name} is an editor fixed point after deletion: the continuation after every hard break, then the last character of every block's last run`, () => {
@@ -1466,6 +1495,7 @@ describe("editor fixed point over the corpus", () => {
       // trailing backslash that `parse` read as a literal one, and this was not a fixed point.
       expect(format(parse(out))).toBe(out);
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditorIgnoringWhitespace(deleted.doc, out, name);
     });
 
     it(`${name} is an editor fixed point after deletion to the end of every marked run that holds a hard break (the atom at the mark edge)`, () => {
@@ -1488,6 +1518,7 @@ describe("editor fixed point over the corpus", () => {
       expect(format(parse(out))).toBe(out);
       expect(breaksIn(parse(out))).toBe(breaksIn(root));
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditorIgnoringWhitespace(deleted.doc, out, name);
     });
 
     it(`${name} is an editor fixed point after a space is typed inside every marked run, at its end (the mark edge)`, () => {
@@ -1503,6 +1534,7 @@ describe("editor fixed point over the corpus", () => {
       // (and, for strikethrough, the tildes stopped being a delimiter at all).
       expect(format(parse(out))).toBe(out);
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditorIgnoringWhitespace(typed.doc, out, name);
       // Only spaces differ: the moved space is now after (or before) the mark, or dropped at a
       // boundary that does not keep one, and nothing else about the text — the delimiters, the
       // escapes, the mark's own text — has moved. Compared with every reference decoded (1.40):
@@ -1534,6 +1566,7 @@ describe("editor fixed point over the corpus", () => {
       expect(format(parse(out))).toBe(out);
       expect(linksIn(parse(out))).toBe(linksIn(parse(read(name))));
       expectNoForbiddenEntity(out);
+      expectTextMatchesEditorIgnoringWhitespace(typed.doc, out, name);
     });
 
     it(`${name} is an editor fixed point after the whitespace beside every marked run is deleted (the mark's neighbour)`, () => {
@@ -1556,6 +1589,7 @@ describe("editor fixed point over the corpus", () => {
       expect(flankingMarkNodesIn(parse(out))).toBe(before);
       expectNoForbiddenEntity(out);
       expectTextMatchesEditor(deleted.doc, out, name);
+      expectTextMatchesEditorIgnoringWhitespace(deleted.doc, out, name);
     });
 
     it(`${name} is an editor fixed point after a period is typed at the end of every marked run and the whitespace after it deleted (the mark's neighbour, the certain case)`, () => {
@@ -1574,6 +1608,7 @@ describe("editor fixed point over the corpus", () => {
       expect(flankingMarkNodesIn(parse(out))).toBe(before);
       expectNoForbiddenEntity(out);
       expectTextMatchesEditor(punctuated.doc, out, name);
+      expectTextMatchesEditorIgnoringWhitespace(punctuated.doc, out, name);
     });
   }
 

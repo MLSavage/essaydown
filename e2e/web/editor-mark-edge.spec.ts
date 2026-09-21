@@ -59,8 +59,38 @@ async function seedFromSource(page: Page, text: string): Promise<void> {
   await page.locator(".ProseMirror").click();
 }
 
+/**
+ * The rendered caret as the DOM selection reports it: the anchor text node's text, byte for byte,
+ * and the caret's offset in it (the shape `editor-astral-between-runs.spec.ts` uses).
+ */
+function caret(page: Page): Promise<{ text: string | null; offset: number }> {
+  return page.evaluate(() => {
+    const selection = document.getSelection();
+    if (selection === null || selection.anchorNode === null) return { text: null, offset: -1 };
+    if (!selection.isCollapsed) return { text: null, offset: -1 };
+    const node = selection.anchorNode;
+    if (node.nodeType !== Node.TEXT_NODE) return { text: null, offset: selection.anchorOffset };
+    return { text: node.textContent, offset: selection.anchorOffset };
+  });
+}
+
+/**
+ * Fires `key` `times` times for a counted horizontal motion, waiting after each press for the DOM
+ * caret to differ from its reading taken before that press — the fix for the blind, unsynchronised
+ * press the 1.verify.r6h gate's a1 run caught one short (editor-soft-line-breaks.spec.ts:111,
+ * DECISIONS #review-1-r6 L7, #034). A count crossing a node boundary (the anchor text changes, the
+ * offset resets) is covered by "differs": the reading taken after a press never equals the one
+ * taken before it. This form is for `ArrowLeft`/`ArrowRight`/`Backspace`, which always move the
+ * caret on a genuine press; a vertical motion pressed past the edge it reaches never differs and
+ * uses the edge form (`pressToEdge`) instead — the four sites in this directory that press a
+ * vertical arrow more than once (DECISIONS #034).
+ */
 async function press(page: Page, key: string, times: number): Promise<void> {
-  for (let step = 0; step < times; step += 1) await page.keyboard.press(key);
+  for (let step = 0; step < times; step += 1) {
+    const previous = JSON.stringify(await caret(page));
+    await page.keyboard.press(key);
+    await expect.poll(async () => JSON.stringify(await caret(page)) !== previous).toBe(true);
+  }
 }
 
 /** The `<em>`'s text, byte for byte (no whitespace normalisation). */
