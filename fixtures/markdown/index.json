@@ -33,6 +33,20 @@
       5
     ]
   },
+  "autolink-backslash.md": {
+    "nodeTypes": [
+      "link",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 2,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      3
+    ]
+  },
   "autolink-literal.md": {
     "nodeTypes": [
       "link",

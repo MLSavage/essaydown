@@ -181,8 +181,14 @@ const PHRASING_TYPES: ReadonlySet<string> = new Set([
   "textDirective",
 ]);
 
-/** A `State` carrying the marker {@link installSurrogateWidening} leaves once it has run. */
-type WidenedState = ToMarkdownState & { astralWidened?: true };
+/**
+ * A `State` carrying the markers {@link installSurrogateWidening} and {@link installAutolinkFallback}
+ * leave once they have run.
+ */
+type WidenedState = ToMarkdownState & { astralWidened?: true; autolinkGuarded?: true };
+
+/** A handler as `containerPhrasing` reads it: the `peek` it looks ahead with is optional. */
+type PeekableHandle = Handle & { peek?: Handle };
 
 /**
  * The three forms a surrogate pair split by `container-phrasing.js` can take, one per rewrite and
@@ -284,13 +290,85 @@ function installSurrogateWidening(state: WidenedState): void {
 }
 
 /**
- * The app's `root` handler: installs {@link installSurrogateWidening} on the `State` it receives,
- * then does what `mdast-util-to-markdown/lib/handle/root.js` does — `containerPhrasing` when any
- * child is phrasing per {@link PHRASING_TYPES}, else `containerFlow`, both called as methods of
- * `state`.
+ * Whether the autolink form `value` — `<` … `>` — carries `url` byte for byte: the bytes between
+ * the angle brackets are the url, or the url with the `mailto:` the parser prefixes to an email
+ * autolink (CommonMark §6.4) — the two spellings `format-link-as-autolink.js:27` accepts as "the
+ * text is the destination". `value` is a non-autolink form (it does not start with `<`) when the
+ * built-in already chose the resource form; that is never a fallback case.
+ */
+function autolinkCarriesUrl(value: string, url: string): boolean {
+  if (!value.startsWith("<")) return true;
+  const between = value.slice(1, -1);
+  return between === url || `mailto:${between}` === url;
+}
+
+/**
+ * Wrap the configured `link` handler once per serialization so that a link is written in the
+ * `<…>` autolink form exactly when that form round-trips the url byte for byte, and in the
+ * resource form `[text](url)` otherwise (DECISIONS #review-1-r6 L2). Nothing inside `<…>` can be
+ * escaped — CommonMark §6.4 reads the bytes literally — and `mdast-util-to-markdown`'s autolink
+ * branch (`lib/handle/link.js:28-45`) hides the construct stack (`state.stack = []`) so that no
+ * `unsafe` pattern with an `inConstruct` applies, yet the text child still goes through `safe()`,
+ * whose backslash rule (`lib/util/safe.js:147`, "typical escapes are handled in `safe`") doubles
+ * a backslash before ASCII punctuation, the closing `>` included. So `https://x.y\` was written
+ * `<https://x.y\\>`, whose parse holds two backslashes, and every `parse ∘ format` doubled again.
+ * The criterion is the round trip itself, never a hand list of characters: the wrapper calls the
+ * original; when the result is the autolink form and {@link autolinkCarriesUrl} says no, it calls
+ * the original again with `state.options.resourceLink` — the one option `formatLinkAsAutolink`
+ * reads — set to `true` for that call only and restored in a `finally`, so the resource form is
+ * written for that node and for no other. Backslash escapes work in a label and in a link
+ * destination, so `[https://x.y\\](https://x.y\\)` parses back to the original url — the form the
+ * built-in already falls back to when the text and the url differ (`www.x.y\`).
+ *
+ * `peek` answers `[` when the fallback will be taken and the original's `peek` (`<`) otherwise,
+ * because `containerPhrasing` classifies the previous sibling's `after` by it; both `<` and `[`
+ * are punctuation, so the sibling's escaping is the same either way, and the answer is exact.
+ *
+ * Installed in the shape of {@link installSurrogateWidening}: from the app `root` handler on the
+ * `State` it receives, once per `State` (the marker), the original reached through
+ * `state.handlers.link` — `mdast-util-to-markdown` is not a direct dependency of `packages/core`,
+ * so the built-in is never imported — and called bound to `state`, as `zwitch` calls it. Both
+ * `state.handle` and `containerPhrasing`'s look-ahead read `state.handlers` at dispatch time, so
+ * the wrapper is what runs for every `link` node of the serialization; `formatWithMap` inherits it
+ * because its instrumented `link` is what `state.handlers.link` holds when the root runs.
+ */
+function installAutolinkFallback(state: WidenedState): void {
+  if (state.autolinkGuarded) return;
+  state.autolinkGuarded = true;
+  const original = state.handlers.link as PeekableHandle;
+  // The built-in `link` carries `peek` (`lib/handle/link.js:10`) and positions.ts's `wrapHandle`
+  // copies it onto the instrumented handler, so the handler found here always has one.
+  const originalPeek = original.peek as Handle;
+  const asResourceLink: Handle = (node, parent, _state, info) => {
+    const previous = state.options.resourceLink;
+    state.options.resourceLink = true;
+    try {
+      return original.call(state, node, parent, state, info);
+    } finally {
+      state.options.resourceLink = previous;
+    }
+  };
+  const link: PeekableHandle = (node, parent, _state, info) => {
+    const value = original.call(state, node, parent, state, info);
+    return autolinkCarriesUrl(value, node.url) ? value : asResourceLink(node, parent, state, info);
+  };
+  link.peek = (node, parent, _state, info) => {
+    const value = original.call(state, node, parent, state, info);
+    if (!autolinkCarriesUrl(value, node.url)) return "[";
+    return originalPeek.call(state, node, parent, state, info);
+  };
+  state.handlers.link = link;
+}
+
+/**
+ * The app's `root` handler: installs {@link installSurrogateWidening} and
+ * {@link installAutolinkFallback} on the `State` it receives, then does what
+ * `mdast-util-to-markdown/lib/handle/root.js` does — `containerPhrasing` when any child is
+ * phrasing per {@link PHRASING_TYPES}, else `containerFlow`, both called as methods of `state`.
  */
 export function handleRoot(node: Root, _parent: Parents, state: ToMarkdownState, info: Info): string {
   installSurrogateWidening(state);
+  installAutolinkFallback(state);
   const hasPhrasing = node.children.some((child) => PHRASING_TYPES.has(child.type));
   return hasPhrasing ? state.containerPhrasing(node, info) : state.containerFlow(node, info);
 }
