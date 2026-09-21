@@ -489,13 +489,16 @@ function pairWithEntries(
 
 /**
  * **Clause 3's oracle: where the output bytes put the end of one block.** The cursor at the end of
- * a block's content in the editor is, in the bytes, one past the last character of the block's
- * last text node — micromark's `position.end` of that node on the reparse, which is *before* a
- * closing delimiter (`*`, `~~`, a link's `](url)`) and before a cell's padding, as `cursorMap`'s
- * spelling tables place it. A block whose last leaf is not text (an image, an inline-code run) is
- * answered with that leaf's own start, the rule `cursorMap`'s doc comment states for every node
- * that is not text; a block with no content (a cell emptied by the deletion) has no bytes of its
- * own, and its place is the point the map keeps for it.
+ * a block's content in the editor is, in the bytes, one past the last byte of the block's last
+ * leaf — micromark's `position.end` of that leaf on the reparse. For a text node that is one past
+ * its last character, which is *before* a closing delimiter (`*`, `~~`, a link's `](url)`) and
+ * before a cell's padding, as `cursorMap`'s spelling tables place it. For an inline atom (an
+ * image, an inline tag) and for an inline-code run it is the leaf's own end — after `)`, after
+ * `</i>`, after the closing backtick fence: `cursorMap`'s third clause answers the caret after a
+ * trailing leaf with the leaf's end (task 1.52, DECISIONS #030 Decision 2 and #031, the deletion
+ * side: a paragraph left ending in an atom by the deletion of the text after it). A block with no
+ * content (a cell emptied by the deletion) has no bytes of its own, and its place is the point
+ * the map keeps for it.
  */
 function byteEndOf(
   entry: PositionEntry,
@@ -504,11 +507,8 @@ function byteEndOf(
 ): { line: number; ch: number } {
   if (!("children" in reparsed) || reparsed.children.length === 0)
     return { line: entry.startLine, ch: entry.startCol - 1 };
-  const leaf = lastLeaf(reparsed);
-  const position = positionOf(leaf, at);
-  return leaf.type === "text"
-    ? { line: position.end.line, ch: position.end.column - 1 }
-    : { line: position.start.line, ch: position.start.column - 1 };
+  const position = positionOf(lastLeaf(reparsed), at);
+  return { line: position.end.line, ch: position.end.column - 1 };
 }
 
 /** The last code point of a block's last text node, or `null` when the block does not end in text. */
@@ -712,6 +712,32 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
     expect(cursors.toSource(start)).toEqual({ line: 1, ch: "~~a.~~".length });
     expect(cursors.toSource(start + 1)).toEqual({ line: 1, ch: "~~a.~~&#x1F600;".length });
     expect(cursors.toSource(start + 2)).toEqual({ line: 1, ch: "~~a.~~&#x1F600;".length });
+  });
+
+  it("the hand-seeded documents `alpha <i>beta</i> y` and `a `+\"`cd`\"+``: a block the deletion leaves ending in an inline atom, or in an inline-code run, is answered with that leaf's end in the bytes (task 1.52, DECISIONS #031's deletion-side member of L5)", () => {
+    // The corpus reaches neither shape (no fixture's last text run follows an atom or is an
+    // inline-code run), so the oracle's non-text leaves are pinned here by hand: the deletion
+    // takes `y` and the conversion strips the space, leaving the paragraph ending in `</i>`;
+    // and it takes `d`, leaving the run `c`, whose caret is after the closing fence.
+    const cases = [
+      { source: "alpha <i>beta</i> y\n", text: "alpha <i>beta</i>\n", ch: "alpha <i>beta</i>".length },
+      { source: "a `cd`\n", text: "a `c`\n", ch: "a `c`".length },
+    ];
+    for (const { source, text: expectedText, ch } of cases) {
+      const { doc, frontMatter } = mdastToPM(parse(source));
+      const deleted = deleteAtEveryBlockEnd(doc);
+      expect(deleted.lastChars, source).toBe(1);
+      const { root, text, map } = mapOfEditorOutput(deleted.doc, frontMatter);
+      expect(text, source).toBe(expectedText);
+      const entry = map.entries.find((candidate) => candidate.path === "0") as PositionEntry;
+      const reparsed = reparsedByPath(text).get("0") as Nodes;
+      expect(lastLeaf(reparsed).type, source).not.toBe("text");
+      const expected = byteEndOf(entry, reparsed, source);
+      expect(expected, source).toEqual({ line: 1, ch });
+      const paragraph = deleted.doc.firstChild as PMNode;
+      const end = 1 + paragraph.content.size;
+      expect(cursorMap(root, deleted.doc).toSource(end), source).toEqual(expected);
+    }
   });
 
   for (const name of names) {

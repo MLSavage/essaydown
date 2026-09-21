@@ -1288,11 +1288,9 @@ function sourceKey(position: { line: number; ch: number }): number {
 /**
  * The block-end positions after a trailing inline atom: every text position at the end of its
  * textblock whose `nodeBefore` is a non-text atom (an inline `html` node of ProseMirror size 1,
- * which has no spelling table). Computed from the doc, never a literal. At such a position
- * `cursorMap.toSource` answers the atom's start — the non-mark branch of `delimiterPosition` in
- * `toggle.ts`, the L5 class (a cell's end answering the row's start) — so it is a member of task
- * 1.52's family, not of the L3 fix: DECISIONS #030 Decision 2, owner 1.52 (L5). The inverse cases
- * below exclude exactly these positions by name until 1.52 lands.
+ * which has no spelling table). Computed from the doc, never a literal. Task 1.52 made this
+ * position its own inverse (DECISIONS #030 Decision 2); the cases below count it so the two html
+ * sources are seen to hold it.
  */
 function trailingAtomBlockEnds(doc: ReturnType<typeof mdastToPM>["doc"]): number[] {
   return textPositions(doc).filter((pos) => {
@@ -1313,12 +1311,12 @@ describe("cursorMap: toRendered ∘ toSource is the identity over every text pos
   // a heading ending in a span, an unpadded and a padded value, a backtick-holding value with a
   // two-backtick fence, an astral value). The position set is computed from each doc.
   //
-  // `trailingAtomEnds` is how many block-end-after-atom positions the source's doc holds; those
-  // positions are excluded from the inverse by name (DECISIONS #030 Decision 2, owner 1.52 (L5):
-  // the block end after a trailing inline atom is an L5 member, `delimiterPosition`'s non-mark
-  // branch in toggle.ts, which this task does not touch). Two html sources end their block in an
-  // inline atom and hold one such position each; every other source holds none, so on every
-  // source without one the inverse is asserted over every text position.
+  // Until task 1.52 the two html sources that end their block in an inline atom excluded that
+  // one block-end position by name (DECISIONS #030 Decision 2: the block end after a trailing
+  // inline atom is an L5 member, `toSource`'s atom clause in toggle.ts); 1.52 landed the member,
+  // so the inverse is asserted over every text position of every source, and the two sources
+  // are asserted to hold that position (the presence case), with `position-map-inverse.test.ts`
+  // holding the corpus property and the member's own guard.
   const SOURCES: { source: string; trailingAtomEnds: number }[] = [
     { source: "alpha beta\n<span>x</span> gamma\n", trailingAtomEnds: 0 },
     { source: "alpha\n<i>beta</i>\n", trailingAtomEnds: 1 },
@@ -1333,16 +1331,11 @@ describe("cursorMap: toRendered ∘ toSource is the identity over every text pos
   ];
 
   for (const { source, trailingAtomEnds } of SOURCES) {
-    const exclusion =
-      trailingAtomEnds === 0
-        ? ""
-        : " except the block end after the trailing inline atom (#030, owner 1.52 (L5))";
-    it(`${JSON.stringify(source.trimEnd())}: the inverse holds at every text position${exclusion}, and toSource is monotone over them`, () => {
+    it(`${JSON.stringify(source.trimEnd())}: the inverse holds at every text position, the block end after a trailing inline atom included, and toSource is monotone over them`, () => {
       const { root, doc } = pair(source);
       const map = cursorMap(root, doc);
-      const excluded = trailingAtomBlockEnds(doc);
-      expect(excluded).toHaveLength(trailingAtomEnds);
-      const positions = textPositions(doc).filter((pos) => !excluded.includes(pos));
+      expect(trailingAtomBlockEnds(doc)).toHaveLength(trailingAtomEnds);
+      const positions = textPositions(doc);
       expect(positions.length).toBeGreaterThan(0);
       const failures = positions
         .map((pos) => ({ pos, back: map.toRendered(map.toSource(pos)) }))

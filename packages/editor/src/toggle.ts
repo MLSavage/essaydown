@@ -386,8 +386,14 @@ export interface CursorMap {
  * 3. Every other node is answered with its own start — an inline atom (`image`, `break`, inline
  *    `html`) when it is the innermost node, and a leaf block (`code`, `thematicBreak`, `html`)
  *    that is placed but never entered, because the map places nodes and only a text node's bytes
- *    are its text — except on the delimiters of a mark, where {@link delimiterPosition} tells the
- *    opening one from the closing one.
+ *    are its text — with one exception each way. An atom is the innermost node at its own `pmEnd`
+ *    only when nothing follows it in its block (a boundary belongs to the later node), and that
+ *    position is the caret *after* the atom: it is answered with the atom's end, so a block ending
+ *    in an image or an inline tag round-trips at its end as a block ending in text does, and an
+ *    `inlineCode` run at its own `pmEnd` the same, after its closing fence ({@link isLeafEnd};
+ *    task 1.52, DECISIONS #030 Decision 2). And on the delimiters of a mark
+ *    {@link delimiterPosition} tells the opening one from the closing one; on a container's own
+ *    columns {@link containerEnd} tells a block's end from the container's start.
  */
 export function cursorMap(root: Root, doc: PMNode): CursorMap {
   const { map, spellings, lineStarts } = formatWithMap(root);
@@ -398,6 +404,9 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
       if (inside !== null) {
         const range = map.ranges[inside.path];
         const table = spellings[inside.path];
+        if (range !== undefined && isLeafEnd(inside, pos)) {
+          return { line: range.endLine, ch: range.endCol - 1 };
+        }
         if (table !== undefined) {
           const { line, column } = spellingPoint(lineStarts, table, pos - inside.pmStart);
           return { line, ch: column - 1 };
@@ -419,12 +428,26 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
           if (table !== undefined) {
             return entry.pmStart + spellingIndex(lineStarts, table, position.line, position.ch + 1);
           }
-          return delimiterPosition(entry, found, map, position);
+          return delimiterPosition(entries, entry, found, map, position);
         }
       }
       return afterLastLine(entries, map, position);
     },
   };
+}
+
+/**
+ * Whether `pos` is the caret *after* the inline leaf `entry` — an atom (`image`, `break`, inline
+ * `html`) or an `inlineCode` run, found innermost at its own `pmEnd`. A boundary belongs to the
+ * later node, so this only happens when nothing follows the leaf in its block, and that caret is
+ * after the leaf's last byte: after `)`, after `</i>`, after the closing backtick fence — not
+ * before the fence, where the spelling table puts the run's last offset, because the caret
+ * after a code span is outside it (a space typed there is plain text, as it is in the editor).
+ * A `text` node's end is its table's end already, and every other position a leaf covers (its
+ * start; a run's interior) is placed as before.
+ */
+function isLeafEnd(entry: Correspondence, pos: number): boolean {
+  return entry.node.type !== "text" && !isEntered(entry.node) && pos === entry.pmEnd;
 }
 
 /**
@@ -436,15 +459,27 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
  * cursor belongs beside the mark, and which side is decided by the content it sits on: at or past
  * the end of the mark's last child it is the closing delimiter and the answer is the position
  * after the mark; anywhere else it is the opening one and the answer is the position before it.
- * Every other node answers with its own start, as before.
+ *
+ * `nodeAt` answers with a container (`tableRow`, `table`, `listItem`, `list`, `blockquote`, or a
+ * cell whose children stop short of its range) when the position is on a column the container's
+ * own bytes occupy and no descendant's range covers — a cell's padding and pipes, an item's
+ * marker, and the column right after a block's last character, which the block's half-open range
+ * excludes while the container's does not. Those are {@link containerEnd}'s: at or past a
+ * descendant block's end on that line, the answer is that block's end. Every other node — a leaf
+ * block, an atom — answers with its own start, as before.
  */
 function delimiterPosition(
+  entries: readonly Correspondence[],
   entry: Correspondence,
   found: PositionEntry,
   map: PositionMap,
   position: SourcePosition,
 ): number {
-  if (!isMark(found.node.type)) return entry.pmStart;
+  if (!isMark(found.node.type)) {
+    return isEntered(found.node)
+      ? (containerEnd(entries, found.path, map, position) ?? entry.pmStart)
+      : entry.pmStart;
+  }
   const children = "children" in found.node ? found.node.children : [];
   const last = map.ranges[childPath(found.path, children.length - 1)];
   if (last === undefined) return entry.pmStart;
@@ -452,6 +487,55 @@ function delimiterPosition(
   const after =
     position.line > last.endLine || (position.line === last.endLine && column >= last.endCol);
   return after ? entry.pmEnd : entry.pmStart;
+}
+
+/**
+ * The ProseMirror position for a place on a container's own columns (see
+ * {@link delimiterPosition}): the end of the innermost entered block among the container's
+ * descendants (the container itself included) whose range ends on `position`'s line at or before
+ * it, or `null` when no block ends on that line before the position (a table's delimiter row,
+ * an item's marker before its first character), which leaves the caller's old answer.
+ *
+ * The ownership rule for the columns between a block's last character and the next block's
+ * first — a cell's closing padding and pipe, the space and pipe before the next cell, a line's
+ * end inside a list item — is stated once, here: the container owns those bytes (they are its
+ * delimiters and padding, not any block's text), but the *position* at or past a block's end on
+ * the block's own line belongs to that block, exactly as {@link afterLastLine}'s same-line rule
+ * gives a top-level paragraph's trailing columns to the paragraph. Ties (a cell and its last text
+ * both end at the cell's `endCol`; an item and its last paragraph at the item's last line) go to
+ * the innermost block, which comes last in pre-order, and the block's end is the end of its
+ * content: its last descendant's `pmEnd`, or, for a block with no descendants (an empty cell,
+ * whose zero-width range `nodeAt` never answers), the one position inside it, its own `pmEnd`
+ * less the closing token — never its `pmStart`, the row's first column of DECISIONS
+ * #review-1-r6 L5 (task 1.52).
+ */
+function containerEnd(
+  entries: readonly Correspondence[],
+  containerPath: string,
+  map: PositionMap,
+  position: SourcePosition,
+): number | null {
+  const column = position.ch + 1;
+  const prefix = `${containerPath}.`;
+  let block: Correspondence | null = null;
+  let blockCol = 0;
+  for (const entry of entries) {
+    if (entry.path !== containerPath && !entry.path.startsWith(prefix)) continue;
+    if (!isEntered(entry.node)) continue;
+    const range = map.ranges[entry.path];
+    if (range === undefined || range.endLine !== position.line || range.endCol > column) continue;
+    if (range.endCol >= blockCol) {
+      block = entry;
+      blockCol = range.endCol;
+    }
+  }
+  if (block === null) return null;
+  const blockPrefix = `${block.path}.`;
+  let last: Correspondence | null = null;
+  for (const entry of entries) {
+    if (entry.path.startsWith(blockPrefix)) last = entry;
+  }
+  return last === null ? block.pmEnd - 1 : last.pmEnd;
 }
 
 /* ------------------------------------------------------------------ live source coords ---- */
