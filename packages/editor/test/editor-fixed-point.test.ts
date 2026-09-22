@@ -160,10 +160,11 @@ function decodeReferences(bytes: string): string {
 /**
  * The entity rule (DECISIONS #026): no text node of `parse(out)` holds a member of the family, and
  * no member of it in `out` decodes to whitespace. A member that decodes to a mark's neighbour
- * passes — see {@link ENTITY}.
+ * passes — see {@link ENTITY}. Only `text` values are read: a code span's value is verbatim
+ * (PRD §6.1), so a reference the author wrote inside one is not one the serializer leaked.
  */
 function expectNoForbiddenEntity(out: string, label?: string): void {
-  for (const value of textValues(parse(out))) expect(value, label).not.toMatch(ENTITY);
+  for (const value of textValues(parse(out), "text")) expect(value, label).not.toMatch(ENTITY);
   for (const [reference] of out.matchAll(ENTITIES)) {
     expect(decodeReferences(reference), label).not.toMatch(/\s/u);
   }
@@ -412,12 +413,15 @@ function hardBreaksIn(doc: PMNode): number {
  * The value of every `text` node under `root`, wherever it is, plus every `inlineCode`'s own
  * `value` — the ProseMirror schema realises `inline_code` as a mark on ordinary text (its value
  * flows through `.textContent` like any other text), so a comparison against the editor's own
- * document counts it the same way here.
+ * document counts it the same way here. `only: "text"` leaves the code span out: its value is
+ * verbatim (PRD §6.1), inside which the parser decodes no reference (DECISIONS #review-1-r7 M1).
  */
-function textValues(root: Root): string[] {
+function textValues(root: Root, only?: "text"): string[] {
   const out: string[] = [];
   const walk = (node: { type: string; value?: string; children?: unknown[] }): void => {
-    if (node.type === "text" || node.type === "inlineCode") out.push(node.value as string);
+    if (node.type === "text" || (only !== "text" && node.type === "inlineCode")) {
+      out.push(node.value as string);
+    }
     for (const child of (node.children ?? []) as (typeof node)[]) walk(child);
   };
   walk(root);

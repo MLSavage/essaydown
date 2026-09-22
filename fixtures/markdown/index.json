@@ -108,6 +108,24 @@
     "sectionCount": 0,
     "paragraphStartLines": []
   },
+  "code-span-references.md": {
+    "nodeTypes": [
+      "emphasis",
+      "html",
+      "inlineCode",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 4,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      3,
+      5,
+      7
+    ]
+  },
   "crlf-line-endings.md": {
     "nodeTypes": [
       "heading",

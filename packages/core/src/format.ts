@@ -12,6 +12,8 @@ type ToMarkdownState = Parameters<Handle>[2];
 type Info = Parameters<Handle>[3];
 type Parents = Parameters<Handle>[1];
 type ContainerPhrasing = ToMarkdownState["containerPhrasing"];
+type StateHandle = ToMarkdownState["handle"];
+type HandledNode = Parameters<StateHandle>[0];
 
 /**
  * `remark-stringify` options implementing docs/MARKDOWN-STYLE.md: ATX headings, `-` bullets,
@@ -191,88 +193,291 @@ type WidenedState = ToMarkdownState & { astralWidened?: true; autolinkGuarded?: 
 type PeekableHandle = Handle & { peek?: Handle };
 
 /**
- * The three forms a surrogate pair split by `container-phrasing.js` can take, one per rewrite and
- * one for their join on a single child (the join is DECISIONS #review-1-r6 L1, task 1.49): a high
- * surrogate written as a lone character reference (`&#xD83D;`, `D800`–`DBFF`) directly followed
- * by the raw low surrogate it was split from (`encodeAfter` alone); a raw high surrogate directly
- * followed by its low surrogate's lone reference (`&#xDE00;`, `DC00`–`DFFF`; `encodingInfo.before`
- * alone); and a high-surrogate reference directly followed by a low-surrogate reference
- * (`&#xD83D;&#xDE00;`; both rewrites on one two-unit child). The hexadecimal is upper-case with
+ * The three forms a surrogate pair split at a child boundary can take, as the two anchored
+ * patterns this file applies them with (the join of the first two on one child is DECISIONS
+ * #review-1-r6 L1, task 1.49): a high surrogate written as a lone character reference
+ * (`&#xD83D;`, `D800`–`DBFF`) directly followed by the raw low surrogate it was split from; a raw
+ * high surrogate directly followed by its low surrogate's lone reference (`&#xDE00;`,
+ * `DC00`–`DFFF`); and a high-surrogate reference directly followed by a low-surrogate reference
+ * (`&#xD83D;&#xDE00;`, both rewrites on one two-unit child). The hexadecimal is upper-case with
  * no padding, as `encode-character-reference.js` writes it.
+ *
+ * Neither pattern is global, and neither is ever run over a whole string: each is applied at one
+ * position {@link widenSplitSurrogateReferences} derives from one child's own slice of the join —
+ * the positions the assembler's two encodings and the mark handlers' inner-edge encodings touch,
+ * and nowhere else (DECISIONS #review-1-r7 M1; the third form is pure ASCII, so over the join it
+ * rewrote a code span's own literal bytes). `head` is sticky (`y`) and matches only the two forms
+ * that begin with a reference, starting exactly at `lastIndex`; `tail` is `$`-anchored against
+ * the join truncated at a slice's end and matches only the two forms that end with one. A slice
+ * whose whole content is one pair matches both, and the second edit is dropped as overlapping.
  */
-const SPLIT_PAIR = new RegExp(
-  [
-    // `encodeAfter` alone: the high unit's reference, the raw low unit.
-    "&#x(D[89AB][0-9A-F]{2});([\\uDC00-\\uDFFF])",
-    // `encodingInfo.before` alone: the raw high unit, the low unit's reference.
-    "([\\uD800-\\uDBFF])&#x(D[C-F][0-9A-F]{2});",
-    // Both on one child: the high unit's reference, the low unit's reference.
-    "&#x(D[89AB][0-9A-F]{2});&#x(D[C-F][0-9A-F]{2});",
-  ].join("|"),
-  "g",
-);
+const SPLIT_PAIR = {
+  /** `&#xD83D;` + the raw low unit, or `&#xD83D;&#xDE00;`, starting exactly at `lastIndex`. */
+  head: /&#x(D[89AB][0-9A-F]{2});(?:([\uDC00-\uDFFF])|&#x(D[C-F][0-9A-F]{2});)/y,
+  /** The raw high unit + `&#xDE00;`, or `&#xD83D;&#xDE00;`, ending at the searched string's end. */
+  tail: /(?:([\uD800-\uDBFF])|&#x(D[89AB][0-9A-F]{2});)&#x(D[C-F][0-9A-F]{2});$/,
+};
 
-/**
- * Widen every lone-surrogate character reference `value` holds at a child boundary to the
- * code-point reference of the pair it split: `&#xD83D;` + U+DE00 → `&#x1F600;`, U+D83D +
- * `&#xDE00;` → `&#x1F600;`, and `&#xD83D;&#xDE00;` → `&#x1F600;`. These are the three forms
- * `container-phrasing.js`'s two rewrites can produce, read in the installed package (2.1.2): the
- * first UTF-16 unit of the child after an attention run (`encodeAfter`, applied to `value` right
- * after the child's handler returns) and the last unit of the child before one
- * (`encodingInfo.before`, applied to the previous result once the run's handler has set
- * `attentionEncodeSurroundingInfo`) — and, when one two-unit child sits between two runs whose
- * inner edges both ask for their neighbour to be encoded, both rewrites on that one child: the
- * first fires on its high unit, the second on its low unit, and the raw mate each of the first two
- * forms relies on is a reference too. Nothing else in the serializer writes a surrogate reference:
- * `safe()` encodes only the ASCII characters its `unsafe` patterns match, and the handlers' own
- * inside encoding sees a letter (a lone surrogate classifies as "other") at an astral edge and
- * leaves it. The widening is by code point, computed from the two units
- * (`0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)`, the value `codePointAt` returns), the
- * same arithmetic for all three forms.
+/** The trailing line ending `container-phrasing.js:71` replaces by one space before an `html` sibling. */
+const TRAILING_LINE_ENDING = /(\r?\n|\r)$/;
+
+/** The marker a mark handler writes on each side of its `containerPhrasing` result, by node type.
+ * The lengths are {@link stringifyOptions}' (`emphasis: "*"`, `strong: "*"` doubled) and the
+ * strikethrough extension's `~~`, read from the type and never from the bytes: `***a***` is a
+ * `strong` holding an `emphasis`, so the first character of a slice says nothing about its marker.
  */
-function widenSplitSurrogateReferences(value: string): string {
-  return value.replace(
-    SPLIT_PAIR,
-    (
-      _match,
-      highHex?: string,
-      low?: string,
-      high?: string,
-      lowHex?: string,
-      bothHighHex?: string,
-      bothLowHex?: string,
-    ) => {
-      const highUnit =
-        bothHighHex !== undefined
-          ? parseInt(bothHighHex, 16)
-          : highHex !== undefined
-            ? parseInt(highHex, 16)
-            : (high as string).charCodeAt(0);
-      const lowUnit =
-        bothLowHex !== undefined
-          ? parseInt(bothLowHex, 16)
-          : lowHex !== undefined
-            ? parseInt(lowHex, 16)
-            : (low as string).charCodeAt(0);
-      const codePoint = 0x10000 + ((highUnit - 0xd800) << 10) + (lowUnit - 0xdc00);
-      return encodeCharacterReference(codePoint);
-    },
-  );
+const MARK_MARKER_LENGTH: ReadonlyMap<string, number> = new Map([
+  ["emphasis", 1],
+  ["strong", 2],
+  ["delete", 2],
+]);
+
+/** The code point two surrogate units spell — the value `codePointAt` returns for the pair. */
+function widenedPair(high: number, low: number): string {
+  return encodeCharacterReference(0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00));
+}
+
+/** `value` with its first UTF-16 unit as a reference, as `container-phrasing.js:91-93` writes it. */
+function encodeFirstUnit(value: string): string {
+  return encodeCharacterReference(value.charCodeAt(0)) + value.slice(1);
+}
+
+/** `value` with its last UTF-16 unit as a reference, as `container-phrasing.js:109-111` writes it. */
+function encodeLastUnit(value: string): string {
+  return value.slice(0, -1) + encodeCharacterReference(value.charCodeAt(value.length - 1));
+}
+
+/** One direct child of a phrasing parent and the bytes its handler returned for it. */
+interface RecordedChild {
+  node: HandledNode;
+  value: string;
+}
+
+/** One form a child's emission can take in the join, and which of its edges the parent encoded. */
+interface EmissionForm {
+  text: string;
+  headEncoded: boolean;
+  tailEncoded: boolean;
+}
+
+/** Where one child's emission sits in the join — the half-open slice `[start, end)` — and its edges. */
+interface LocatedChild {
+  start: number;
+  end: number;
+  headEncoded: boolean;
+  tailEncoded: boolean;
+}
+
+/** One replacement to make in the join: the half-open slice `[start, end)` and its new bytes. */
+interface Edit {
+  start: number;
+  end: number;
+  replacement: string;
 }
 
 /**
- * Wrap `state.containerPhrasing` once per serialization so that the neighbour of an attention run
- * the built-in assembler decided to encode is written as a whole scalar (DECISIONS #review-1-r5
- * K1). `mdast-util-to-markdown/lib/util/container-phrasing.js` rewrites a child's output after
- * its handler returned at exactly two places — the first UTF-16 unit of the child after a run and
- * the last unit of the child before it — with `encodeCharacterReference(unit.charCodeAt(0))`, so
- * an astral (non-BMP) neighbour of `*`, `**` or `~~` whose inner edge is punctuation or
- * whitespace came out as a lone-surrogate reference (`x ~~a.~~&#xD83D;` + U+DE00) that reparses
- * to U+FFFD. The decision to encode is right and is not changed here: the parser classifies one
- * UTF-16 unit as well (`micromark-util-classify-character`; a lone surrogate is "other"), so a raw
- * astral neighbour never lets the run form while the code-point reference does. This is the
- * app-owned half of the encoding: the handlers and {@link encodeInfo} decide which side to encode,
- * in the parser's own code-unit terms; the app writes what they decided as a whole scalar.
+ * The forms a child's emission can take in the string `containerPhrasing` returns, in the order
+ * they are tried. The enumeration is derived from the four regions of
+ * `mdast-util-to-markdown/lib/util/container-phrasing.js` (2.1.2, read in `node_modules`) — the
+ * same branches `rewrittenEmissions` in positions.ts enumerates, one UTF-16 unit at a time,
+ * because that is the unit the assembler encodes:
+ *
+ * 1. Lines 43–55, the look-ahead: the *next* sibling's handler (or its `peek`) is called only to
+ *    classify one character, and is dispatched off `state.handle.handlers` rather than through
+ *    `state.handle`. It writes nothing into the join and is never recorded.
+ * 2. Lines 88–94, `encodeAfter`: the first UTF-16 unit of the child after an attention run is
+ *    replaced by its character reference when that run asked for its neighbour — the head form.
+ * 3. Lines 100–115, `encodingInfo.before`: the last unit of the *previous* result is replaced the
+ *    same way when the current child's handler asks — the tail form. It runs after region 3 has
+ *    already rewritten that result, so the both form is the head form with its last unit encoded,
+ *    which for a one-unit value encodes the `;` the head form ends with (`&#x61&#x3B;`).
+ * 4. Lines 60–80, the line ending before `html`: when the next child is `html` and this child's
+ *    string ends in a line ending, that ending is replaced by one space (line 71). It can combine
+ *    with region 2 (a child after a run *and* before html); it cannot combine with region 3,
+ *    whose form ends in a reference, nor with itself.
+ *
+ * Only a `text` child is reached by regions 2 and 3: every other handler's output begins and ends
+ * with punctuation — a marker, a bracket, a fence, a tag — and `encode-info.js` never encodes
+ * punctuation. So a non-text child has its plain output and, when the next child is `html`, the
+ * line-ending form region 4 rewrites it into; the only non-text child whose output ends in a line
+ * ending is a `break`.
+ */
+function emissionForms(
+  node: HandledNode,
+  value: string,
+  beforeHtml: boolean,
+): readonly EmissionForm[] {
+  const forms: EmissionForm[] = [];
+  const add = (text: string, headEncoded: boolean, tailEncoded: boolean): void => {
+    const existing = forms.find((form) => form.text === text);
+    if (existing) {
+      // The head and tail forms of a one-unit value are the same bytes; the walk cannot tell
+      // which region wrote them, so both anchors are tried and each fires only on a real pair.
+      existing.headEncoded ||= headEncoded;
+      existing.tailEncoded ||= tailEncoded;
+      return;
+    }
+    forms.push({ text, headEncoded, tailEncoded });
+  };
+  add(value, false, false);
+  if (node.type === "text" && value.length > 0) {
+    const head = encodeFirstUnit(value);
+    add(head, true, false);
+    add(encodeLastUnit(value), false, true);
+    add(encodeLastUnit(head), true, true);
+  }
+  if (!beforeHtml) return forms;
+  for (const form of [...forms]) {
+    if (!TRAILING_LINE_ENDING.test(form.text)) continue;
+    add(form.text.replace(TRAILING_LINE_ENDING, " "), form.headEncoded, form.tailEncoded);
+  }
+  return forms;
+}
+
+/**
+ * Locate `value`'s child at `cursor` in `joined`. Children are joined flush
+ * (`container-phrasing.js:124`), so a child starts exactly at the cursor and the only question is
+ * which of {@link emissionForms}' forms the parent left there; the plain output is tried first.
+ * `undefined` is the answer for a child whose bytes are none of them — a form this enumeration
+ * does not know — and the caller then leaves the rest of the join alone.
+ */
+function locateChild(
+  joined: string,
+  cursor: number,
+  node: HandledNode,
+  value: string,
+  beforeHtml: boolean,
+): LocatedChild | undefined {
+  for (const form of emissionForms(node, value, beforeHtml)) {
+    if (!joined.startsWith(form.text, cursor)) continue;
+    return {
+      start: cursor,
+      end: cursor + form.text.length,
+      headEncoded: form.headEncoded,
+      tailEncoded: form.tailEncoded,
+    };
+  }
+  return undefined;
+}
+
+/** The edit {@link SPLIT_PAIR}.head makes when a split pair starts exactly at `at`, if one does. */
+function headEdit(joined: string, at: number): Edit | undefined {
+  SPLIT_PAIR.head.lastIndex = at;
+  const match = SPLIT_PAIR.head.exec(joined);
+  if (!match) return undefined;
+  const low = match[2] === undefined ? parseInt(match[3], 16) : match[2].charCodeAt(0);
+  return {
+    start: at,
+    end: at + match[0].length,
+    replacement: widenedPair(parseInt(match[1], 16), low),
+  };
+}
+
+/** The edit {@link SPLIT_PAIR}.tail makes when a split pair ends exactly at `at`, if one does. */
+function tailEdit(joined: string, at: number): Edit | undefined {
+  const match = SPLIT_PAIR.tail.exec(joined.slice(0, at));
+  if (!match) return undefined;
+  const high = match[1] === undefined ? parseInt(match[2], 16) : match[1].charCodeAt(0);
+  return { start: match.index, end: at, replacement: widenedPair(high, parseInt(match[3], 16)) };
+}
+
+/** `joined` with `edits` applied in order; an edit overlapping one already taken is dropped. */
+function applyEdits(joined: string, edits: readonly Edit[]): string {
+  if (edits.length === 0) return joined;
+  let out = "";
+  let at = 0;
+  for (const edit of [...edits].sort((left, right) => left.start - right.start)) {
+    if (edit.start < at) continue;
+    out += joined.slice(at, edit.start) + edit.replacement;
+    at = edit.end;
+  }
+  return out + joined.slice(at);
+}
+
+/**
+ * Widen every lone-surrogate character reference written at a child boundary to the code-point
+ * reference of the pair it split: `&#xD83D;` + U+DE00 → `&#x1F600;`, U+D83D + `&#xDE00;` →
+ * `&#x1F600;`, and `&#xD83D;&#xDE00;` → `&#x1F600;`. Those references reparse to U+FFFD, so the
+ * whole scalar is the app-owned half of the encoding the handlers and {@link encodeInfo} decide
+ * (DECISIONS #review-1-r5 K1); the widening is by code point, the same arithmetic for all three
+ * forms ({@link widenedPair}).
+ *
+ * The widening is per child and positional, never over the join (DECISIONS #review-1-r7 M1).
+ * `children` is what this parent's handlers emitted, in order, as recorded by
+ * {@link installSurrogateWidening}; the join is walked with a cursor, each child's slice located
+ * by {@link locateChild}, and an edit made only where a rewrite can have fired:
+ *
+ * - a `text` child whose first unit the assembler encoded: {@link SPLIT_PAIR}.head anchored at the
+ *   slice's start; whose last unit it encoded: {@link SPLIT_PAIR}.tail anchored at its end;
+ * - an `emphasis`, `strong` or `delete` child: head right after its opening marker and tail right
+ *   before its closing marker ({@link MARK_MARKER_LENGTH}), the two places
+ *   `mdast-util-to-markdown/lib/handle/emphasis.js:39-48`, `strong.js` and this file's
+ *   {@link handleDelete} encode their own `containerPhrasing` result.
+ *
+ * Nothing else in the join is touched, so the literal bytes `&#xD83D;&#xDE00;` inside a verbatim
+ * leaf — a code span, an inline `html` node, either of them in a table cell, inside a mark or
+ * inside a link's text — are left exactly as the parser read them (PRD §6.1). A child the walk
+ * cannot locate stops the walk and the rest of the join is left as the parent wrote it, never
+ * widened blind; no such child is expected, because `locateEmission` in positions.ts enumerates
+ * the same forms and the corpus case "maps every node of the tree, and nothing is unresolved" is
+ * the guard that says so for every fixture in `fixtures/markdown/index.json`.
+ */
+function widenSplitSurrogateReferences(
+  joined: string,
+  children: readonly RecordedChild[],
+): string {
+  const edits: Edit[] = [];
+  let cursor = 0;
+  for (let index = 0; index < children.length; index += 1) {
+    const { node, value } = children[index];
+    const located = locateChild(
+      joined,
+      cursor,
+      node,
+      value,
+      children[index + 1]?.node.type === "html",
+    );
+    if (located === undefined) break;
+    const { start, end, headEncoded, tailEncoded } = located;
+    const markerLength = MARK_MARKER_LENGTH.get(node.type);
+    const head = node.type === "text" ? (headEncoded ? start : undefined) : markerLength === undefined ? undefined : start + markerLength;
+    const tail = node.type === "text" ? (tailEncoded ? end : undefined) : markerLength === undefined ? undefined : end - markerLength;
+    if (head !== undefined) {
+      const edit = headEdit(joined, head);
+      if (edit) edits.push(edit);
+    }
+    if (tail !== undefined) {
+      const edit = tailEdit(joined, tail);
+      if (edit) edits.push(edit);
+    }
+    cursor = end;
+  }
+  return applyEdits(joined, edits);
+}
+
+/**
+ * Wrap `state.containerPhrasing` once per serialization so that a surrogate pair split at a child
+ * boundary is written as one scalar (DECISIONS #review-1-r5 K1), at that child's own positions and
+ * at no others (DECISIONS #review-1-r7 M1).
+ *
+ * `mdast-util-to-markdown/lib/util/container-phrasing.js` (2.1.2) has four regions that decide
+ * what reaches the join, and the wrapper is built from them: the look-ahead that classifies the
+ * next sibling by dispatching off `state.handle.handlers` (lines 43–55), the replacement of the
+ * previous result's trailing line ending by a space before an `html` child (lines 60–80),
+ * `encodeAfter` on the current value's first UTF-16 unit (lines 88–94) and `encodingInfo.before`
+ * on the previous result's last unit (lines 100–115). Regions 3 and 4 are why an astral neighbour
+ * of `*`, `**` or `~~` came out as a lone-surrogate reference (`x ~~a.~~&#xD83D;` + U+DE00); the
+ * decision to encode is right and is not changed here, because the parser classifies one UTF-16
+ * unit as well (`micromark-util-classify-character`; a lone surrogate is "other"), so a raw astral
+ * neighbour never lets the run form while the code-point reference does.
+ *
+ * The per-child rule: during the original call, `state.handle` is replaced by a recorder that
+ * calls the original and pushes `{ node, value }` for every child whose `parent` argument is this
+ * parent — a nested `containerPhrasing` call installs its own recorder and its children are its
+ * own — with the zwitch's own properties (`handlers`, `invalid`, `unknown`) copied onto the
+ * recorder by `Object.assign`, so region 1's look-ahead still resolves, and the original restored
+ * in a `finally`. {@link widenSplitSurrogateReferences} then walks the join against those
+ * recordings and widens at their edges only, so no byte of a verbatim leaf is ever rewritten.
  *
  * `state` is created per serialization, so this patches nothing that outlives the call; it is
  * installed on the first dispatched node — always `root` — because that is the first moment a
@@ -283,9 +488,25 @@ function widenSplitSurrogateReferences(value: string): string {
 function installSurrogateWidening(state: WidenedState): void {
   if (state.astralWidened) return;
   state.astralWidened = true;
-  const original = state.containerPhrasing;
-  const containerPhrasing: ContainerPhrasing = (parent, info) =>
-    widenSplitSurrogateReferences(original.call(state, parent, info));
+  const originalContainerPhrasing = state.containerPhrasing;
+  const containerPhrasing: ContainerPhrasing = (parent, info) => {
+    const children: RecordedChild[] = [];
+    const originalHandle = state.handle;
+    const recorder: StateHandle = (node, handleParent, handleState, handleInfo) => {
+      const value = originalHandle.call(state, node, handleParent, handleState, handleInfo);
+      if (handleParent === parent) children.push({ node, value });
+      return value;
+    };
+    Object.assign(recorder, originalHandle);
+    state.handle = recorder;
+    let joined: string;
+    try {
+      joined = originalContainerPhrasing.call(state, parent, info);
+    } finally {
+      state.handle = originalHandle;
+    }
+    return widenSplitSurrogateReferences(joined, children);
+  };
   state.containerPhrasing = containerPhrasing;
 }
 
