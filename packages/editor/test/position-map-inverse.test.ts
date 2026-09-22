@@ -40,7 +40,7 @@ import { deleteAtEveryBlockEnd, deleteBesideEveryMarkedRun } from "./typing-legs
  * caret inside a fence maps to the node's start and back to the position *before* the block.
  * Recorded as the `[1.52, code block interior]` line in docs/V1.1-BACKLOG.md (L4's block-level
  * sibling) and decided at DECISIONS #032: the exclusion is a named member asserted positively,
- * never an `it.fails` — on the three fixtures that hold a fence every non-identity position is
+ * never marking a case as an expected failure — on the three fixtures that hold a fence every non-identity position is
  * inside a `code_block`, nothing else is, and at least one such position exists per member (the
  * assertion that goes red the day `code` gets its table, so the exclusion cannot outlive its
  * cause); both legs' reach cases count the excluded positions and assert they are exactly the
@@ -272,6 +272,15 @@ describe("cursor map: toRendered ∘ toSource is the identity over every text po
     { leg: "deleteBesideEveryMarkedRun", run: deleteBesideEveryMarkedRun },
   ] as const;
 
+  /**
+   * DECISIONS #review-1-r7 M6: vitest's default per-test timeout is 5,000 ms, and the
+   * essay-fixture leg below ran 3,401 / 2,930 / 1,364 ms on the accepted ubuntu / windows / macos
+   * runners of gate 1.verify.r7.g2h and 5,051 ms once in a cold build (Claude's r7 review) — over
+   * the 5,000 ms default on that one run. 30_000 ms gives headroom without masking a real stall;
+   * it is not a narrowing of the position set either destructive leg asserts.
+   */
+  const DESTRUCTIVE_LEG_TIMEOUT_MS = 30_000;
+
   for (const name of names) {
     for (const { leg, run } of LEGS) {
       it(`${name} after ${leg}: the inverse holds at every text position the bytes hold, positions past a narrowed block's correspondence land on its end, and toSource is monotone`, () => {
@@ -316,7 +325,7 @@ describe("cursor map: toRendered ∘ toSource is the identity over every text po
         if (past > 0 && !fixturesPastCorrespondence.includes(name)) fixturesPastCorrespondence.push(name);
         positionsPastCorrespondence += past;
         reached.push(`${name} ${leg}`);
-      });
+      }, DESTRUCTIVE_LEG_TIMEOUT_MS);
     }
   }
 

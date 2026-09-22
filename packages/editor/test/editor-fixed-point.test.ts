@@ -1651,6 +1651,7 @@ describe("editor fixed point over the corpus", () => {
       const pastedOut = format(pmToMdast({ doc: pasted.doc, frontMatter }));
       expect(format(parse(pastedOut))).toBe(pastedOut);
       expectNoForbiddenEntity(pastedOut);
+      expectTextMatchesEditorIgnoringWhitespace(pasted.doc, pastedOut, name);
       // Every item the paste reached holds its two paragraphs in the reparse: the structure the
       // paste built survives, item for item.
       expect(itemsWithTwoParagraphs(parse(pastedOut))).toBe(pasted.items);
