@@ -5,6 +5,8 @@ import type { Delete, Html, Root, Yaml } from "mdast";
 import remarkStringify, { type Options } from "remark-stringify";
 import { unified, type Data, type Processor } from "unified";
 
+import { parse } from "./parse.js";
+
 type ToMarkdownExtensions = NonNullable<Data["toMarkdownExtensions"]>;
 type Handlers = NonNullable<Options["handlers"]>;
 type Handle = NonNullable<Handlers[keyof Handlers]>;
@@ -221,6 +223,64 @@ const SPLIT_PAIR = {
 /** The trailing line ending `container-phrasing.js:71` replaces by one space before an `html` sibling. */
 const TRAILING_LINE_ENDING = /(\r?\n|\r)$/;
 
+/** The one character `container-phrasing.js:71` writes in a trailing line ending's place. */
+const SPACE = " ";
+
+/**
+ * Whether a hard `break` written with its line ending kept still reads as a `break` directly
+ * before this `html` sibling — the criterion the whole of {@link repairBreakBeforeHtml} turns on,
+ * and the round trip itself rather than a hand list of tag names (lesson [1.10.r6d]).
+ *
+ * `breakOutput` is what the `break` handler returned (`\\` + a line ending,
+ * `mdast-util-to-markdown/lib/handle/break.js`), `htmlValue` what the `html` handler returned
+ * (the bytes the parser captured, {@link opaqueHandlers}). The probe puts the pair between text
+ * on both sides — `x` before, ` y` after, so the line the html starts is not also the paragraph's
+ * last — and asks the app's own parser: one block, a paragraph, holding a `break` whose next
+ * sibling is an `html`. An inline tag (`<i>`, `<span>`, `<b>`) is CommonMark §4.6 condition 7,
+ * which cannot interrupt a paragraph, so the pair survives and the answer is `true`; a value that
+ * can open an html block — conditions 1–6, `<div>`, `<!-- c -->`, `<script>`, `<?x?>`,
+ * `<![CDATA[x]]>` — ends the paragraph at the break instead, so the probe holds two blocks (or a
+ * paragraph with no such pair) and the answer is `false`.
+ *
+ * `parse` is imported from `./parse.js`, which imports nothing from this file, so there is no
+ * cycle; the probe runs only for a `break` whose next sibling is `html` and whose emission the
+ * assembler actually rewrote, which no fixture reaches more than three times.
+ */
+function breakSurvivesBeforeHtml(breakOutput: string, htmlValue: string): boolean {
+  const root = parse(`x${breakOutput}${htmlValue} y\n`);
+  if (root.children.length !== 1) return false;
+  const block = root.children[0];
+  if (block.type !== "paragraph") return false;
+  const { children } = block;
+  return children.some(
+    (child, index) => child.type === "break" && children[index + 1]?.type === "html",
+  );
+}
+
+/**
+ * The bytes a `break` child gets in the join when `container-phrasing.js` lines 60–80 rewrote its
+ * trailing line ending to one space before an `html` sibling (DECISIONS #review-1-r7 M2).
+ *
+ * That branch replaces the *previous result's* trailing line ending whatever node wrote it, so the
+ * `break` handler's `\\` + line ending became `\\` + a space — a literal backslash the user never
+ * wrote, rendered as text, with the break itself gone from the reparse (invariant B fails on the
+ * parser's own tree). Two answers replace it, chosen by {@link breakSurvivesBeforeHtml}:
+ *
+ * - the break's own output, the line ending kept, exactly when the pair reparses to a `break`
+ *   directly followed by an `html` — the inline-tag case, where the assembler's worry (html read
+ *   as flow) does not arise because CommonMark §4.6 condition 7 cannot interrupt a paragraph;
+ * - one space and no backslash otherwise — the block-capable values of conditions 1–6, where
+ *   keeping the line ending really would turn the next line into an html block. The break is lost
+ *   there, as it was before, but it is lost as a word space rather than as a stray backslash: a
+ *   documented loss on the docs/V1.1-BACKLOG.md line `[#030 product, a soft or hard break before
+ *   inline html]`.
+ *
+ * The `html` child's own bytes are never touched either way.
+ */
+function repairBreakBeforeHtml(breakOutput: string, htmlValue: string): string {
+  return breakSurvivesBeforeHtml(breakOutput, htmlValue) ? breakOutput : SPACE;
+}
+
 /** The marker a mark handler writes on each side of its `containerPhrasing` result, by node type.
  * The lengths are {@link stringifyOptions}' (`emphasis: "*"`, `strong: "*"` doubled) and the
  * strikethrough extension's `~~`, read from the type and never from the bytes: `***a***` is a
@@ -258,6 +318,8 @@ interface EmissionForm {
   text: string;
   headEncoded: boolean;
   tailEncoded: boolean;
+  /** Whether this form is the one region 4 wrote: the trailing line ending replaced by one space. */
+  eolAsSpace: boolean;
 }
 
 /** Where one child's emission sits in the join — the half-open slice `[start, end)` — and its edges. */
@@ -266,6 +328,8 @@ interface LocatedChild {
   end: number;
   headEncoded: boolean;
   tailEncoded: boolean;
+  /** Whether the form found at that slice is region 4's: the line ending written as one space. */
+  eolAsSpace: boolean;
 }
 
 /** One replacement to make in the join: the half-open slice `[start, end)` and its new bytes. */
@@ -300,7 +364,8 @@ interface Edit {
  * with punctuation — a marker, a bracket, a fence, a tag — and `encode-info.js` never encodes
  * punctuation. So a non-text child has its plain output and, when the next child is `html`, the
  * line-ending form region 4 rewrites it into; the only non-text child whose output ends in a line
- * ending is a `break`.
+ * ending is a `break`, and the form's `eolAsSpace` flag is how the walk knows region 4 fired on it
+ * ({@link repairBreakBeforeHtml}, DECISIONS #review-1-r7 M2).
  */
 function emissionForms(
   node: HandledNode,
@@ -308,28 +373,34 @@ function emissionForms(
   beforeHtml: boolean,
 ): readonly EmissionForm[] {
   const forms: EmissionForm[] = [];
-  const add = (text: string, headEncoded: boolean, tailEncoded: boolean): void => {
+  const add = (
+    text: string,
+    headEncoded: boolean,
+    tailEncoded: boolean,
+    eolAsSpace: boolean,
+  ): void => {
     const existing = forms.find((form) => form.text === text);
     if (existing) {
       // The head and tail forms of a one-unit value are the same bytes; the walk cannot tell
       // which region wrote them, so both anchors are tried and each fires only on a real pair.
       existing.headEncoded ||= headEncoded;
       existing.tailEncoded ||= tailEncoded;
+      existing.eolAsSpace ||= eolAsSpace;
       return;
     }
-    forms.push({ text, headEncoded, tailEncoded });
+    forms.push({ text, headEncoded, tailEncoded, eolAsSpace });
   };
-  add(value, false, false);
+  add(value, false, false, false);
   if (node.type === "text" && value.length > 0) {
     const head = encodeFirstUnit(value);
-    add(head, true, false);
-    add(encodeLastUnit(value), false, true);
-    add(encodeLastUnit(head), true, true);
+    add(head, true, false, false);
+    add(encodeLastUnit(value), false, true, false);
+    add(encodeLastUnit(head), true, true, false);
   }
   if (!beforeHtml) return forms;
   for (const form of [...forms]) {
     if (!TRAILING_LINE_ENDING.test(form.text)) continue;
-    add(form.text.replace(TRAILING_LINE_ENDING, " "), form.headEncoded, form.tailEncoded);
+    add(form.text.replace(TRAILING_LINE_ENDING, SPACE), form.headEncoded, form.tailEncoded, true);
   }
   return forms;
 }
@@ -355,6 +426,7 @@ function locateChild(
       end: cursor + form.text.length,
       headEncoded: form.headEncoded,
       tailEncoded: form.tailEncoded,
+      eolAsSpace: form.eolAsSpace,
     };
   }
   return undefined;
@@ -395,17 +467,25 @@ function applyEdits(joined: string, edits: readonly Edit[]): string {
 }
 
 /**
- * Widen every lone-surrogate character reference written at a child boundary to the code-point
- * reference of the pair it split: `&#xD83D;` + U+DE00 → `&#x1F600;`, U+D83D + `&#xDE00;` →
- * `&#x1F600;`, and `&#xD83D;&#xDE00;` → `&#x1F600;`. Those references reparse to U+FFFD, so the
- * whole scalar is the app-owned half of the encoding the handlers and {@link encodeInfo} decide
- * (DECISIONS #review-1-r5 K1); the widening is by code point, the same arithmetic for all three
- * forms ({@link widenedPair}).
+ * The app's per-child pass over the string `containerPhrasing` returned: one walk, two kinds of
+ * edit, each made only at a position where a rewrite of the assembler's can have fired.
  *
- * The widening is per child and positional, never over the join (DECISIONS #review-1-r7 M1).
- * `children` is what this parent's handlers emitted, in order, as recorded by
- * {@link installSurrogateWidening}; the join is walked with a cursor, each child's slice located
- * by {@link locateChild}, and an edit made only where a rewrite can have fired:
+ * **The widening (DECISIONS #review-1-r5 K1, #review-1-r7 M1).** Every lone-surrogate character
+ * reference written at a child boundary becomes the code-point reference of the pair it split:
+ * `&#xD83D;` + U+DE00 → `&#x1F600;`, U+D83D + `&#xDE00;` → `&#x1F600;`, and `&#xD83D;&#xDE00;` →
+ * `&#x1F600;`. Those lone references reparse to U+FFFD, so the whole scalar is the app-owned half
+ * of the encoding the handlers and {@link encodeInfo} decide; the widening is by code point, the
+ * same arithmetic for all three forms ({@link widenedPair}).
+ *
+ * **The hard break before inline html (DECISIONS #review-1-r7 M2).** A `break` child located at
+ * region 4's form — its trailing line ending written as one space, `\\ ` — is replaced by what
+ * {@link repairBreakBeforeHtml} decides from the round trip: the break's own output with the line
+ * ending kept, or one space with no backslash. The assembler wrote a literal backslash there and
+ * lost the break.
+ *
+ * Both are per child and positional, never over the join. `children` is what this parent's
+ * handlers emitted, in order, as recorded by {@link installSurrogateWidening}; the join is walked
+ * with a cursor and each child's slice located by {@link locateChild}. The widening's positions:
  *
  * - a `text` child whose first unit the assembler encoded: {@link SPLIT_PAIR}.head anchored at the
  *   slice's start; whose last unit it encoded: {@link SPLIT_PAIR}.tail anchored at its end;
@@ -414,8 +494,8 @@ function applyEdits(joined: string, edits: readonly Edit[]): string {
  *   `mdast-util-to-markdown/lib/handle/emphasis.js:39-48`, `strong.js` and this file's
  *   {@link handleDelete} encode their own `containerPhrasing` result.
  *
- * Nothing else in the join is touched, so the literal bytes `&#xD83D;&#xDE00;` inside a verbatim
- * leaf — a code span, an inline `html` node, either of them in a table cell, inside a mark or
+ * Nothing else in the join is touched — the `html` child's own bytes least of all — so the literal
+ * bytes `&#xD83D;&#xDE00;` inside a verbatim leaf — a code span, an inline `html` node, either of them in a table cell, inside a mark or
  * inside a link's text — are left exactly as the parser read them (PRD §6.1). A child the walk
  * cannot locate stops the walk and the rest of the join is left as the parent wrote it, never
  * widened blind; no such child is expected, because `locateEmission` in positions.ts enumerates
@@ -430,15 +510,13 @@ function widenSplitSurrogateReferences(
   let cursor = 0;
   for (let index = 0; index < children.length; index += 1) {
     const { node, value } = children[index];
-    const located = locateChild(
-      joined,
-      cursor,
-      node,
-      value,
-      children[index + 1]?.node.type === "html",
-    );
+    const next = children[index + 1];
+    const located = locateChild(joined, cursor, node, value, next?.node.type === "html");
     if (located === undefined) break;
-    const { start, end, headEncoded, tailEncoded } = located;
+    const { start, end, headEncoded, tailEncoded, eolAsSpace } = located;
+    if (node.type === "break" && eolAsSpace && next !== undefined) {
+      edits.push({ start, end, replacement: repairBreakBeforeHtml(value, next.value) });
+    }
     const markerLength = MARK_MARKER_LENGTH.get(node.type);
     const head = node.type === "text" ? (headEncoded ? start : undefined) : markerLength === undefined ? undefined : start + markerLength;
     const tail = node.type === "text" ? (tailEncoded ? end : undefined) : markerLength === undefined ? undefined : end - markerLength;
@@ -477,7 +555,8 @@ function widenSplitSurrogateReferences(
  * own — with the zwitch's own properties (`handlers`, `invalid`, `unknown`) copied onto the
  * recorder by `Object.assign`, so region 1's look-ahead still resolves, and the original restored
  * in a `finally`. {@link widenSplitSurrogateReferences} then walks the join against those
- * recordings and widens at their edges only, so no byte of a verbatim leaf is ever rewritten.
+ * recordings and edits at their own slices only — the surrogate widening at their edges, region
+ * 4's `\\ ` at a `break`'s slice — so no byte of a verbatim leaf is ever rewritten.
  *
  * `state` is created per serialization, so this patches nothing that outlives the call; it is
  * installed on the first dispatched node — always `root` — because that is the first moment a

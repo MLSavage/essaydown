@@ -302,28 +302,66 @@ describe("indentOffsetMap: the seam blockquote and listItem indent their childre
   });
 });
 
-describe("formatWithMap: a node the serializer rewrote after emitting it", () => {
-  it("is reported in unresolved with its subtree, and its siblings keep their ranges", () => {
-    // `containerPhrasing` replaces the line ending a `break` produced with a space when the next
-    // child is `html`, so the bytes the `break` handler returned are not in the output at all.
-    const root: Root = {
-      type: "root",
-      children: [
-        {
-          type: "paragraph",
-          children: [
-            { type: "text", value: "a" },
-            { type: "break" },
-            { type: "html", value: "<b>x</b>" },
-          ],
-        },
-      ],
-    };
-    const { text, map } = formatWithMap(root);
-    expect(text).toBe("a\\ <b>x</b>\n");
+/** A root holding one paragraph: the text `a`, a hard `break`, and one inline `html` node. */
+function breakBeforeHtml(html: string): Root {
+  return {
+    type: "root",
+    children: [
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: "a" },
+          { type: "break" },
+          { type: "html", value: html },
+        ],
+      },
+    ],
+  };
+}
+
+describe("formatWithMap: a `break` before inline html", () => {
+  it("keeps its line ending before a tag that cannot open a block, and is placed with its siblings", () => {
+    // `container-phrasing.js` lines 60–80 rewrite the `break` handler's `\\` + line ending to
+    // `\\ ` before an `html` child. Task 1.58 writes the break's own output back whenever the
+    // pair reparses to a `break` followed by an `html` (DECISIONS #review-1-r7 M2), so the bytes
+    // the handler returned are in the output after all and `locateEmission` finds them verbatim.
+    const { text, map } = formatWithMap(breakBeforeHtml("<b>x</b>"));
+    expect(text).toBe("a\\\n<b>x</b>\n");
+    expect(map.unresolved).toEqual([]);
+    // The break's range covers the backslash and the line ending: it opens at the backslash's own
+    // column on line 1 and closes at the start of line 2, where the line ending has carried it.
+    const backslash = text.indexOf("\\");
+    expect(map.ranges["0.1"]).toEqual({
+      startLine: 1,
+      startCol: backslash + 1,
+      endLine: 2,
+      endCol: 1,
+    });
+    expect(map.ranges["0.0"]).toEqual({ startLine: 1, startCol: 1, endLine: 1, endCol: 2 });
+    expect(map.ranges["0.2"]).toEqual({
+      startLine: 2,
+      startCol: 1,
+      endLine: 2,
+      endCol: 1 + "<b>x</b>".length,
+    });
+  });
+
+  it("is one space before html that can open a block, is unresolved there, and its siblings keep their ranges", () => {
+    // `<div>` is CommonMark §4.6 condition 6, so keeping the line ending would make the next line
+    // an html block. The break is written as one space — a documented loss, docs/V1.1-BACKLOG.md
+    // `[#030 product, a soft or hard break before inline html]` — and one space is not the
+    // handler's output, so the break is still `unresolved`, with nothing to spell.
+    const { text, map } = formatWithMap(breakBeforeHtml("<div>x</div>"));
+    expect(text).toBe("a <div>x</div>\n");
     expect(map.unresolved).toEqual(["0.1"]);
     expect(map.ranges["0.0"]).toEqual({ startLine: 1, startCol: 1, endLine: 1, endCol: 2 });
-    expect(map.ranges["0.2"]).toEqual({ startLine: 1, startCol: 4, endLine: 1, endCol: 12 });
+    const html = text.indexOf("<div>");
+    expect(map.ranges["0.2"]).toEqual({
+      startLine: 1,
+      startCol: html + 1,
+      endLine: 1,
+      endCol: html + 1 + "<div>x</div>".length,
+    });
   });
 });
 

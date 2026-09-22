@@ -53,6 +53,23 @@ const HTML_CASES: HtmlCase[] = [
   { source: "*a*\n<b>x</b>\n", path: "0.1", value: "\n" },
 ];
 
+/** A root holding one paragraph: the text `a`, a hard `break`, and one inline `html` node. */
+function breakBeforeHtml(html: string): Root {
+  return {
+    type: "root",
+    children: [
+      {
+        type: "paragraph",
+        children: [
+          { type: "text", value: "a" },
+          { type: "break" },
+          { type: "html", value: html },
+        ],
+      },
+    ],
+  };
+}
+
 function expectMonotone(table: SpellingTable): void {
   for (let i = 0; i < table.ends.length; i += 1) {
     expect(table.ends[i]).toBeGreaterThanOrEqual(table.starts[i]);
@@ -138,28 +155,52 @@ describe("a text child's line ending before inline html is placed (task 1.51, L3
     expect(nodeAt(map, 1, 7)?.node.type).toBe("html");
   });
 
-  it("a `break` child before html (the positions.test.ts shape) is unchanged: still unresolved, its siblings placed", () => {
-    // The same branch rewrites the `break` handler's `\\\n`, but a break has no value to spell:
-    // the fourth candidate is a `text` child's only.
-    const root: Root = {
-      type: "root",
-      children: [
-        {
-          type: "paragraph",
-          children: [
-            { type: "text", value: "a" },
-            { type: "break" },
-            { type: "html", value: "<b>x</b>" },
-          ],
-        },
-      ],
-    };
+  it("a `break` child before an inline tag keeps its line ending and is placed (task 1.58)", () => {
+    // The same branch rewrites the `break` handler's `\\\n`, and task 1.58 writes that output
+    // back when the pair reparses to a `break` followed by an `html` (DECISIONS #review-1-r7 M2).
+    // A break still has no value to spell — the fourth candidate is a `text` child's only — but
+    // its bytes are now in the output verbatim, so it is found and ranged.
+    const root: Root = breakBeforeHtml("<b>x</b>");
     const { text, map, spellings } = formatWithMap(root);
-    expect(text).toBe("a\\ <b>x</b>\n");
+    expect(text).toBe("a\\\n<b>x</b>\n");
+    expect(map.unresolved).toEqual([]);
+    const backslash = text.indexOf("\\");
+    expect(map.ranges["0.1"]).toEqual({
+      startLine: 1,
+      startCol: backslash + 1,
+      endLine: 2,
+      endCol: 1,
+    });
+    expect(map.ranges["0.0"]).toEqual({ startLine: 1, startCol: 1, endLine: 1, endCol: 2 });
+    expect(map.ranges["0.2"]).toEqual({
+      startLine: 2,
+      startCol: 1,
+      endLine: 2,
+      endCol: 1 + "<b>x</b>".length,
+    });
+    expect(spellings["0.0"]).toEqual({ starts: [0, 1], ends: [1] });
+    expect(spellings["0.1"]).toBeUndefined();
+  });
+
+  it("a `break` child before html that can open a block is one space, and stays unresolved", () => {
+    // `<div>` is CommonMark §4.6 condition 6: keeping the line ending would open an html block on
+    // the next line, so the break is written as one space and lost — the documented loss on
+    // docs/V1.1-BACKLOG.md `[#030 product, a soft or hard break before inline html]`. One space is
+    // not the handler's output, so the break is `unresolved` with no spelling table, exactly as
+    // every break before html was before task 1.58.
+    const { text, map, spellings } = formatWithMap(breakBeforeHtml("<div>x</div>"));
+    expect(text).toBe("a <div>x</div>\n");
     expect(map.unresolved).toEqual(["0.1"]);
     expect(map.ranges["0.0"]).toEqual({ startLine: 1, startCol: 1, endLine: 1, endCol: 2 });
-    expect(map.ranges["0.2"]).toEqual({ startLine: 1, startCol: 4, endLine: 1, endCol: 12 });
+    const html = text.indexOf("<div>");
+    expect(map.ranges["0.2"]).toEqual({
+      startLine: 1,
+      startCol: html + 1,
+      endLine: 1,
+      endCol: html + 1 + "<div>x</div>".length,
+    });
     expect(spellings["0.0"]).toEqual({ starts: [0, 1], ends: [1] });
+    expect(spellings["0.1"]).toBeUndefined();
   });
 
   it("the fourth candidate is tried only before html: a line ending before a run is never read as a space", () => {

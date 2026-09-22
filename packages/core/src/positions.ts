@@ -661,9 +661,20 @@ function locateEmission(
  * value with its trailing line ending replaced by one space. Branch 3 can combine with branch 1
  * (a child after a run *and* before html), so the head form gets its line ending replaced too;
  * the tail and both forms end in a reference, never a line ending, because a line ending before
- * an attention run is never encoded and a child before html is not before a run. A `break`
- * child before `html` is rewritten by the same branch and stays unresolved: its string is the
- * serializer's, not a value's, and the map has no characters to spell for it.
+ * an attention run is never encoded and a child before html is not before a run.
+ *
+ * A `break` child before `html` is rewritten by the same branch, and what reaches the bytes there
+ * is `format.ts`'s answer, not branch 3's (task 1.58, DECISIONS #review-1-r7 M2) — a new encoding
+ * in a handler is a change to this map (DECISIONS #review-1-r5 K2), and so is a new repair of
+ * one. When the pair reparses to a `break` followed by an `html` — an inline tag, CommonMark §4.6
+ * condition 7 — the break is written with its line ending kept, which is exactly the bytes its
+ * handler returned, so {@link locateEmission} finds it among the candidates it already has (the
+ * plain emission, the only one a non-`text` child gets) and the break is resolved and ranged.
+ * When the html value can open an html block (conditions 1–6) the break is written as one space
+ * instead; one space is not the spelling of any value, so that form is no candidate here and the
+ * break stays unresolved, with no characters for the map to spell — the case named in
+ * `positions-html-eol-inline-code.test.ts` and in `positions.test.ts`. No `text` child's
+ * candidates change either way.
  */
 function rewrittenEmissions(value: string, beforeHtml: boolean): Candidate[] {
   const points = [...value];

@@ -347,6 +347,23 @@
       1
     ]
   },
+  "hard-break-before-inline-html.md": {
+    "nodeTypes": [
+      "break",
+      "emphasis",
+      "html",
+      "paragraph",
+      "root",
+      "text"
+    ],
+    "blockCount": 3,
+    "sectionCount": 0,
+    "paragraphStartLines": [
+      1,
+      4,
+      7
+    ]
+  },
   "hard-break-in-emphasis.md": {
     "nodeTypes": [
       "break",
