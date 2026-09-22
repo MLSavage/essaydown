@@ -22,7 +22,7 @@ import {
   type SourceBinding,
   type SourcePosition,
 } from "@essaydown/editor";
-import { EditorState } from "prosemirror-state";
+import { EditorState, Plugin } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { EditorState as SourceEditorState } from "@codemirror/state";
 import { EditorView as SourceEditorView } from "@codemirror/view";
@@ -31,6 +31,47 @@ import "@essaydown/editor/src/source.css";
 import "./dev-editor.css";
 import { clearOutlineHandoff, readOutlineHandoff } from "./outline-handoff.js";
 import { questionHintPlugin } from "./outline-hints.js";
+
+/** The shape the dev bar's selection readout holds, as `toSource` and the two-view guard read a selection. */
+type SelectionReadout = {
+  before: string | null;
+  empty: boolean;
+  marks: readonly string[];
+  stored: readonly string[] | null;
+};
+
+function writeSelectionReadout(element: HTMLSpanElement, state: EditorState): void {
+  const { $head } = state.selection;
+  const before = $head.parent.isTextblock ? $head.parent.textBetween(0, $head.parentOffset) : null;
+  const readout: SelectionReadout = {
+    before,
+    empty: state.selection.empty,
+    marks: $head.marks().map((mark) => mark.type.name),
+    stored: state.storedMarks === null ? null : state.storedMarks.map((mark) => mark.type.name),
+  };
+  element.textContent = JSON.stringify(readout);
+}
+
+/**
+ * Task 1.62 (DECISIONS #037): a caret beside a reveal widget has two DOM spellings (Blink's and
+ * `NodeViewDesc.domFromPos`'s), so a Playwright precondition reading the DOM selection is a race;
+ * this plugin exposes the editor's own selection instead, through the public `EditorState` it
+ * already has, written on every `updateState` — including the store pulls `bindProseMirror` makes
+ * outside a dispatch — so a poll on it never races the DOM.
+ */
+function selectionReadoutPlugin(element: HTMLSpanElement): Plugin {
+  return new Plugin({
+    view: (view) => {
+      writeSelectionReadout(element, view.state);
+      return {
+        update: (view) => writeSelectionReadout(element, view.state),
+        destroy: () => {
+          element.textContent = "";
+        },
+      };
+    },
+  });
+}
 
 /**
  * The `/dev/editor` route of PRD §8 (Phases 0–1): one document store, and beside it the canonical
@@ -63,6 +104,7 @@ import { questionHintPlugin } from "./outline-hints.js";
 export default function DevEditor() {
   const host = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const selection = useRef<HTMLSpanElement>(null);
   // Read once, purely (see outline-handoff.ts): a StrictMode double-render must not lose it.
   const handoff = useMemo(() => readOutlineHandoff(), []);
   const hints = useRef<readonly string[]>(handoff?.hints ?? []);
@@ -125,6 +167,7 @@ export default function DevEditor() {
     if (element === null) return;
 
     if (mode === "rendered") {
+      const readout = selection.current;
       const view = new EditorView(element, {
         state: EditorState.create({
           schema,
@@ -133,6 +176,7 @@ export default function DevEditor() {
             ...togglePlugins(toggle),
             ...editorPlugins(),
             ...(hints.current.length > 0 ? [questionHintPlugin(hints.current)] : []),
+            ...(readout !== null ? [selectionReadoutPlugin(readout)] : []),
           ],
         }),
       });
@@ -154,6 +198,9 @@ export default function DevEditor() {
         view.destroy();
       };
     }
+
+    // The readout is the rendered view's selection; the source view has none to report.
+    if (selection.current !== null) selection.current.textContent = "";
 
     // `binding` is read by the update listener the view is built with, and built from the view, so
     // it starts null; the only update that can arrive in between is the state's own creation,
@@ -261,6 +308,8 @@ export default function DevEditor() {
         <span className="dev-editor-status" data-testid="status">
           {status}
         </span>
+        {/* Written imperatively by selectionReadoutPlugin, not React state — see task 1.62. */}
+        <span className="dev-editor-selection" data-testid="selection" ref={selection} />
       </div>
       <div className="dev-editor-host" data-testid="editor" ref={host} />
       <pre className="dev-editor-markdown" data-testid="markdown">

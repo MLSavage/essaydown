@@ -31,11 +31,13 @@ import { format, parse } from "../../packages/core/src/index.js";
  * A copy case asserts the string the app handed `navigator.clipboard.writeText`, recorded by an
  * init-script spy, never the OS clipboard read back (task 1.28, DECISIONS #021).
  *
- * Caret placement (DECISIONS #022, #024): a click on the `<code>`'s own box at a computed point,
- * then counted `ArrowRight` with the anchor asserted before and after — never a Home or End key,
- * never a vertical arrow inside a table's body row, never a modifier chord for the caret. The
- * chord follows the last arrow only after ProseMirror's observer has had a tick to read the DOM
- * selection (lesson [1.46]). Helpers are copied from `editor-toggle-cell-end.spec.ts`.
+ * Caret placement (DECISIONS #022, #024, #037): one click at a point computed from the span's own
+ * text node's `Range` rect, over the pipe (an interior text position, which has one DOM spelling
+ * unlike the run's edges — task 1.62) — never a Home or End key, never an arrow, never a modifier
+ * chord for the caret. The editor's own selection is read from the dev bar's readout (task 1.62),
+ * not the DOM's, so what is asserted is what `toSource` actually reads: `before`, `marks` and
+ * `stored`. The chord follows the click only after ProseMirror's observer has had a tick to read
+ * the DOM selection (lesson [1.46]). Helpers are copied from `editor-toggle-cell-end.spec.ts`.
  */
 
 /** The arguments of the `writeText` calls the app made, newest last, recorded on the window. */
@@ -68,32 +70,10 @@ async function load(page: Page, name: string, source: string): Promise<void> {
   await expect(page.getByTestId("status")).toHaveText(`Loaded ${name}`);
 }
 
-/**
- * Fires `key` `times` times for a counted horizontal motion, waiting after each press for the DOM
- * caret to differ from its reading taken before that press (DECISIONS #034, lesson [1.46]).
- */
-async function press(page: Page, key: string, times: number): Promise<void> {
-  for (let step = 0; step < times; step += 1) {
-    const previous = JSON.stringify(await caret(page));
-    await page.keyboard.press(key);
-    await expect.poll(async () => JSON.stringify(await caret(page)) !== previous).toBe(true);
-  }
-}
-
-/**
- * The rendered caret as the DOM selection reports it: the anchor text node's text, byte for byte,
- * and the caret's offset in it. An anchor that is not a text node reports a null text and its own
- * offset — which is what the round trip of the second case below actually leaves behind.
- */
-function caret(page: Page): Promise<{ text: string | null; offset: number }> {
-  return page.evaluate(() => {
-    const selection = document.getSelection();
-    if (selection === null || selection.anchorNode === null) return { text: null, offset: -1 };
-    if (!selection.isCollapsed) return { text: null, offset: -1 };
-    const node = selection.anchorNode;
-    if (node.nodeType !== Node.TEXT_NODE) return { text: null, offset: selection.anchorOffset };
-    return { text: node.textContent, offset: selection.anchorOffset };
-  });
+/** The dev bar's selection readout (task 1.62), parsed — the editor's own selection, not the DOM's. */
+async function selection(page: Page): Promise<unknown> {
+  const text = await page.getByTestId("selection").textContent();
+  return JSON.parse(text ?? "null");
 }
 
 /** The source view's lines, one per `.cm-line` — CodeMirror renders no line ending of its own. */
@@ -128,17 +108,32 @@ function codeText(page: Page): Promise<string | null> {
 }
 
 /**
- * A click on the `<code>`'s own bounding box at its left edge, on its one line — a computed point
- * every browser resolves to the span's first text position, never a Home/End key or a chord
- * (DECISIONS #022). The cell's own left edge is not that point: task 1.4 draws the span's opening
- * backtick there as a `.essaydown-delimiter` widget (the cell reads `` `a|b` ``, the span `a|b`),
- * and a click on the widget anchors the DOM selection on an element, not on a text node.
+ * A click at the pipe's own left edge, measured from the span's text node's `Range` rect over its
+ * character 1 (the pipe in `a|b`) — an interior text position, which has one DOM spelling, unlike
+ * the run's edges the reveal widgets sit beside (task 1.62, DECISIONS #037). The text node is
+ * found the way `clickAfter` finds its own, in `editor-toggle-code-span-end.spec.ts`, but rooted
+ * at `.ProseMirror code` rather than `.ProseMirror`.
  */
-async function clickCodeStart(page: Page): Promise<void> {
-  const code = page.locator(".ProseMirror code").first();
-  const box = await code.boundingBox();
-  if (box === null) throw new Error("no code span on the page");
-  await code.click({ position: { x: 1, y: box.height / 2 } });
+async function clickPipe(page: Page): Promise<void> {
+  const point = await page.evaluate(() => {
+    const root = document.querySelector(".ProseMirror code");
+    if (root === null) throw new Error("no .ProseMirror code");
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let target: Text | null = null;
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      if (node.textContent === "a|b") {
+        target = node as Text;
+        break;
+      }
+    }
+    if (target === null) throw new Error("no text node holding a|b");
+    const range = document.createRange();
+    range.setStart(target, 1);
+    range.setEnd(target, 2);
+    const rect = range.getBoundingClientRect();
+    return { x: rect.left + 1, y: rect.top + rect.height / 2 };
+  });
+  await page.mouse.click(point.x, point.y);
 }
 
 /** The seed, exactly the lines the reconciliation ran: one body cell holding `` `a\|b` ``. */
@@ -161,13 +156,15 @@ async function seedWithCaretAfterA(page: Page): Promise<void> {
   await expect.poll(() => page.locator(".ProseMirror code").count()).toBe(1);
   expect(await codeText(page)).toBe("a|b");
 
-  // The caret placed by a click on the span at a computed point and asserted as an anchor before
-  // any key, then one press to the right: after `a`, inside the span.
-  await clickCodeStart(page);
-  await expect.poll(() => caret(page)).toEqual({ text: "a|b", offset: 0 });
-  await press(page, "ArrowRight", 1);
-  await expect.poll(() => caret(page)).toEqual({ text: "a|b", offset: 1 });
-  // The arrow moved the DOM selection natively; give ProseMirror's observer a tick to read it
+  // The caret placed by one click at an interior text position — the pipe's left edge, which has
+  // one DOM spelling and needs no key after the click (task 1.62) — asserted from the editor's own
+  // selection: `before` proves the position byte for byte, `marks` proves the click route's
+  // `$pos.marks()`, and `stored: null` proves no stored marks (M5's click route).
+  await clickPipe(page);
+  await expect
+    .poll(() => selection(page))
+    .toEqual({ before: "a", empty: true, marks: ["inline_code"], stored: null });
+  // The click moved the DOM selection natively; give ProseMirror's observer a tick to read it
   // before the chord's `toSource` runs (lesson [1.46]).
   await page.waitForTimeout(200);
 }
@@ -215,9 +212,11 @@ test.describe("a caret inside a code span holding a pipe, in a table cell", () =
     await expect(page.getByTestId("mode")).toHaveText("rendered");
     // `canonicalCursor` (toggle.ts 646–658) carries a source position through a spelling table
     // only for a `text` node; the innermost live node here is the `inlineCode`, so it answers the
-    // node's start. ProseMirror puts that position before the cell's opening-backtick widget, so
-    // the DOM anchor is the `td` element itself and reports no text — asserted as it reads.
-    await expect.poll(() => caret(page)).toEqual({ text: null, offset: 0 });
+    // node's start, as the readout reads it: nothing before the caret in the cell's own textblock,
+    // still inside the span.
+    await expect
+      .poll(() => selection(page))
+      .toEqual({ before: "", empty: true, marks: ["inline_code"], stored: null });
 
     await page.keyboard.type("X", { delay: 10 });
     // The keystroke lands at the span's start, inside the span: `Xa|b`, not `aX|b`. Everything

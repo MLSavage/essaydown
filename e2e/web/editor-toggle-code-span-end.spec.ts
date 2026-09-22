@@ -57,19 +57,10 @@ async function load(page: Page, name: string, source: string): Promise<void> {
   await expect(page.getByTestId("status")).toHaveText(`Loaded ${name}`);
 }
 
-/**
- * The rendered caret as the DOM selection reports it: the anchor text node's text, byte for byte,
- * and the caret's offset in it.
- */
-function caret(page: Page): Promise<{ text: string | null; offset: number }> {
-  return page.evaluate(() => {
-    const selection = document.getSelection();
-    if (selection === null || selection.anchorNode === null) return { text: null, offset: -1 };
-    if (!selection.isCollapsed) return { text: null, offset: -1 };
-    const node = selection.anchorNode;
-    if (node.nodeType !== Node.TEXT_NODE) return { text: null, offset: selection.anchorOffset };
-    return { text: node.textContent, offset: selection.anchorOffset };
-  });
+/** The dev bar's selection readout (task 1.62), parsed — the editor's own selection, not the DOM's. */
+async function selection(page: Page): Promise<unknown> {
+  const text = await page.getByTestId("selection").textContent();
+  return JSON.parse(text ?? "null");
 }
 
 /** Click "Copy Markdown" and return the one string the app handed `writeText`. */
@@ -121,10 +112,15 @@ test.describe("a toggle to source and back with the caret at the end of a block-
     expect(await page.locator(".ProseMirror code").count()).toBe(1);
     expect(await page.locator(".ProseMirror code").textContent()).toBe("foo");
 
-    // The caret placed by one click at the end of the span's own text, and asserted as an anchor
-    // before any other event: the run's last offset, inside the `<code>`'s text node.
+    // The caret placed by one click at the end of the span's own text, read from the editor's own
+    // selection (task 1.62, DECISIONS #037) rather than the DOM's — a caret beside a reveal widget
+    // has two DOM spellings, and this is the one route `toSource` actually reads: `before` proves
+    // the span's end byte for byte, `marks` proves the click route's `$pos.marks()`, and
+    // `stored: null` proves no stored marks (M5's click route).
     await clickAfter(page, "foo");
-    await expect.poll(() => caret(page)).toEqual({ text: "foo", offset: 3 });
+    await expect
+      .poll(() => selection(page))
+      .toEqual({ before: "see foo", empty: true, marks: ["inline_code"], stored: null });
     // The click moved the DOM selection natively; give ProseMirror's observer a tick to read it
     // before the chord's `toSource` runs (lesson [1.46]).
     await page.waitForTimeout(200);
