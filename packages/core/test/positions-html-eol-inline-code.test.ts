@@ -422,3 +422,195 @@ describe("inlineCodeSpelling: the handler's shapes (task 1.51)", () => {
     expect(inlineCodeSpelling("cd", "`cdx`")).toBeUndefined();
   });
 });
+
+/* ------------------------------------ M4: the table extension's pipe escape inside a code span -- */
+
+/**
+ * **The configured `inlineCode` handler, not the base one** (task 1.59, DECISIONS #review-1-r7 M4
+ * — Sol finding 2).
+ *
+ * `mdast-util-gfm-table` (2.0.0) installs `inlineCodeWithTable` at `lib/index.js` lines 291–298:
+ * it calls `defaultHandlers.inlineCode` and, when `state.stack` includes `tableCell`, rewrites
+ * every `|` of the output as `\|`. `inlineCodeSpelling` read only the base handler's shape, so a
+ * cell's `` `a\|b` `` (value `a|b`) failed its length check, got no table while `map.unresolved`
+ * stayed empty, and every caret inside the span fell to the node's start.
+ *
+ * The guards below are enumerated from the fix's diff: the pipe branch of the unit loop (one
+ * pipe, several pipes, a pipe beside the padding, a pipe beside an astral pair), the length and
+ * padding checks that count the escapes, and the absence case — outside a table the wrapper does
+ * nothing, so a `\|` in the bytes is two characters of the value with one unit each.
+ *
+ * Every expected offset is derived from where the bytes sit in the output: a case names the
+ * *spelling string* of each value character and the assertions read `text.slice(start, end)`.
+ */
+
+interface PipeCase {
+  /** The source, exactly as it is fed to `parse`. */
+  source: string;
+  /** The path of the `inlineCode` node in the map. */
+  path: string;
+  /** That node's `value` after parsing (the table extension has already unescaped the pipes). */
+  value: string;
+  /** The code span's bytes in the output, fences and padding included. */
+  written: string;
+  /** How many backticks the fence is. */
+  fence: number;
+  /** How many spaces of padding the handler wrote on each side (0 or 1). */
+  padding: number;
+  /** The substring of the output each value character owns, in order. */
+  spellings: string[];
+}
+
+/**
+ * The in-table members. Every cell has two characters of text after its code span: no cell ends
+ * in a code span, because the block-final code-span end is task 1.60's rule.
+ */
+const IN_TABLE: PipeCase[] = [
+  {
+    source: "| h |\n| - |\n| `a\\|b` xy |\n",
+    path: "0.1.0.0",
+    value: "a|b",
+    written: "`a\\|b`",
+    fence: 1,
+    padding: 0,
+    spellings: ["a", "\\|", "b"],
+  },
+  {
+    source: "| h |\n| - |\n| `x\\|y\\|z` xy |\n",
+    path: "0.1.0.0",
+    value: "x|y|z",
+    written: "`x\\|y\\|z`",
+    fence: 1,
+    padding: 0,
+    spellings: ["x", "\\|", "y", "\\|", "z"],
+  },
+  {
+    // A value that starts *and* ends with a space, so the handler pads it (lines 26–33) — the
+    // padding check has to count the escape too.
+    source: "| h |\n| - |\n| `  a\\|b  ` xy |\n",
+    path: "0.1.0.0",
+    value: " a|b ",
+    written: "`  a\\|b  `",
+    fence: 1,
+    padding: 1,
+    spellings: [" ", "a", "\\|", "b", " "],
+  },
+  {
+    // An astral pair beside the escape: the pair is two UTF-16 units with one-unit spellings each
+    // (a code span holds no character reference, PRD §6.1), the pipe is one character with two.
+    source: "| h |\n| - |\n| `\u{1F600}\\|b` xy |\n",
+    path: "0.1.0.0",
+    value: "\u{1F600}|b",
+    written: "`\u{1F600}\\|b`",
+    fence: 1,
+    padding: 0,
+    spellings: ["\uD83D", "\uDE00", "\\|", "b"],
+  },
+];
+
+/** The absence member: the same bytes outside a table, where the backslash is the value's own. */
+const OUTSIDE_TABLE: PipeCase = {
+  source: "a `a\\|b` c\n",
+  path: "0.1",
+  value: "a\\|b",
+  written: "`a\\|b`",
+  fence: 1,
+  padding: 0,
+  spellings: ["a", "\\", "|", "b"],
+};
+
+/** Assert one case's spelling table against the bytes of the output, at every position. */
+function expectPipeCase(named: PipeCase): void {
+  const { source, path, value, written, fence, padding, spellings: owned } = named;
+  const root = parse(source);
+  const { text, map, spellings, lineStarts } = formatWithMap(root);
+  expect(map.unresolved).toEqual([]);
+  // The span's bytes appear exactly once, so the offsets below name this node and no other.
+  const at = text.indexOf(written);
+  expect(at, `${JSON.stringify(written)} in ${JSON.stringify(text)}`).toBeGreaterThanOrEqual(0);
+  expect(text.indexOf(written, at + 1)).toBe(-1);
+  const table = spellings[path];
+  expect(table, `a spelling table for ${path}`).toBeDefined();
+  expect(owned).toHaveLength(value.length);
+  expect(table.ends).toHaveLength(value.length);
+  expect(table.starts).toHaveLength(value.length + 1);
+  // Every character owns exactly the bytes the case names, and the spellings are adjacent.
+  for (let index = 0; index < value.length; index += 1) {
+    expect(text.slice(table.starts[index], table.ends[index]), `character ${index}`).toBe(
+      owned[index],
+    );
+    expect(table.starts[index + 1], `adjacent at ${index}`).toBe(table.ends[index]);
+  }
+  // First position: past the opening fence and its padding, which no character owns.
+  expect(table.starts[0]).toBe(at + fence + padding);
+  expect(text.slice(at, table.starts[0])).toBe("`".repeat(fence) + " ".repeat(padding));
+  // Last position: before the closing padding and fence, which no character owns either.
+  expect(table.starts[value.length]).toBe(at + written.length - fence - padding);
+  expect(text.slice(table.starts[value.length], at + written.length)).toBe(
+    " ".repeat(padding) + "`".repeat(fence),
+  );
+  // `spellingPoint` and `spellingIndex` read the table as they read a text node's, so the round
+  // trip holds at the first, every middle and the last position — the escaped pipe included, and
+  // a column *inside* the escape (between the backslash and the pipe) belongs to the pipe, like
+  // every other position that is not a spelling's own start.
+  const cell = text.slice(0, at).lastIndexOf("\n") + 1;
+  const line = text.slice(0, at).split("\n").length;
+  for (let index = 0; index <= value.length; index += 1) {
+    const column = table.starts[index] - cell + 1;
+    expect(spellingPoint(lineStarts, table, index), `point ${index}`).toEqual({ line, column });
+    expect(spellingIndex(lineStarts, table, line, column), `index at ${column}`).toBe(index);
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    for (let inner = table.starts[index] + 1; inner < table.ends[index]; inner += 1) {
+      expect(spellingIndex(lineStarts, table, line, inner - cell + 1), `inside ${index}`).toBe(
+        index,
+      );
+    }
+  }
+}
+
+describe("inlineCodeSpelling: the table extension escapes every `|` inside a cell (task 1.59, M4)", () => {
+  for (const named of IN_TABLE) {
+    it(`${JSON.stringify(named.source)}: the pipe owns both units of \`\\|\`, the fence and the padding no character, and nothing is unresolved`, () => {
+      expectPipeCase(named);
+    });
+  }
+
+  it(`${JSON.stringify(OUTSIDE_TABLE.source)}: outside a table the backslash is the value's own character, unit for unit`, () => {
+    expectPipeCase(OUTSIDE_TABLE);
+  });
+
+  it("the two modes of the handler, called directly", () => {
+    // Inside a cell the pipe owns `\|`; outside, the same bytes are two characters of the value.
+    expect(inlineCodeSpelling("a|b", "`a\\|b`", true)).toEqual({ starts: [1, 2, 4, 5], ends: [2, 4, 5] });
+    expect(inlineCodeSpelling("a\\|b", "`a\\|b`", false)).toEqual({
+      starts: [1, 2, 3, 4, 5],
+      ends: [2, 3, 4, 5],
+    });
+    // The default is the base handler's shape: a value holding a pipe is not spelled `\|`.
+    expect(inlineCodeSpelling("a|b", "`a\\|b`")).toBeUndefined();
+    expect(inlineCodeSpelling("a|b", "`a|b`")).toEqual({ starts: [1, 2, 3, 4], ends: [2, 3, 4] });
+    // In table mode the escape is required: a bare `|` in the bytes is not a pipe's spelling.
+    expect(inlineCodeSpelling("a|b", "`a|b`", true)).toBeUndefined();
+    // A value whose own backslash precedes a pipe: the wrapper writes three units, `\` then `\|`.
+    expect(inlineCodeSpelling("a\\|b", "`a\\\\|b`", true)).toEqual({
+      starts: [1, 2, 3, 5, 6],
+      ends: [2, 3, 5, 6],
+    });
+  });
+
+  it("in table mode both units of the escape are checked, once the length accounts for it", () => {
+    // The two units are read separately, so each half of the reject is its own guard: the length
+    // check cannot reach them (a bare `|` makes the inner string one unit too short and is
+    // rejected before the loop), so both cases below spell the pipe with *some* two units.
+    // The first unit is not a backslash: `a` `x` `y` `b` is four units for a four-unit value.
+    expect(inlineCodeSpelling("a|b", "`axyb`", true)).toBeUndefined();
+    // The first unit is the backslash, the second is not the pipe.
+    expect(inlineCodeSpelling("a|b", "`a\\xb`", true)).toBeUndefined();
+    // And the accepted spelling, for contrast: the same length, the two units in order.
+    expect(inlineCodeSpelling("a|b", "`a\\|b`", true)).toEqual({
+      starts: [1, 2, 4, 5],
+      ends: [2, 4, 5],
+    });
+  });
+});

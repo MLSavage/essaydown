@@ -911,6 +911,19 @@
     "sectionCount": 0,
     "paragraphStartLines": []
   },
+  "table-inline-code-pipe.md": {
+    "nodeTypes": [
+      "inlineCode",
+      "root",
+      "table",
+      "tableCell",
+      "tableRow",
+      "text"
+    ],
+    "blockCount": 4,
+    "sectionCount": 0,
+    "paragraphStartLines": []
+  },
   "tabs.md": {
     "nodeTypes": [
       "list",

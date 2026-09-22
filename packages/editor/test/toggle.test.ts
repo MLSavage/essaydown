@@ -1331,6 +1331,13 @@ describe("cursorMap: toRendered ∘ toSource is the identity over every text pos
     { source: "`  a  `\n", trailingAtomEnds: 0 },
     { source: "``a`b``\n", trailingAtomEnds: 0 },
     { source: "`😀`\n", trailingAtomEnds: 0 },
+    // Task 1.59 (M4): inside a table cell `mdast-util-gfm-table`'s `inlineCodeWithTable` writes a
+    // `|` of the value as `\|`, so the span's bytes are longer than its value — the inverse failed
+    // at exactly the positions inside such a span before `inlineCodeSpelling` learned that
+    // spelling, and holds on the same bytes outside a table, where the backslash is the value's.
+    { source: "| h |\n| - |\n| `a\\|b` xy |\n", trailingAtomEnds: 0 },
+    { source: "| h |\n| - |\n| `x\\|y\\|z` xy |\n", trailingAtomEnds: 0 },
+    { source: "a `a\\|b` c\n", trailingAtomEnds: 0 },
   ];
 
   for (const { source, trailingAtomEnds } of SOURCES) {

@@ -89,7 +89,23 @@ export interface PositionMap {
  * before the closing padding and fence (`starts[value.length]`), so `spellingPoint` and
  * `spellingIndex` read the table exactly as they read a `text` node's, and an offset on the fence
  * or the padding belongs to the character after it (the opening side) or to the end of the value
- * (the closing side). See {@link inlineCodeSpelling}.
+ * (the closing side).
+ *
+ * **Inline code inside a table cell.** The handler this serializer dispatches for `inlineCode` is
+ * not that base handler but `inlineCodeWithTable`, which `mdast-util-gfm-table` (2.0.0) installs
+ * at `lib/index.js` lines 291–298: it calls `defaultHandlers.inlineCode` and then, and only when
+ * `state.stack` includes `tableCell`, rewrites every `|` of that output as `\\|`
+ * (`value.replace(/\|/g, '\\$&')`, line 296). The rule is read from those two branches and never
+ * from the base handler (DECISIONS #review-1-r4 J2). Below a `table` emission — and nowhere else,
+ * because the extension dispatches no `tableRow` or `tableCell` through `state.handle`, so every
+ * node dispatched there was written with `tableCell` on the stack — a `|` of the value is
+ * therefore written as the two units `\\|`, and **the pipe owns both of them**: `starts[i]` at the
+ * backslash, `ends[i]` one past the pipe, the shape the character-reference rule above already
+ * has, so no position of the value lands between the two units and the backslash is never a
+ * character of the value. The length and padding checks count those extra units. Outside a table
+ * the wrapper does nothing and a `\\|` in the bytes is two characters of the value, one unit each.
+ * The wrapper touches only `|`: the fence and the padding are the base handler's in both cases.
+ * See {@link inlineCodeSpelling}.
  */
 export interface SpellingTable {
   /** `starts[i]` is where value character `i`'s spelling begins; `starts[n]` is the last end. */
@@ -191,7 +207,7 @@ export function formatWithMap(root: Root): FormatWithMapResult {
   const spans = new Map<Nodes, Span>();
   const written = new Map<Nodes, SpellingTable>();
   spans.set(root, { start: 0, end: text.length });
-  placeChildren(rootEmission, (offset) => offset, spans, written);
+  placeChildren(rootEmission, (offset) => offset, spans, written, false);
   const map = buildMap(root, text, spans);
   const spellings: Record<string, SpellingTable> = {};
   for (const entry of map.entries) {
@@ -549,6 +565,7 @@ function placeChildren(
   toAbsolute: OffsetMap,
   spans: Map<Nodes, Span>,
   spellings: Map<Nodes, SpellingTable>,
+  insideTable: boolean,
 ): void {
   const indent = emission.indent;
   const shift = indent ? indentOffsetMap(indent.source, emission.value) : undefined;
@@ -558,8 +575,11 @@ function placeChildren(
   const children = lastPerNode(emission.children);
   children.forEach((child, index) => {
     // The sibling `containerPhrasing` looks at before rewriting this child's trailing line ending
-    // is the next *dispatched* child: a `text` child is dispatched exactly once (it has `peek`),
-    // and `lastPerNode` keeps the emissions in document order.
+    // is the next *dispatched* child. `lib/handle/text.js` has no `peek`, so the look-ahead of
+    // `container-phrasing.js` 43-55 calls the child's handler a second time off
+    // `state.handle.handlers` and {@link wrapHandle} records that call too; `lastPerNode` is what
+    // keeps one emission per node, and it is why `children[index + 1]` is the next *dispatched*
+    // child and not the look-ahead's duplicate. `lastPerNode` keeps document order.
     const beforeHtml = children[index + 1]?.node.type === "html";
     const found = locateEmission(container, child, cursor, beforeHtml);
     if (found === undefined) return;
@@ -573,10 +593,14 @@ function placeChildren(
       if (table !== undefined) spellings.set(child.node, absoluteSpelling(table, local));
     }
     if (child.node.type === "inlineCode") {
-      const table = inlineCodeSpelling(child.node.value, child.value);
+      const table = inlineCodeSpelling(child.node.value, child.value, insideTable);
       if (table !== undefined) spellings.set(child.node, absoluteSpelling(table, inside));
     }
-    placeChildren(child, inside, spans, spellings);
+    // A `table` emission's children are the cells' own inline nodes: `mdast-util-gfm-table` never
+    // dispatches `tableRow` or `tableCell` through `state.handle` (see {@link placeTableGrid}), so
+    // everything dispatched below a `table` was written with `tableCell` on `state.stack` and is
+    // subject to the configured `inlineCode` handler's pipe escape.
+    placeChildren(child, inside, spans, spellings, insideTable || child.node.type === "table");
     // After the recursion, so the cells' own contents are already placed and a cell's explicit
     // range can be widened to cover them.
     if (child.node.type === "table") placeTableGrid(child.node, child.value, inside, spans);
@@ -704,42 +728,73 @@ function rewrittenEmissions(value: string, beforeHtml: boolean): Candidate[] {
 }
 
 /**
- * The spelling table of an `inlineCode` node whose handler emitted `written`
- * (`mdast-util-to-markdown/lib/handle/inline-code.js`): the fence, the optional padding, the
- * value one UTF-16 unit per unit, the padding, the fence — the ownership rule
- * {@link SpellingTable} states. `undefined` when `written` is not of that shape (a fence that
- * does not close, an inner string of a length the value and the padding do not account for), so a
- * caller is never handed a wrong alignment. The inner string is compared unit by unit against the
- * value, a line ending in the value allowed to be the space the handler swaps it for.
+ * The spelling table of an `inlineCode` node whose *configured* handler emitted `written` — the
+ * fence, the optional padding, the value one UTF-16 unit per unit, the padding, the fence, the
+ * ownership rule {@link SpellingTable} states. `undefined` when `written` is not of that shape (a
+ * fence that does not close, an inner string of a length the value, the padding and the escapes
+ * below do not account for), so a caller is never handed a wrong alignment. The inner string is
+ * compared unit by unit against the value, a line ending in the value allowed to be the space the
+ * handler swaps it for.
+ *
+ * The handler is the *configured* one — `mdast-util-gfm-table`'s `inlineCodeWithTable`, not
+ * `mdast-util-to-markdown`'s base `inlineCode` — and inside a table cell it escapes every `|`.
+ * {@link SpellingTable}'s inline-code paragraph states that rule, with the extension's file and
+ * lines, and it is what the `insideTable` mode implements here; {@link placeChildren} threads the
+ * flag down from a `table` emission.
  */
-export function inlineCodeSpelling(value: string, written: string): SpellingTable | undefined {
+export function inlineCodeSpelling(
+  value: string,
+  written: string,
+  insideTable = false,
+): SpellingTable | undefined {
   let fence = 0;
   while (fence < written.length && written[fence] === FENCE) fence += 1;
   if (fence === 0 || written.length < 2 * fence || !written.endsWith(FENCE.repeat(fence))) {
     return undefined;
   }
   const inner = written.slice(fence, written.length - fence);
-  const padding = inner.length === value.length + 2 ? 1 : 0;
-  if (inner.length !== value.length + 2 * padding) return undefined;
+  const escapes = insideTable ? countPipes(value) : 0;
+  const spelled = value.length + escapes;
+  const padding = inner.length === spelled + 2 ? 1 : 0;
+  if (inner.length !== spelled + 2 * padding) return undefined;
   if (padding === 1 && (inner[0] !== SPACE || inner[inner.length - 1] !== SPACE)) return undefined;
-  const from = fence + padding;
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value[index];
-    const spelled = written[from + index];
-    if (spelled !== unit && !(spelled === SPACE && (unit === "\n" || unit === "\r"))) return undefined;
-  }
   const starts: number[] = [];
   const ends: number[] = [];
+  let at = fence + padding;
   for (let index = 0; index < value.length; index += 1) {
-    starts.push(from + index);
-    ends.push(from + index + 1);
+    const unit = value[index];
+    if (insideTable && unit === PIPE) {
+      if (written[at] !== BACKSLASH || written[at + 1] !== PIPE) return undefined;
+      starts.push(at);
+      ends.push(at + 2);
+      at += 2;
+      continue;
+    }
+    const wrote = written[at];
+    if (wrote !== unit && !(wrote === SPACE && (unit === "\n" || unit === "\r"))) return undefined;
+    starts.push(at);
+    ends.push(at + 1);
+    at += 1;
   }
-  starts.push(from + value.length);
+  starts.push(at);
   return { starts, ends };
+}
+
+/** How many `|` units `value` holds — one extra unit each once the table wrapper escapes them. */
+function countPipes(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) if (value[index] === PIPE) count += 1;
+  return count;
 }
 
 /** The character an inline code fence is made of. */
 const FENCE = "`";
+
+/** The column delimiter `mdast-util-gfm-table`'s `inlineCode` wrapper escapes inside a cell. */
+const PIPE = "|";
+
+/** The escape character that wrapper writes before a `|`. */
+const BACKSLASH = "\\";
 
 /** The numeric character reference `encode-character-reference.js` writes for `point`. */
 function characterReference(point: string): string {
