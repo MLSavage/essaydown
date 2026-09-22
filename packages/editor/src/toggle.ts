@@ -257,14 +257,37 @@ function isEntered(node: Nodes): boolean {
 }
 
 /**
+ * The marks a character typed at `pos` in the rendered view receives: `storedMarks ?? $pos.marks()`
+ * — `Transaction.insertText`'s own expression, read in prosemirror-state 1.4.4 (dist/index.js
+ * 627–644: `let marks = this.storedMarks; if (!marks) … marks = $from.marks()`, for the empty
+ * range a keystroke inserts; the `from == null` path is `replaceSelectionWith`, 609–615, which
+ * marks the text `this.storedMarks || selection.$from.marks()`, the same two in the same order).
+ * `$pos.marks()` is prosemirror-model's (dist/index.js, `ResolvedPos.marks()`): inside a text
+ * node the node's marks; at a boundary the marks of the node *before* (the node after only at the
+ * parent's start, where nothing is before), less every mark whose spec says `inclusive: false` and
+ * which the other side lacks. `storedMarks` is what the editor put there instead — an input rule's
+ * `removeStoredMark`, a mark command with an empty selection — and it wins whenever it is not
+ * `null`, so a caller that holds a live `EditorState` passes `state.storedMarks` and a caller that
+ * holds only a document passes nothing. `null` everywhere that is not a textblock position, where
+ * nothing can be typed.
+ */
+function typedMarks(
+  doc: PMNode,
+  pos: number,
+  storedMarks: readonly Mark[] | null,
+): readonly Mark[] | null {
+  if (pos < 0 || pos > doc.content.size) return null;
+  const $pos = doc.resolve(pos);
+  if (!$pos.parent.isTextblock) return null;
+  return storedMarks ?? $pos.marks();
+}
+
+/**
  * The two inline nodes a position sits between, when it does: `pos` is inside a textblock and
- * has a node on each side. `marks` is what a character typed at `pos` in the rendered view
- * receives — `ResolvedPos.marks()`, read in `prosemirror-model` (dist/index.js, `marks()`), the
- * set `insertText` gives the text (prosemirror-state, `Transaction.insertText`): inside a text
- * node the node's marks; at a boundary the marks of the node *before* (the node after only at
- * the parent's start, where nothing is before), less every mark whose spec says
- * `inclusive: false` and which the other side lacks. `null` at a block's start, at its end, and
- * everywhere that is not a textblock position.
+ * has a node on each side. `marks` is {@link typedMarks}' answer at `pos`, passed in rather than
+ * read here, so that one caller's `storedMarks ?? $pos.marks()` decides both this boundary's
+ * ownership (task 1.53) and {@link isLeafEnd}'s block-end rule. `null` at a block's start, at its
+ * end, and everywhere that is not a textblock position.
  */
 interface InlineBoundary {
   readonly before: PMNode;
@@ -272,14 +295,17 @@ interface InlineBoundary {
   readonly marks: readonly Mark[];
 }
 
-function inlineBoundary(doc: PMNode, pos: number): InlineBoundary | null {
-  if (pos < 0 || pos > doc.content.size) return null;
+function inlineBoundary(
+  doc: PMNode,
+  pos: number,
+  marks: readonly Mark[] | null,
+): InlineBoundary | null {
+  if (marks === null) return null;
   const $pos = doc.resolve(pos);
-  if (!$pos.parent.isTextblock) return null;
   const before = $pos.nodeBefore;
   const after = $pos.nodeAfter;
   if (before === null || after === null) return null;
-  return { before, after, marks: $pos.marks() };
+  return { before, after, marks };
 }
 
 /**
@@ -406,8 +432,16 @@ function afterLastLine(
 
 /** The two directions of the cursor mapping for one `(root, doc)` pair. */
 export interface CursorMap {
-  /** The place in `format(root)` that ProseMirror position `pos` names. */
-  toSource(pos: number): SourcePosition;
+  /**
+   * The place in `format(root)` that ProseMirror position `pos` names. `storedMarks` is the live
+   * editor's `EditorState.storedMarks` when the caller has one: the marks a character typed at
+   * `pos` would receive are `storedMarks ?? doc.resolve(pos).marks()` ({@link typedMarks}), and
+   * they decide which of two nodes meeting at `pos` owns it (task 1.53) and whether the caret at
+   * the end of a block-final `inlineCode` run is inside the span or after its closing fence
+   * ({@link isLeafEnd}). Omitted — the document alone — the answer is the resolved marks', which
+   * is what a caret placed by a click or an arrow key takes.
+   */
+  toSource(pos: number, storedMarks?: readonly Mark[] | null): SourcePosition;
   /**
    * The ProseMirror position that `position` in `format(root)` names. Raw: it can name a place
    * between two blocks (a blank line names the end of the block above it), which is why
@@ -443,8 +477,14 @@ export interface CursorMap {
  *    the atom's end, so a block ending in an image or an inline tag round-trips at its end as a
  *    block ending in text does, and an `inlineCode` run at its block's end the same, after its
  *    closing fence ({@link isLeafEnd}; task 1.52, DECISIONS #030 Decision 2). Which node a
- *    boundary between two inline nodes belongs to is decided in {@link innermostAt} by
- *    `doc.resolve(pos).marks()`, the marks a typed character takes there (task 1.53). And on the
+ *    boundary between two inline nodes belongs to is decided in {@link innermostAt} by the marks
+ *    a typed character takes there, `storedMarks ?? doc.resolve(pos).marks()` ({@link typedMarks};
+ *    task 1.53). Those same marks decide the caret at the end of a block-final `inlineCode` run,
+ *    which has no boundary after it: the `inline_code` mark sets no `inclusive`, so the editor's
+ *    default holds and a character typed there joins the span whenever the typed marks carry the
+ *    mark — then the caret is inside, before the closing fence, where the spelling table puts it;
+ *    only when they do not (an input rule's `removeStoredMark` cleared it a keystroke earlier) is
+ *    it after the fence, as an atom's end always is. And on the
  *    delimiters of a mark
  *    {@link delimiterPosition} tells the opening one from the closing one; on a container's own
  *    columns {@link containerEnd} tells a block's end from the container's start.
@@ -453,13 +493,14 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
   const { map, spellings, lineStarts } = formatWithMap(root);
   const entries = correspondences(root, doc);
   return {
-    toSource(pos) {
-      const boundary = inlineBoundary(doc, pos);
+    toSource(pos, storedMarks = null) {
+      const marks = typedMarks(doc, pos, storedMarks);
+      const boundary = inlineBoundary(doc, pos, marks);
       const inside = innermostAt(entries, pos, boundary);
       if (inside !== null) {
         const range = map.ranges[inside.path];
         const table = spellings[inside.path];
-        if (range !== undefined && isLeafEnd(inside, pos, boundary, table !== undefined)) {
+        if (range !== undefined && isLeafEnd(inside, pos, boundary, table !== undefined, marks)) {
           return { line: range.endLine, ch: range.endCol - 1 };
         }
         if (table !== undefined) {
@@ -494,29 +535,39 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
 /**
  * Whether `pos` is the caret *after* the inline leaf `entry` — an atom (`image`, `break`, inline
  * `html`) or an `inlineCode` run, found innermost at its own `pmEnd` — and answered with the
- * leaf's last byte: after `)`, after `</i>`, after the closing backtick fence. At a block's end
- * (no `boundary`) that is task 1.52's rule for every leaf: not before the fence, where the
- * spelling table puts the run's last offset, because the caret after a code span at its block's
- * end is outside it (a space typed there is plain text, as it is in the editor). At a boundary
- * the leaf is innermost only when {@link innermostAt} gave it the boundary — the marks a
- * character typed there receives are the leaf's — and then a leaf *with* a table (`inlineCode`)
- * is answered by that table, before the closing fence, where a typed character joins the run as
- * it does in the rendered view; a leaf without one (an atom) has no inside, and its end is the
- * later node's start either way. A `text` node's end is its table's end already, and every other
- * position a leaf covers (its start; a run's interior) is placed as before.
+ * leaf's last byte: after `)`, after `</i>`, after the closing backtick fence.
+ *
+ * The rule is one rule on both sides, and it is the marks a character typed at `pos` receives,
+ * `storedMarks ?? $pos.marks()` ({@link typedMarks}, passed in as `marks`): a leaf *with* a
+ * spelling table (`inlineCode`) is answered by that table — the run's last offset, before the
+ * closing fence, where a typed character joins the run as it does in the rendered view —
+ * whenever those marks carry `schema.marks.inline_code`, and is answered after the fence
+ * whenever they do not. A leaf *without* a table (an atom) has no inside to type into and is
+ * answered with its end either way.
+ *
+ * At a boundary (`boundary` not `null`) the leaf is innermost only when {@link innermostAt} gave
+ * it the boundary, which is the same test made of the same marks, so the table decides there and
+ * an atom's end is the later node's start anyway — the two clauses of the previous sentence,
+ * with `marks` already spent. At a block's end there is no boundary and no later node, and the
+ * marks are all there is: `inline_code` sets no `inclusive` (`schema.ts`), so the editor's
+ * default keeps it on and the resolved marks at a block-final run's end are the run's — the
+ * caret is inside it, task 1.52's "after the fence" holding only for an atom, or for a run whose
+ * stored marks the editor cleared (an input rule's `removeStoredMark`, one keystroke earlier),
+ * which is what a `null`-free `storedMarks` argument carries in (DECISIONS #review-1-r7 M5, the
+ * last tuple of L6). A `text` node's end is its table's end already, and every other position a
+ * leaf covers (its start; a run's interior) is placed as before.
  */
 function isLeafEnd(
   entry: Correspondence,
   pos: number,
   boundary: InlineBoundary | null,
   hasTable: boolean,
+  marks: readonly Mark[] | null,
 ): boolean {
-  return (
-    entry.node.type !== "text" &&
-    !isEntered(entry.node) &&
-    pos === entry.pmEnd &&
-    (boundary === null || !hasTable)
-  );
+  if (entry.node.type === "text" || isEntered(entry.node) || pos !== entry.pmEnd) return false;
+  if (!hasTable) return true;
+  if (boundary !== null) return false;
+  return !(marks ?? []).some((mark) => mark.type === schema.marks.inline_code);
 }
 
 /**

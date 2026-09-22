@@ -102,7 +102,14 @@ export default function DevEditor() {
     sourceBinding.current?.flush();
     const root = store.getState().document.root;
     if (pm !== null) {
-      carried.current = cursorMap(root, pm.state.doc).toSource(pm.state.selection.head);
+      // `state.storedMarks` is what the editor would give a character typed at the caret right
+      // now — an input rule's `removeStoredMark` clears the `inline_code` mark one keystroke
+      // after a span closes — so the map is told them rather than left to resolve the doc, and a
+      // caret just past a freshly closed span still lands after its fence (task 1.52's route).
+      carried.current = cursorMap(root, pm.state.doc).toSource(
+        pm.state.selection.head,
+        pm.state.storedMarks,
+      );
     } else if (cm !== null) {
       // The source view holds the user's own bytes, which need not be canonical, and the cursor
       // map speaks canonical coordinates; `canonicalCursor` translates through the parsed node.

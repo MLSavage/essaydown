@@ -13,6 +13,7 @@ import {
   type Sidecar,
 } from "@essaydown/core";
 import { EditorState as CMState, type TransactionSpec } from "@codemirror/state";
+import type { Mark } from "prosemirror-model";
 import { EditorState, Selection, TextSelection } from "prosemirror-state";
 import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
 import {
@@ -1401,9 +1402,19 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
   const HEAD = "Alpha ";
   const TAIL = " gamma";
 
-  /** `X` at `pos` in `doc`, with the marks the rendered view gives a character typed there. */
-  function typedInRendered(doc: ReturnType<typeof mdastToPM>["doc"], pos: number): string {
-    const marks = doc.resolve(pos).marks();
+  /**
+   * `X` at `pos` in `doc`, with the marks the rendered view gives a character typed there:
+   * `storedMarks ?? $pos.marks()`, which is `Transaction.insertText`'s own expression
+   * (prosemirror-state 1.4.4, dist/index.js 639–644). `storedMarks` is `null` for a caret the
+   * user placed — a click, an arrow key — and an array for one the editor set marks on, which is
+   * the empty array an input rule's `removeStoredMark` leaves behind.
+   */
+  function typedInRendered(
+    doc: ReturnType<typeof mdastToPM>["doc"],
+    pos: number,
+    storedMarks: readonly Mark[] | null = null,
+  ): string {
+    const marks = storedMarks ?? doc.resolve(pos).marks();
     const tr = EditorState.create({ doc }).tr.replaceWith(pos, pos, schema.text("X", marks));
     return format(pmToMdast({ doc: tr.doc, frontMatter: null }));
   }
@@ -1546,12 +1557,104 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
     assertInverseEverywhere(doc, map);
   });
 
-  it("an `inline_code` run at its block's end keeps task 1.52's answer, after the closing fence", () => {
+  it("an `inline_code` run at its block's end follows the marks a typed character takes: inside the span with no stored marks, after the closing fence with stored marks `[]` (DECISIONS #review-1-r7 M5, task 1.60; task 1.52's answer is now the second of the two)", () => {
     const source = "see `foo`\n";
     const { root, doc } = pair(source);
+    expect(format(root)).toBe(source);
     const map = cursorMap(root, doc);
-    expect(map.toSource(1 + "see foo".length)).toEqual({ line: 1, ch: "see `foo`".length });
+    const end = 1 + "see foo".length;
+    // No stored marks: `inline_code` sets no `inclusive`, so the resolved marks at the block's
+    // end are the run's and the caret is inside, before the closing fence.
+    expect(doc.resolve(end).marks().map((m) => m.type.name)).toEqual(["inline_code"]);
+    const inside = { line: 1, ch: "see `foo".length };
+    expect(map.toSource(end)).toEqual(inside);
+    const renderedInside = typedInRendered(doc, end);
+    expect(typedInSource(source, inside)).toBe(renderedInside);
+    expect(renderedInside).toBe("see `fooX`\n");
+    // Stored marks `[]` — what an input rule's `removeStoredMark` leaves one keystroke after the
+    // span closed: the character is plain text, and the caret is task 1.52's, after the fence.
+    const after = { line: 1, ch: "see `foo`".length };
+    expect(map.toSource(end, [])).toEqual(after);
+    const renderedAfter = typedInRendered(doc, end, []);
+    expect(typedInSource(source, after)).toBe(renderedAfter);
+    expect(renderedAfter).toBe("see `foo`X\n");
     assertInverseEverywhere(doc, map);
+  });
+
+  /**
+   * **The last tuple of L6** (DECISIONS #review-1-r7 M5, Claude finding 4). The matrix above ends
+   * at a boundary — a run with something after it — and a block-final run has none: no node
+   * follows, so `innermostAt` never asks about marks and {@link isLeafEnd} is the only rule left.
+   * The five block kinds the editor has a textblock for × the two routes a caret arrives by:
+   *
+   * - **the click route**, no stored marks, where the marks are `doc.resolve(pos).marks()` and
+   *   carry the inclusive `inline_code`, so a typed character joins the span and the source caret
+   *   belongs before the closing fence;
+   * - **the input-rule route**, stored marks `[]`, which `removeStoredMark` (`input.ts`) leaves
+   *   the keystroke after a span closes, so a typed character is plain text and the source caret
+   *   belongs after the fence — task 1.52's answer, and the one the 1.52 (b) Playwright case
+   *   drives.
+   *
+   * Each guard asserts the column (read off the source's own bytes, never a literal offset), the
+   * two-view byte agreement — `X` typed in the rendered view with those marks, through `pmToMdast`
+   * and `format`, against `X` written into the source at the mapped column and reparsed — which
+   * side of the fence the bytes put it on, and the inverse over every text position of the
+   * document.
+   */
+  describe("a block-final inline code span follows the marks a typed character takes", () => {
+    const SPAN = "`foo`";
+    const BLOCKS: Record<string, string> = {
+      paragraph: "see `foo`\n",
+      heading: "# see `foo`\n",
+      "list item": "- see `foo`\n",
+      blockquote: "> see `foo`\n",
+      "table cell": "| h | i         |\n| - | --------- |\n| a | see `foo` |\n",
+    };
+    const ROUTES: Record<string, readonly Mark[] | null> = {
+      "the click route (no stored marks)": null,
+      "the input-rule route (stored marks `[]`)": [],
+    };
+
+    /** The end of the document's last textblock: the block-final position this family is about. */
+    function lastTextblockEnd(doc: ReturnType<typeof mdastToPM>["doc"]): number {
+      let end = -1;
+      doc.descendants((node, pos) => {
+        if (node.isTextblock) end = pos + 1 + node.content.size;
+        return true;
+      });
+      expect(end).toBeGreaterThan(0);
+      return end;
+    }
+
+    for (const [kind, source] of Object.entries(BLOCKS)) {
+      const line = source.split("\n").findIndex((text) => text.includes(SPAN)) + 1;
+      const spanStart = (source.split("\n")[line - 1] as string).indexOf(SPAN);
+
+      for (const [route, storedMarks] of Object.entries(ROUTES)) {
+        const joins = storedMarks === null;
+        const ch = spanStart + (joins ? SPAN.length - 1 : SPAN.length);
+
+        it(`${kind}, ${route}: the caret is ${joins ? "inside the span, before" : "outside the span, after"} the closing fence, and the two views agree byte for byte`, () => {
+          const { root, doc } = pair(source);
+          expect(format(root)).toBe(source);
+          const map = cursorMap(root, doc);
+          const end = lastTextblockEnd(doc);
+          expect(doc.resolve(end).marks().map((m) => m.type.name)).toEqual(["inline_code"]);
+
+          const at = { line, ch };
+          expect(map.toSource(end, storedMarks)).toEqual(at);
+
+          const rendered = typedInRendered(doc, end, storedMarks);
+          expect(typedInSource(source, at)).toBe(rendered);
+          // Which side of the fence the bytes put the character on: the run's own text.
+          expect(runsOf(parse(rendered), "inlineCode")).toEqual([joins ? "fooX" : "foo"]);
+          expect(rendered).toContain(joins ? "`fooX`" : "`foo`X");
+          expect(format(parse(rendered))).toBe(rendered);
+
+          assertInverseEverywhere(doc, map);
+        });
+      }
+    }
   });
 
   it("a one-character marked first run (`*a* y`, DECISIONS #031 (a)): a letter typed after `a` in the rendered view lands inside the run, and the source caret after it satisfies the letter leg's `ch - 1` model", () => {

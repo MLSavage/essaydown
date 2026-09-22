@@ -489,26 +489,46 @@ function pairWithEntries(
 
 /**
  * **Clause 3's oracle: where the output bytes put the end of one block.** The cursor at the end of
- * a block's content in the editor is, in the bytes, one past the last byte of the block's last
- * leaf — micromark's `position.end` of that leaf on the reparse. For a text node that is one past
- * its last character, which is *before* a closing delimiter (`*`, `~~`, a link's `](url)`) and
- * before a cell's padding, as `cursorMap`'s spelling tables place it. For an inline atom (an
- * image, an inline tag) and for an inline-code run it is the leaf's own end — after `)`, after
- * `</i>`, after the closing backtick fence: `cursorMap`'s third clause answers the caret after a
- * trailing leaf with the leaf's end (task 1.52, DECISIONS #030 Decision 2 and #031, the deletion
- * side: a paragraph left ending in an atom by the deletion of the text after it). A block with no
- * content (a cell emptied by the deletion) has no bytes of its own, and its place is the point
- * the map keeps for it.
+ * a block's content in the editor is, in the bytes, one past the last byte the block's last leaf
+ * *owns as content* — micromark's `position.end` of that leaf on the reparse, less the bytes of
+ * any closing delimiter that leaf writes and the editor does not hold. For a text node nothing is
+ * taken off: `position.end` is one past its last character, which is already *before* a closing
+ * mark delimiter (`*`, `~~`, a link's `](url)`) and before a cell's padding, as `cursorMap`'s
+ * spelling tables place it. For an inline atom (an image, an inline tag) nothing is taken off
+ * either — the atom has no inside, and its end is after `)`, after `</i>` (task 1.52,
+ * DECISIONS #030 Decision 2 and #031, the deletion side: a paragraph left ending in an atom by
+ * the deletion of the text after it). For an **inline-code run** the closing fence and its
+ * padding are taken off, because `inline_code` is an inclusive mark: a character typed at the
+ * block's end joins the span in the rendered view, so the cursor belongs at the end of the run's
+ * *value*, before the fence (DECISIONS #review-1-r7 M5, task 1.60). Where that is, is read off
+ * the leaf's own bytes and never spelled as a literal or as a second copy of the serializer's
+ * fencing rule: of the reparsed span's bytes `text.slice(start.offset, end.offset)` the trailing
+ * backtick run is the closing fence (its opening twin is the same length, CommonMark §6.1), and
+ * inside the fences the value's last occurrence ends where the value ends — whatever padding
+ * space the serializer wrote after it is the rest. A block with no content (a cell emptied by
+ * the deletion) has no bytes of its own, and its place is the point the map keeps for it.
  */
 function byteEndOf(
   entry: PositionEntry,
   reparsed: Nodes,
   at: string,
+  text: string,
 ): { line: number; ch: number } {
   if (!("children" in reparsed) || reparsed.children.length === 0)
     return { line: entry.startLine, ch: entry.startCol - 1 };
-  const position = positionOf(lastLeaf(reparsed), at);
-  return { line: position.end.line, ch: position.end.column - 1 };
+  const last = lastLeaf(reparsed);
+  const position = positionOf(last, at);
+  if (last.type !== "inlineCode") return { line: position.end.line, ch: position.end.column - 1 };
+  const start = position.start.offset as number;
+  const end = position.end.offset as number;
+  const raw = text.slice(start, end);
+  const fence = (/`+$/.exec(raw) ?? [""])[0].length;
+  expect(fence, `${at}: the code span has no closing fence in its own bytes`).toBeGreaterThan(0);
+  const inner = raw.slice(fence, raw.length - fence);
+  const index = inner.lastIndexOf(last.value);
+  expect(index, `${at}: the code span's value is not in its own bytes`).toBeGreaterThanOrEqual(0);
+  const trailing = inner.length - (index + last.value.length);
+  return { line: position.end.line, ch: position.end.column - 1 - fence - trailing };
 }
 
 /** The last code point of a block's last text node, or `null` when the block does not end in text. */
@@ -716,14 +736,16 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
     expect(cursors.toSource(start + 2)).toEqual({ line: 1, ch: "~~a.~~&#x1F600;".length });
   });
 
-  it("the hand-seeded documents `alpha <i>beta</i> y` and `a `+\"`cd`\"+``: a block the deletion leaves ending in an inline atom, or in an inline-code run, is answered with that leaf's end in the bytes (task 1.52, DECISIONS #031's deletion-side member of L5)", () => {
+  it("the hand-seeded documents `alpha <i>beta</i> y` and `a `+\"`cd`\"+``: a block the deletion leaves ending in an inline atom is answered with that atom's end in the bytes, and one left ending in an inline-code run with the end of the run's value, before the closing fence (task 1.52, DECISIONS #031's deletion-side member of L5; the fence, DECISIONS #review-1-r7 M5)", () => {
     // The corpus reaches neither shape (no fixture's last text run follows an atom or is an
     // inline-code run), so the oracle's non-text leaves are pinned here by hand: the deletion
-    // takes `y` and the conversion strips the space, leaving the paragraph ending in `</i>`;
-    // and it takes `d`, leaving the run `c`, whose caret is after the closing fence.
+    // takes `y` and the conversion strips the space, leaving the paragraph ending in `</i>`,
+    // whose caret is after the atom; and it takes `d`, leaving the run `c`, whose caret is
+    // *inside* the span — `inline_code` is inclusive, so a character typed at the block's end
+    // joins the run (task 1.60), and the oracle takes the closing fence off the leaf's bytes.
     const cases = [
       { source: "alpha <i>beta</i> y\n", text: "alpha <i>beta</i>\n", ch: "alpha <i>beta</i>".length },
-      { source: "a `cd`\n", text: "a `c`\n", ch: "a `c`".length },
+      { source: "a `cd`\n", text: "a `c`\n", ch: "a `c".length },
     ];
     for (const { source, text: expectedText, ch } of cases) {
       const { doc, frontMatter } = mdastToPM(parse(source));
@@ -734,7 +756,7 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
       const entry = map.entries.find((candidate) => candidate.path === "0") as PositionEntry;
       const reparsed = reparsedByPath(text).get("0") as Nodes;
       expect(lastLeaf(reparsed).type, source).not.toBe("text");
-      const expected = byteEndOf(entry, reparsed, source);
+      const expected = byteEndOf(entry, reparsed, source, text);
       expect(expected, source).toEqual({ line: 1, ch });
       const paragraph = deleted.doc.firstChild as PMNode;
       const end = 1 + paragraph.content.size;
@@ -793,7 +815,7 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
         if (!changed || entry === undefined) return;
         const at = `${label}: cursor at the end of ${node.type.name} ${index} (${entry.path})`;
         const end = pos + 1 + node.content.size;
-        const expected = byteEndOf(entry, reparsed.get(entry.path) as Nodes, at);
+        const expected = byteEndOf(entry, reparsed.get(entry.path) as Nodes, at, text);
         // The conversion only ever drops or moves what the editor holds, never adds to it.
         const width = mdastInlineWidth(entry.node);
         expect(width, at).toBeLessThanOrEqual(node.content.size);
