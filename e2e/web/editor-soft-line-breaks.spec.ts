@@ -135,14 +135,7 @@ test.describe("a soft line break survives typing, and the whitespace around it n
     await seedFromSource(page, "alpha\nbeta gamma");
     await expect.poll(() => markdown(page)).toBe("alpha\nbeta gamma\n");
 
-    // The anchor: the paragraph's end, where the source view left the caret, asserted first. The
-    // route to the end of the first line never crosses the soft break leftwards (task 1.55 after
-    // the 1.verify.r7h gate, DECISIONS #035: that one step — offset 6 to offset 5 across the LF —
-    // is the press 1.54's per-step poll named on windows-latest, twice in a row, and the container
-    // cannot see that runner). Left across the second line only, to its start, asserted; one
-    // `ArrowUp` from the line's left edge, which lands at the first line's start on every OS (the
-    // x is the left edge, not a metric; the landing is asserted, DECISIONS #024); then right
-    // within the first line: after `alpha`, before the break, the same position as before.
+    // The anchor: the paragraph's end, where the source view left the caret, asserted first.
     await expect
       .poll(() => caret(page))
       .toEqual({
@@ -150,15 +143,39 @@ test.describe("a soft line break survives typing, and the whitespace around it n
         text: "alpha\nbeta gamma",
         offset: "alpha\nbeta gamma".length,
       });
-    await press(page, "ArrowLeft", "beta gamma".length);
-    await expect
-      .poll(() => caret(page))
-      .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: "alpha\n".length });
-    await page.keyboard.press("ArrowUp");
-    await expect
-      .poll(() => caret(page))
-      .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: 0 });
-    await press(page, "ArrowRight", "alpha".length);
+
+    // Every arrow route to the end of the first line has now failed on windows-latest at this one
+    // position, by a third route in a row (the blind eleven lefts, 1.verify.r6h a1, #029; the
+    // polled eleven lefts, 1.verify.r7h a1, #035; up-then-rights, 1.verify.r7.g1h a1, #036): the
+    // gate's log put the ten lefts at offset 6 and the vertical arrow at offset 0, both as
+    // asserted, but the five rights that followed landed at offset 11 — the caret was back at 6
+    // before the first right, i.e. ProseMirror reverted the native vertical motion it had not yet
+    // observed when the next key arrived (the `[1.46, found outside scope]` class: PM learns a
+    // caret move from `selectionchange`, dispatched in the rendering update after the key, and
+    // windows-latest is reliably not past that step before the next synthetic key lands, unlike
+    // the container and the other two runners). A click is one native event with no second key in
+    // flight, so the caret is placed there instead: a `Range` over the last character of `alpha`,
+    // in the paragraph's own text node, gives the geometry to click at (DECISIONS #024, the route
+    // beside arrows).
+    const clickPoint = await page.evaluate(() => {
+      const root = document.querySelector(".ProseMirror");
+      if (root === null) throw new Error("no .ProseMirror root");
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let target: Text | null = null;
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        if (node.textContent === "alpha\nbeta gamma") {
+          target = node as Text;
+          break;
+        }
+      }
+      if (target === null) throw new Error("text node not found");
+      const range = document.createRange();
+      range.setStart(target, "alpha".length - 1);
+      range.setEnd(target, "alpha".length);
+      const rect = range.getBoundingClientRect();
+      return { x: rect.right - 1, y: rect.top + rect.height / 2 };
+    });
+    await page.mouse.click(clickPoint.x, clickPoint.y);
     await expect
       .poll(() => caret(page))
       .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: "alpha".length });
