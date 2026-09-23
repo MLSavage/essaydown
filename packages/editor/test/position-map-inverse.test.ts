@@ -1,9 +1,17 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { Nodes, Root } from "mdast";
-import { formatWithMap, parse } from "@essaydown/core";
+import type { Nodes, Root, Yaml } from "mdast";
+import { format, formatWithMap, parse } from "@essaydown/core";
 import type { Node as PMNode } from "prosemirror-model";
-import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
+import { EditorState } from "prosemirror-state";
+import {
+  CELL_LINE_ENDING,
+  LINE_ENDING,
+  keptCharacters,
+  mdastToPM,
+  pmToMdast,
+  schema,
+} from "../src/schema.js";
 import { cursorMap, type CursorMap } from "../src/toggle.js";
 import { deleteAtEveryBlockEnd, deleteBesideEveryMarkedRun } from "./typing-legs.js";
 
@@ -346,6 +354,356 @@ describe("cursor map: toRendered ∘ toSource is the identity over every text po
     expect(fixturesPastCorrespondence).toContain("hard-break.md");
     expect(fixturesPastCorrespondence.length).toBeLessThan(names.length);
   });
+});
+
+/* --------- the third destructive leg: the first character of every textblock deleted -------- */
+
+/** One ProseMirror node's children, in order. */
+function childrenOf(node: PMNode): PMNode[] {
+  const out: PMNode[] = [];
+  node.forEach((child) => out.push(child));
+  return out;
+}
+
+/**
+ * The kept-character map of one textblock's live children, with the line ending the conversion
+ * gives that block kind (`schema.ts`: a cell's line-ending run collapses to a space, everything
+ * else's to a soft break).
+ */
+function keptIn(block: PMNode): ReturnType<typeof keptCharacters> {
+  return keptCharacters(
+    childrenOf(block),
+    block.type === schema.nodes.table_cell ? CELL_LINE_ENDING : LINE_ENDING,
+  );
+}
+
+/**
+ * A third destructive transaction for the editor-seeded legs (task 1.64, DECISIONS #review-1-r8
+ * N2), and the one the reconciliation used to find N2: the **first character** of every textblock
+ * outside a fenced code block deleted, applied back-to-front so each deletion leaves the ranges
+ * still to come unmoved. `tr.delete` is the call a Delete keystroke makes.
+ *
+ * It is the shortest route to a tree the parser cannot produce *and* that the conversion has to
+ * narrow: a block whose first character was followed by a space is left with a **leading space**,
+ * which `stripUnparsableWhitespace` drops — so the live document holds a character the bytes do
+ * not, and every position after it is one the correspondence has to place through the
+ * kept-character map rather than through the normalised tree's widths.
+ *
+ * One character is one code point (`typing-legs.ts`'s rule for the whole family), so an astral
+ * lead is deleted whole and never split between its two UTF-16 units.
+ */
+function deleteAtEveryBlockStart(doc: PMNode): { doc: PMNode; blocks: number } {
+  const ranges: [number, number][] = [];
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) return true;
+    if (node.type === schema.nodes.code_block) return false;
+    const first = node.firstChild;
+    if (first !== null && first.isText) {
+      const character = [...(first.text as string)][0] as string;
+      ranges.push([pos + 1, pos + 1 + character.length]);
+    }
+    return false;
+  });
+  let tr = EditorState.create({ doc }).tr;
+  for (const [from, to] of [...ranges].reverse()) tr = tr.delete(from, to);
+  return { doc: tr.doc, blocks: ranges.length };
+}
+
+/**
+ * The bytes the **rendered** view writes when `X` is typed at `pos`. `insertText` with no stored
+ * marks is the click route's own call — prosemirror-state 1.4.4 gives the text
+ * `storedMarks ?? $from.marks()` — so the letter takes exactly the marks a click there leaves.
+ */
+function typedInRendered(doc: PMNode, pos: number, frontMatter: Yaml | null): string {
+  const typed = EditorState.create({ doc }).tr.insertText("X", pos).doc;
+  return format(pmToMdast({ doc: typed, frontMatter }));
+}
+
+/** The bytes the **source** view writes when `X` is typed at `at`: a raw keystroke in the pane. */
+function typedInSource(text: string, at: { line: number; ch: number }): string {
+  const lines = text.split("\n");
+  const line = lines[at.line - 1];
+  lines[at.line - 1] = `${line.slice(0, at.ch)}X${line.slice(at.ch)}`;
+  return format(parse(lines.join("\n")));
+}
+
+/**
+ * One textblock alone, as its own document, with the three things the byte oracle needs from it.
+ *
+ * `doc.cut($block.before(), $block.after())` keeps the block's containers as **open ancestors** —
+ * a list item's paragraph cuts to `list > list_item > paragraph`, a cell's to
+ * `table > table_row > table_cell` — so the block is converted, formatted and mapped inside the
+ * tree it actually lives in, and only the rest of the document is gone.
+ *
+ * Why the oracle is the block and not the whole document: one byte comparison costs a
+ * `format ∘ parse` of everything it is given, so a whole-document comparison at every caret
+ * position of the corpus's long-form fixture is 53 s on an idle container against the 30_000 ms
+ * budget every test of this family keeps (lesson [1.64]). A correspondence is block-local — every
+ * branch this task changes reads one textblock's own children — so the block alone answers the
+ * same question at a hundredth of the cost, and **no position is left out**: the leg sweeps every
+ * one of them. The whole-document map is not thereby untested here; it carries the inverse and
+ * the settling rule at every position as the two legs above do, and the caller bridges the two by
+ * asserting that the whole document's column at each position is the block's own column shifted
+ * by a constant per line of the block (the container's prefix — `> `, a list marker, a cell's
+ * pipes and padding), which is the statement that the block-local bytes are the document's bytes.
+ */
+interface BlockAlone {
+  doc: PMNode;
+  /** The bytes of the block alone — what a source keystroke in it edits. */
+  text: string;
+  map: CursorMap;
+  /** Added to a position of the whole document to reach the same position of `doc`. */
+  offset: number;
+}
+
+function blockAlone(doc: PMNode, pos: number, node: PMNode): BlockAlone {
+  const cut = doc.cut(pos, pos + node.nodeSize);
+  let start = -1;
+  cut.descendants((child, at) => {
+    if (start >= 0) return false;
+    if (!child.isTextblock) return true;
+    start = at + 1;
+    return false;
+  });
+  expect(start, "the cut holds the block it was cut around").toBeGreaterThan(0);
+  const root = pmToMdast({ doc: cut, frontMatter: null });
+  return { doc: cut, text: format(root), map: cursorMap(root, cut), offset: start - (pos + 1) };
+}
+
+/** Where one line of a block alone sits in the whole document: its line, and its column shift. */
+interface LineShift {
+  line: number;
+  ch: number;
+}
+
+/**
+ * The third destructive corpus leg (task 1.64, DECISIONS #review-1-r8 N2). The two legs above
+ * assert the inverse; this one asserts **both views' bytes** as well, because N2's defect held
+ * the inverse while both directions were wrong — a leg that only asks whether a position comes
+ * back cannot see a correspondence that is uniformly one place off.
+ *
+ * For every fixture: {@link deleteAtEveryBlockStart}, then at every caret position of every
+ * textblock outside a fenced code block, `X` typed in the rendered view and `X` typed into the
+ * source at the column `toSource` answers write the same bytes, and `toRendered ∘ toSource`
+ * settles the position — onto itself where the conversion kept the character before it, and onto
+ * the next kept character where it did not (the ownership rule of `keptCharacters`, stated once
+ * there and asserted here over the corpus).
+ *
+ * The bytes are compared on the block alone ({@link blockAlone}, which states why), the inverse
+ * and the settling rule on the whole document, and the two are bridged at every swept position:
+ * the whole document's `(line, ch)` for a position is the block's own `(line, ch)` shifted by a
+ * constant per line of the block. **Every** caret position of **every** textblock of **every**
+ * fixture is swept: nothing here is bounded, sampled or narrowed.
+ *
+ * **One test per swept block**, which is the granularity of the oracle itself — a correspondence
+ * is block-local, every branch this task changes reads one textblock's own children, and the
+ * bytes are the block's. It is also what keeps the 30_000 ms budget this family takes (DECISIONS
+ * #review-1-r7 M6) honest on any machine: one byte comparison is a `parse` of the block (0.38 ms
+ * measured here, nearly all of it micromark's per-call setup — hoisting `createParser` out of the
+ * sweep changes nothing), so the corpus's long-form fixture is 11 s of comparisons on an idle
+ * container and over 30 s when the suite's other workers run beside it (measured: a per-fixture
+ * test timed out in `pnpm test` while passing in 12.2 s on its own). Per block, the largest test
+ * of the corpus is under a second, and no position is left out to get there.
+ *
+ * **Both sides of the leg's own clause**, counted from the run and never written as a literal:
+ * the transaction leaves some blocks with a lead the conversion drops (the deleted character was
+ * followed by a space) and leaves others whole (it was followed by a letter, or the block begins
+ * with a link, whose leading whitespace lives inside its brackets), and the leg asserts both sets
+ * are non-empty — a run in which every block lost its lead would never exercise the identity half,
+ * which is the half that says the change is a no-op where nothing is dropped.
+ *
+ * **The exclusions, positively bounded (DECISIONS #032)** — three recorded classes, each position
+ * asserted to be a member of its class rather than merely skipped, and none narrowed:
+ *
+ * - `[1.53, a raw source keystroke before or after a punctuation-edged run]`: the rendered view
+ *   keeps the run by writing the letter as a character reference, the raw keystroke in the source
+ *   view does not and the reparse dissolves the run. Asserted: the rendered bytes hold `&#x58;`
+ *   where the source bytes hold a raw `X`.
+ * - `[review-1-r6 L9, URL-shaped text]`: a character typed inside an autolink literal's text
+ *   leaves the editor holding a `link` whose text is no longer its destination, so the rendered
+ *   bytes are a `[text](url)` link while the source keystroke edits the `<…>` autolink in place.
+ *   Asserted: the rendered bytes hold the resource form and the source bytes the autolink form.
+ * - `[1.64, a block-final mark whose last child is a link]` — found by this leg, outside this
+ *   task's scope (it reproduces unchanged at the branch base, in blocks where the conversion
+ *   drops nothing), filed in `docs/V1.1-BACKLOG.md` with its revisit trigger and hard stop: at
+ *   the end of a block ending in `*…[text](url)*`, the rendered caret takes `[emphasis]` (the
+ *   `link` mark is not inclusive, the `emphasis` is) and types **inside** the run, while
+ *   `toSource` answers the column **after** the run's closing delimiter, where the raw keystroke
+ *   dissolves the run. Asserted: the source bytes escape the run's delimiters where the rendered
+ *   bytes keep them.
+ */
+describe("cursor map: the two views write the same bytes, and toRendered ∘ toSource settles by the kept-character rule, at every text position of the editor's own output after a third destructive transaction (deleteAtEveryBlockStart, task 1.64)", () => {
+  const names = Object.keys(fixtureIndex());
+  const reached = new Set<string>();
+  let fixturesChanged = 0;
+  let fixturesUnchanged = 0;
+  let blocksSwept = 0;
+  let blocksLosingTheirLead = 0;
+  let blocksKeepingTheirLead = 0;
+  let positionsAgreeing = 0;
+  let positionsInsideDropped = 0;
+  /** How many swept positions were bridged from the block alone to the whole document. */
+  let positionsBridged = 0;
+  const excluded: { name: string; pos: number; klass: string }[] = [];
+
+  /**
+   * DECISIONS #review-1-r7 M6, the same budget the two legs above take and for the same reason:
+   * vitest's default per-test timeout is 5,000 ms, and a leg that runs a `format ∘ pmToMdast` and
+   * a `format ∘ parse` per caret position is well over it on the larger blocks. 30_000 ms gives
+   * headroom without masking a stall, and it narrows no position this leg asserts.
+   */
+  const START_LEG_TIMEOUT_MS = 30_000;
+
+  const PUNCTUATION_EDGED = "[1.53] a raw source keystroke beside a punctuation-edged run";
+  const AUTOLINK_LITERAL = "[review-1-r6 L9] a character typed inside an autolink literal's text";
+  const MARK_ENDING_IN_A_LINK = "[1.64] a block-final mark whose last child is a link";
+
+  /** Which recorded class a disagreement belongs to, or `null` when it belongs to none. */
+  function classify(rendered: string, written: string): string | null {
+    if (rendered.includes("&#x58;") && !written.includes("&#x58;")) return PUNCTUATION_EDGED;
+    // The resource form on one side and the autolink form on the other, of the same URL: the
+    // source keystroke edits the `<…>` destination in place, the rendered one splits text from it.
+    if (/\]\(/.test(rendered) && !/\]\(/.test(written) && /<[^\s>]+>/.test(written))
+      return AUTOLINK_LITERAL;
+    // The source keystroke landed outside the run and its delimiters are escaped there.
+    if (/\\[*~_]/.test(written) && !/\\[*~_]/.test(rendered) && /\]\(/.test(rendered))
+      return MARK_ENDING_IN_A_LINK;
+    return null;
+  }
+
+  /** One fixture after the transaction: the live document and the whole document's cursor map. */
+  interface Prepared {
+    changed: PMNode;
+    map: CursorMap;
+    /** The position of every textblock this leg sweeps, in document order. */
+    blocks: { pos: number; type: string }[];
+  }
+
+  /**
+   * The fixture whose blocks are being swept, kept ready. The tests are declared and run in
+   * document order, so one entry serves the whole of a fixture; the fixture-level counters are
+   * taken once per fixture however often it is prepared ({@link counted}).
+   */
+  let ready: { name: string; prepared: Prepared } | null = null;
+  const counted = new Set<string>();
+
+  function prepare(name: string): Prepared {
+    if (ready !== null && ready.name === name) return ready.prepared;
+    const editor = mdastToPM(parse(read(name)));
+    const { doc: changed, blocks } = deleteAtEveryBlockStart(editor.doc);
+    const root = pmToMdast({ doc: changed, frontMatter: editor.frontMatter });
+    const swept: { pos: number; type: string }[] = [];
+    changed.descendants((node, pos) => {
+      if (!node.isTextblock) return true;
+      if (node.type !== schema.nodes.code_block) swept.push({ pos, type: node.type.name });
+      return false;
+    });
+    if (!counted.has(name)) {
+      counted.add(name);
+      if (blocks === 0) fixturesUnchanged += 1;
+      else fixturesChanged += 1;
+    }
+    const prepared: Prepared = { changed, map: cursorMap(root, changed), blocks: swept };
+    ready = { name, prepared };
+    return prepared;
+  }
+
+  /** Every position of one textblock: the settling rule, the bridge, and the two views' bytes. */
+  function sweepBlock(name: string, prepared: Prepared, pos: number): void {
+    const { changed, map } = prepared;
+    const node = changed.nodeAt(pos);
+    expect(node, `${name}: the textblock planned at ${pos}`).not.toBeNull();
+    const block = node as PMNode;
+    const start = pos + 1;
+    const end = start + block.content.size;
+    const chars = keptIn(block);
+    blocksSwept += 1;
+    if (chars.width > 0 && chars.liveOf(0) > 0) blocksLosingTheirLead += 1;
+    else blocksKeepingTheirLead += 1;
+    const alone = blockAlone(changed, pos, block);
+    /** Each line of the block alone, and where the whole document writes it. */
+    const shifts = new Map<number, LineShift>();
+    for (let at = start; at <= end; at += 1) {
+      if (insideSurrogatePair(changed, at)) continue;
+      const settled = start + chars.liveOf(chars.offsetOf(at - start));
+      const source = map.toSource(at);
+      expect(
+        map.toRendered(source),
+        `${name}: position ${at} settles to ${settled} (${source.line}:${source.ch})`,
+      ).toBe(settled);
+      if (settled !== at) {
+        positionsInsideDropped += 1;
+        continue;
+      }
+      const inBlock = alone.map.toSource(at + alone.offset);
+      const shift = { line: source.line, ch: source.ch - inBlock.ch };
+      const first = shifts.get(inBlock.line);
+      if (first === undefined) shifts.set(inBlock.line, shift);
+      else
+        expect(
+          shift,
+          `${name}: position ${at} sits on line ${inBlock.line} of its block, which the document writes at one line and one column shift`,
+        ).toEqual(first);
+      positionsBridged += 1;
+      const rendered = typedInRendered(alone.doc, at + alone.offset, null);
+      const written = typedInSource(alone.text, inBlock);
+      if (rendered !== written) {
+        const klass = classify(rendered, written);
+        expect(
+          klass,
+          `${name}: position ${at} (${source.line}:${source.ch}) is a member of a recorded class\n  rendered: ${JSON.stringify(rendered)}\n  source:   ${JSON.stringify(written)}`,
+        ).not.toBeNull();
+        excluded.push({ name, pos: at, klass: klass as string });
+        continue;
+      }
+      expect(written, `${name}: the two views at ${at} (${source.line}:${source.ch})`).toBe(
+        rendered,
+      );
+      positionsAgreeing += 1;
+    }
+    reached.add(name);
+  }
+
+  /** Every fixture's swept blocks, enumerated once so each is a test of its own. */
+  const planned = names.map((name) => ({ name, blocks: prepare(name).blocks }));
+
+  for (const fixture of planned) {
+    fixture.blocks.forEach((block, index) => {
+      it(`${fixture.name} after deleteAtEveryBlockStart, ${block.type} ${index + 1} of ${fixture.blocks.length}: the two views write the same bytes at every text position of the block, every position settles by the kept-character rule, and the block's columns are the document's`, () => {
+        sweepBlock(fixture.name, prepare(fixture.name), block.pos);
+      }, START_LEG_TIMEOUT_MS);
+    });
+  }
+
+  it("ran deleteAtEveryBlockStart over every fixture in the index, swept every block of every one of them, reached both sides of the lead clause, and bounded every excluded position positively", () => {
+    // Every fixture of the index is planned, and every planned block was swept by its own test.
+    expect(planned.map((fixture) => fixture.name).sort()).toEqual([...names].sort());
+    expect(blocksSwept).toBe(planned.reduce((total, fixture) => total + fixture.blocks.length, 0));
+    expect([...reached].sort()).toEqual(
+      planned
+        .filter((fixture) => fixture.blocks.length > 0)
+        .map((fixture) => fixture.name)
+        .sort(),
+    );
+    // A fixture whose every textblock is a fence or starts with an atom has nothing to delete.
+    expect(fixturesChanged).toBeGreaterThan(0);
+    expect(fixturesUnchanged).toBeGreaterThan(0);
+    expect(blocksSwept).toBeGreaterThan(0);
+    // Both sides of the clause: the transaction strips some blocks' leads and leaves others whole.
+    expect(blocksLosingTheirLead).toBeGreaterThan(0);
+    expect(blocksKeepingTheirLead).toBeGreaterThan(0);
+    expect(blocksLosingTheirLead + blocksKeepingTheirLead).toBe(blocksSwept);
+    // The dropped-whitespace half of the ownership rule is reached, and the bytes half dominates.
+    expect(positionsInsideDropped).toBeGreaterThan(0);
+    expect(positionsAgreeing).toBeGreaterThan(positionsInsideDropped);
+    // Every position whose bytes were compared was compared on a block bridged to the document.
+    expect(positionsBridged).toBe(positionsAgreeing + excluded.length);
+    // The exclusions are exactly the three recorded classes, each reached and each a minority.
+    expect(new Set(excluded.map((member) => member.klass))).toEqual(
+      new Set([PUNCTUATION_EDGED, AUTOLINK_LITERAL, MARK_ENDING_IN_A_LINK]),
+    );
+    expect(excluded.length).toBeLessThan(positionsAgreeing);
+  }, START_LEG_TIMEOUT_MS);
 });
 
 /** The ProseMirror positions at the end of every table cell's content, in document order. */

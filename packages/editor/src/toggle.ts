@@ -24,7 +24,13 @@ import { keymap as codeMirrorKeymap, type KeyBinding } from "@codemirror/view";
 import { keymap as proseMirrorKeymap } from "prosemirror-keymap";
 import { Mark, type Node as PMNode } from "prosemirror-model";
 import { TextSelection, type Command, type Plugin, type Selection } from "prosemirror-state";
-import { schema } from "./schema.js";
+import {
+  CELL_LINE_ENDING,
+  LINE_ENDING,
+  keptCharacters,
+  schema,
+  type KeptCharacters,
+} from "./schema.js";
 import type { DocumentStore } from "./store.js";
 
 /**
@@ -99,14 +105,38 @@ export function toggleMode(store: DocumentStore, mode: EditorMode): EditorMode {
 
 /* ------------------------------------------------------------------ correspondence -------- */
 
+/**
+ * One textblock's live inline content, normalised: where its content starts in the live document,
+ * and the kept-character map of the children the conversion read ({@link keptCharacters}). Every
+ * inline correspondence's positions are read from it, so the map speaks the live document's
+ * coordinates even where the conversion dropped characters the live document still holds.
+ */
+interface InlineBlock {
+  /** The live position of the block's first content character. */
+  readonly contentStart: number;
+  readonly chars: KeptCharacters;
+}
+
 /** One mdast node, its path in the root, and the ProseMirror positions it occupies. */
 interface Correspondence {
   readonly path: string;
   readonly node: Nodes;
-  /** First ProseMirror position the node covers. */
+  /** First ProseMirror position the node covers — a **live** position. */
   readonly pmStart: number;
-  /** One past the last position it covers. */
+  /** One past the last live position it covers. */
   readonly pmEnd: number;
+  /**
+   * For an inline node: the block whose kept-character map placed it, and the offset of its first
+   * unit in that block's normalised sequence. Absent for a block entry, whose positions are the
+   * editor's own node extents.
+   */
+  readonly inline?: { readonly block: InlineBlock; readonly outputStart: number };
+}
+
+/** What {@link correspondences} builds: the entries, and the blocks their positions came from. */
+interface Walk {
+  readonly entries: Correspondence[];
+  readonly blocks: InlineBlock[];
 }
 
 /** An mdast child paired with the path it has in its root. */
@@ -130,26 +160,17 @@ function isPlaceholder(node: PMNode): boolean {
 }
 
 /**
- * How many ProseMirror positions one phrasing node's content occupies. mdast nests marks and
- * ProseMirror puts them on the text, so a mark node is exactly as wide as its children and a leaf
- * that is not text (`image`, `break`, `html`) is one position wide, like the atom it becomes.
+ * How many **units of the normalised sequence** one inline leaf occupies — one per UTF-16 code
+ * unit of its text, one for an atom (`image`, `break`, `html`), which is what `nodeSize` counts
+ * on the ProseMirror node it became. A mark node has no width of its own: its extent is the union
+ * of its children's, which {@link walkInline} takes from the cursor it shares with them, so no
+ * mdast value's length is ever used as a ProseMirror distance.
  */
-function inlineWidth(node: PhrasingContent): number {
-  switch (node.type) {
-    case "text":
-    case "inlineCode":
-      return node.value.length;
-    case "emphasis":
-    case "strong":
-    case "delete":
-    case "link":
-      return node.children.reduce((total, child) => total + inlineWidth(child), 0);
-    default:
-      return 1;
-  }
+function leafUnits(node: PhrasingContent): number {
+  return node.type === "text" || node.type === "inlineCode" ? node.value.length : 1;
 }
 
-/** Whether a node type is one of the four marks {@link inlineWidth} recurses into. */
+/** Whether a node type is one of the four marks {@link walkInline} recurses into. */
 function isMark(type: string): boolean {
   return type === "emphasis" || type === "strong" || type === "delete" || type === "link";
 }
@@ -161,20 +182,41 @@ function isMarkNode(
   return isMark(node.type);
 }
 
+/**
+ * The inline entries of one textblock, in pre-order, walked over the block's **normalised
+ * sequence** and placed through its kept-character map: `cursor.offset` counts units of that
+ * sequence (a leaf consumes {@link leafUnits}; a mark consumes whatever its children do), and
+ * both ends of every entry are the live positions the map answers for those units. A block with
+ * no dropped whitespace has the identity map, so every entry is exactly where the widths used to
+ * put it.
+ */
 function walkInline(
-  contentStart: number,
+  block: InlineBlock,
   children: readonly PhrasingContent[],
   path: string,
-  out: Correspondence[],
+  walk: Walk,
+  cursor: { offset: number },
 ): void {
-  let offset = 0;
   children.forEach((node, index) => {
-    const pmStart = contentStart + offset;
-    const width = inlineWidth(node);
     const nodePath = childPath(path, index);
-    out.push({ path: nodePath, node, pmStart, pmEnd: pmStart + width });
-    if (isMarkNode(node)) walkInline(pmStart, node.children, nodePath, out);
-    offset += width;
+    const outputStart = cursor.offset;
+    // Pre-order: the parent's entry is pushed before its children's and its extent patched in
+    // once they have consumed their units.
+    const at = walk.entries.length;
+    walk.entries.push({ path: nodePath, node, pmStart: 0, pmEnd: 0 });
+    if (isMarkNode(node)) walkInline(block, node.children, nodePath, walk, cursor);
+    else cursor.offset += leafUnits(node);
+    const pmStart = block.contentStart + block.chars.liveOf(outputStart);
+    walk.entries[at] = {
+      path: nodePath,
+      node,
+      pmStart,
+      pmEnd:
+        cursor.offset === outputStart
+          ? pmStart
+          : block.contentStart + block.chars.liveEndOf(cursor.offset),
+      inline: { block, outputStart },
+    };
   });
 }
 
@@ -182,33 +224,51 @@ function walkBlocks(
   parent: PMNode,
   contentStart: number,
   children: readonly PathedChild[],
-  out: Correspondence[],
+  walk: Walk,
 ): void {
   let index = 0;
   parent.forEach((child, offset) => {
     if (isPlaceholder(child)) return;
     const counterpart = children[index];
     index += 1;
-    if (counterpart !== undefined) walkBlock(child, contentStart + offset, counterpart, out);
+    if (counterpart !== undefined) walkBlock(child, contentStart + offset, counterpart, walk);
   });
 }
 
-function walkBlock(pm: PMNode, pmStart: number, entry: PathedChild, out: Correspondence[]): void {
+/** One ProseMirror node's children, in order. */
+function childrenOf(node: PMNode): PMNode[] {
+  const out: PMNode[] = [];
+  node.forEach((child) => out.push(child));
+  return out;
+}
+
+function walkBlock(pm: PMNode, pmStart: number, entry: PathedChild, walk: Walk): void {
   const { node, path } = entry;
-  out.push({ path, node, pmStart, pmEnd: pmStart + pm.nodeSize });
+  walk.entries.push({ path, node, pmStart, pmEnd: pmStart + pm.nodeSize });
   const contentStart = pmStart + 1;
   switch (node.type) {
     case "paragraph":
     case "heading":
-    case "tableCell":
-      walkInline(contentStart, node.children, path, out);
+    case "tableCell": {
+      // The conversion's own normalisation, and where every character it kept came from: the
+      // live children and the line ending `blockToMdast` gives this block kind (`schema.ts`).
+      const block: InlineBlock = {
+        contentStart,
+        chars: keptCharacters(
+          childrenOf(pm),
+          node.type === "tableCell" ? CELL_LINE_ENDING : LINE_ENDING,
+        ),
+      };
+      walk.blocks.push(block);
+      walkInline(block, node.children, path, walk, { offset: 0 });
       return;
+    }
     case "blockquote":
     case "listItem":
     case "list":
     case "table":
     case "tableRow":
-      walkBlocks(pm, contentStart, pathed(node.children, path), out);
+      walkBlocks(pm, contentStart, pathed(node.children, path), walk);
       return;
     default:
       // `code`, `thematicBreak` and `html` are placed but not entered: their bytes are not their
@@ -226,11 +286,11 @@ function walkBlock(pm: PMNode, pmStart: number, entry: PathedChild, out: Corresp
  * can hold a placeholder paragraph the last commit dropped, and the mapping has to be right for
  * the document the cursor is actually in.
  */
-function correspondences(root: Root, doc: PMNode): Correspondence[] {
-  const out: Correspondence[] = [];
-  const blocks = pathed(root.children, ROOT_PATH).filter((entry) => entry.node.type !== "yaml");
-  walkBlocks(doc, 0, blocks, out);
-  return out;
+function correspondences(root: Root, doc: PMNode): Walk {
+  const walk: Walk = { entries: [], blocks: [] };
+  const children = pathed(root.children, ROOT_PATH).filter((entry) => entry.node.type !== "yaml");
+  walkBlocks(doc, 0, children, walk);
+  return walk;
 }
 
 /* ------------------------------------------------------------------ the cursor map ------- */
@@ -254,6 +314,112 @@ function isEntered(node: Nodes): boolean {
     default:
       return false;
   }
+}
+
+/**
+ * The textblock whose live inline content covers `pos`, or `null` (a position between blocks, or
+ * inside a block the conversion does not enter). The content ranges of two textblocks are never
+ * adjacent — a block's closing token and the next one's opening token lie between them — so at
+ * most one block covers a position, edges included.
+ */
+function blockAt(blocks: readonly InlineBlock[], pos: number): InlineBlock | null {
+  for (const block of blocks) {
+    if (pos >= block.contentStart && pos <= block.contentStart + block.chars.liveWidth) return block;
+  }
+  return null;
+}
+
+/**
+ * `pos` settled onto the live position its output offset answers — the ownership rule of
+ * {@link keptCharacters}, applied once, here: a position inside whitespace the conversion dropped
+ * is the position of the next kept character, and a position past the last kept character is the
+ * block's end. A position the map returns to is its own answer, so a block with no dropped
+ * whitespace settles every position to itself.
+ */
+function settled(block: InlineBlock, pos: number): number {
+  const { chars, contentStart } = block;
+  return contentStart + chars.liveOf(chars.offsetOf(pos - contentStart));
+}
+
+/**
+ * Whether the caret at `pos` sits **after whitespace the conversion dropped and no kept node
+ * covers** — a hole in the correspondence: the block's start before a stripped lead, or the space
+ * between two kept nodes that a line start took — *and* belongs outside the node that follows it.
+ *
+ * Which of the two the caret is, is the marks a character typed there receives ({@link
+ * typedMarks}), read against the live node after it, exactly as {@link innermostAt} reads them
+ * against the node before at a boundary: with the dropped whitespace gone from the bytes, the
+ * node after is the first thing the source line holds, and a character whose marks are that
+ * node's joins it (`a `+backtick+`cd`+backtick+` b` with its lead stripped and stored marks
+ * carrying `inline_code`: inside the fence), while a character whose marks are not is written
+ * before it, where the dropped whitespace was (the same caret after a click: `$pos.marks()` is
+ * the whitespace's own, empty, so `X`+backtick+`cd`+backtick+` b`). Only the second is this
+ * clause's: the caret is then answered as a position *between* nodes, which is the block entry's
+ * own rule ({@link lastNodeEnd} from the block's start, the block's first column where nothing
+ * precedes it).
+ */
+function beyondDroppedWhitespace(
+  block: InlineBlock,
+  doc: PMNode,
+  pos: number,
+  marks: readonly Mark[],
+): boolean {
+  const { chars, contentStart } = block;
+  const before = pos - contentStart - 1;
+  if (before < 0 || chars.keeps(before)) return false;
+  if (chars.ranges.some((range) => range.start <= before && before < range.end)) return false;
+  const after = doc.resolve(pos).nodeAfter;
+  return after !== null && !Mark.sameSet(marks, after.marks);
+}
+
+/** The innermost entered block covering `pos` (`entries` is pre-order, so the last one). */
+function enclosingBlock(entries: readonly Correspondence[], pos: number): Correspondence | null {
+  let best: Correspondence | null = null;
+  for (const entry of entries) {
+    if (isEntered(entry.node) && entry.pmStart <= pos && pos <= entry.pmEnd) best = entry;
+  }
+  return best;
+}
+
+/**
+ * The source caret *between* two of a block's inline nodes: the end of the last of its
+ * descendants that ends at or before `pos` ({@link lastNodeEnd} from the block's own start) and,
+ * where none does, the **start of its first inline child** — never the block's own start, which
+ * is where its marker is (`# `, `- `, a cell's pipe and padding) and not where its text begins.
+ * `entries` is in pre-order, so the first entry under the block's path is that child.
+ */
+function betweenNodes(
+  entries: readonly Correspondence[],
+  map: PositionMap,
+  block: Correspondence,
+  pos: number,
+): SourcePosition | null {
+  const before = lastNodeEnd(entries, map, pos, block.pmStart);
+  if (before !== null) return before;
+  const prefix = `${block.path}.`;
+  const first = entries.find((entry) => entry.path.startsWith(prefix));
+  const range = map.ranges[first === undefined ? block.path : first.path];
+  return range === undefined ? null : { line: range.startLine, ch: range.startCol - 1 };
+}
+
+/**
+ * The offset **inside `entry`** — an index into its spelling table — that live position `pos`
+ * names, and its inverse: the live position an offset inside `entry` sits at. Both translate
+ * through the entry's block's kept-character map, so a character after whitespace the conversion
+ * dropped is indexed by what the tree holds and placed by what the editor holds. Where an entry
+ * has no map (a block, or a root the caller did not derive from `doc`) the two are the plain
+ * arithmetic they were.
+ */
+function leafOffset(entry: Correspondence, pos: number): number {
+  if (entry.inline === undefined) return pos - entry.pmStart;
+  const { block, outputStart } = entry.inline;
+  return block.chars.offsetOf(pos - block.contentStart) - outputStart;
+}
+
+function leafPosition(entry: Correspondence, offset: number): number {
+  if (entry.inline === undefined) return entry.pmStart + offset;
+  const { block, outputStart } = entry.inline;
+  return block.contentStart + block.chars.liveOf(outputStart + offset);
 }
 
 /**
@@ -499,16 +665,23 @@ export interface CursorMap {
  */
 export function cursorMap(root: Root, doc: PMNode): CursorMap {
   const { map, spellings, lineStarts } = formatWithMap(root);
-  const entries = correspondences(root, doc);
+  const { entries, blocks } = correspondences(root, doc);
   return {
-    toSource(pos, storedMarks = null) {
+    toSource(rendered, storedMarks = null) {
+      const block = blockAt(blocks, rendered);
+      const pos = block === null ? rendered : settled(block, rendered);
       const marks = typedMarks(doc, pos, storedMarks);
       const boundary = inlineBoundary(doc, pos, marks);
+      if (block !== null && marks !== null && beyondDroppedWhitespace(block, doc, pos, marks)) {
+        const enclosing = enclosingBlock(entries, pos);
+        const between = enclosing === null ? null : betweenNodes(entries, map, enclosing, pos);
+        if (between !== null) return between;
+      }
       const inside = innermostAt(entries, pos, boundary);
       if (inside !== null) {
         const range = map.ranges[inside.path];
         const table = spellings[inside.path];
-        const edge = blockEdge(doc, pos, marks);
+        const edge = blockEdge(doc, pos, marks, block);
         if (edge !== null) {
           const outside = markEdgePoint(entries, map, inside, pos, marks ?? [], edge);
           if (outside !== null) return outside;
@@ -517,7 +690,7 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
           return { line: range.endLine, ch: range.endCol - 1 };
         }
         if (table !== undefined) {
-          const { line, column } = spellingPoint(lineStarts, table, pos - inside.pmStart);
+          const { line, column } = spellingPoint(lineStarts, table, leafOffset(inside, pos));
           return { line, ch: column - 1 };
         }
         if (isEntered(inside.node)) {
@@ -535,7 +708,10 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
         if (entry !== undefined) {
           const table = spellings[found.path];
           if (table !== undefined) {
-            return entry.pmStart + spellingIndex(lineStarts, table, position.line, position.ch + 1);
+            return leafPosition(
+              entry,
+              spellingIndex(lineStarts, table, position.line, position.ch + 1),
+            );
           }
           return delimiterPosition(entries, entry, found, map, position);
         }
@@ -584,23 +760,33 @@ function isLeafEnd(
 }
 
 /**
- * Which edge of a textblock `pos` is, when it is one: `"start"` when no inline node is before it,
- * `"end"` when none is after it, `null` everywhere else — inside the block (a node on each side,
- * which is {@link inlineBoundary}'s case), in an empty block (neither side has one, so there is
- * no enclosing mark to be inside or outside of), and at every position that is not a textblock
- * position at all (`marks` is `null` there).
+ * Which edge of a textblock `pos` is, when it is one: `"start"` when nothing the conversion kept
+ * is before it, `"end"` when nothing it kept is after it, `null` everywhere else — inside the
+ * block (kept content on each side, which is {@link inlineBoundary}'s case), in an empty block
+ * (neither side has any, so there is no enclosing mark to be inside or outside of), and at every
+ * position that is not a textblock position at all (`marks` is `null` there).
+ *
+ * The edge is read in **kept** content, not in the editor's nodes: a block whose trailing
+ * whitespace the conversion dropped has an editor node after its last kept character and no bytes
+ * after it, and the caret there is at the block's end in the only document the source view shows
+ * (a space typed after a link at a block's end: `[bc](u) ` is `[bc](u)`, and the caret belongs
+ * after `)`, which is the block-edge rule of DECISIONS #review-1-r8 N1). With nothing dropped the
+ * two readings are the same test — the offset is positive exactly where a node precedes the
+ * position — so a document the conversion keeps whole is answered as before.
  */
 function blockEdge(
   doc: PMNode,
   pos: number,
   marks: readonly Mark[] | null,
+  block: InlineBlock | null,
 ): "start" | "end" | null {
   if (marks === null) return null;
   const $pos = doc.resolve(pos);
-  const before = $pos.nodeBefore;
-  const after = $pos.nodeAfter;
-  if (before !== null && after === null) return "end";
-  if (before === null && after !== null) return "start";
+  const offset = block === null ? -1 : block.chars.offsetOf(pos - block.contentStart);
+  const before = block === null ? $pos.nodeBefore !== null : offset > 0;
+  const after = block === null ? $pos.nodeAfter !== null : offset < block.chars.width;
+  if (before && !after) return "end";
+  if (!before && after) return "start";
   return null;
 }
 

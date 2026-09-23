@@ -770,7 +770,7 @@ const TRAILING_WHITESPACE = new RegExp(`${ASCII_WHITESPACE.source}$`);
 const LINE_ENDING_RUN = /[\t\v\f ]*[\n\r][\t\n\v\f\r ]*/g;
 
 /** What a line-ending run collapses to in a paragraph or heading: one soft line break. */
-const LINE_ENDING = "\n";
+export const LINE_ENDING = "\n";
 
 /**
  * What a line-ending run collapses to in a table cell: one space (task 1.29, DECISIONS
@@ -780,7 +780,7 @@ const LINE_ENDING = "\n";
  * reader of the rendered table (the cell's text wraps as ordinary whitespace), and it is the
  * only whitespace a cell can carry across the trip.
  */
-const CELL_LINE_ENDING = " ";
+export const CELL_LINE_ENDING = " ";
 
 /**
  * Strip the whitespace `parse` never keeps, so that the tree leaving the editor is one some
@@ -901,32 +901,125 @@ const CELL_LINE_ENDING = " ";
  * @param lineEnding what a line-ending run collapses to: {@link LINE_ENDING} in a paragraph or
  *   heading, {@link CELL_LINE_ENDING} in a table cell.
  */
-function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string): PMNode[] {
+function stripUnparsableWhitespace(
+  nodes: readonly PMNode[],
+  lineEnding: string,
+): readonly PMNode[] {
+  return keptCharacters(nodes, lineEnding).nodes;
+}
+
+/** The live offsets one normalised node covers: `[start, end)`, half-open. */
+export interface LiveRange {
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * {@link keptCharacters}' answer: the normalised nodes, and where every character it kept came
+ * from in the live inline list it was given.
+ *
+ * A **unit** is one position of an inline list: one UTF-16 code unit of a text node (the
+ * parser's own unit, `micromark-util-classify-character`'s) and one whole atom (`image`,
+ * `hard_break`, `raw_inline`), which is what `PMNode.nodeSize` counts on both. Offsets are
+ * counted from the start of the list in both coordinate systems: `live` offsets over the list
+ * handed in (the editor's own children, every typed character still in it), output offsets over
+ * {@link nodes} (the list `parse` could have produced).
+ */
+export interface KeptCharacters {
+  /** The normalised nodes — the whole of what {@link stripUnparsableWhitespace} answers. */
+  readonly nodes: readonly PMNode[];
+  /** How many units {@link nodes} hold. */
+  readonly width: number;
+  /** How many units the live list held. */
+  readonly liveWidth: number;
+  /** The live range of each of {@link nodes}, by index. */
+  readonly ranges: readonly LiveRange[];
+  /** The live offset output offset `offset` sits at; `width` answers one past the last kept unit. */
+  liveOf(offset: number): number;
+  /** The live offset one past output offset `offset - 1`: a node's live end, never a gap's. */
+  liveEndOf(offset: number): number;
+  /** The output offset a live offset belongs to — the ownership rule in {@link keptCharacters}. */
+  offsetOf(live: number): number;
+  /**
+   * Whether the live **character** at `live` is one the normalisation kept. Not the same question
+   * as whether a live **position** is one the two directions return to: the position one past the
+   * last kept character is returned to (it is the block's end in both views) while the dropped
+   * characters after it are not, so a caller asking about a character asks this and a caller
+   * asking about a position asks `liveOf(offsetOf(pos)) === pos`.
+   */
+  keeps(live: number): boolean;
+}
+
+/**
+ * {@link stripUnparsableWhitespace}'s normalisation **and the live position of every character it
+ * keeps** (task 1.64, DECISIONS #review-1-r8 N2). The strip is this function projected onto its
+ * {@link KeptCharacters.nodes}, so there is one implementation of every branch of the ownership
+ * rule above — the line-start trim, the block-initial link exception, the line-ending run, the
+ * run that empties, the block's-end loop, the trailing break — and a correspondence built on the
+ * map cannot disagree with the tree the editor serialises.
+ *
+ * **Ownership rule for a live position that sits inside dropped whitespace, stated once.** A live
+ * position belongs to the **next kept character** — `offsetOf(l)` is the output offset of the
+ * first kept character at or after `l` — and, where no kept character follows it, to the **block's
+ * end**, the output offset one past the last kept character ({@link width}). Two consequences
+ * follow, and they are the whole of what a caller has to know: a run of dropped whitespace and
+ * the character after it share one output offset, so `liveOf(offsetOf(l)) === l` is exactly the
+ * test that live offset `l` is one the two directions return to; and a collapsed line-ending run
+ * ({@link LINE_ENDING_RUN}) keeps its **first** character as the one the run's single line ending
+ * sits at, so the position before the run is the kept one — a character typed there is written
+ * before the break in both views — and every position after it inside the run is not.
+ *
+ * `unmarkEdgeWhitespace` moves marks and re-splits text; it neither adds nor removes a character,
+ * so it is run first here exactly as the strip ran it and the live offsets are the cumulative
+ * widths of its output.
+ *
+ * @param lineEnding what a line-ending run collapses to: {@link LINE_ENDING} in a paragraph or
+ *   heading, {@link CELL_LINE_ENDING} in a table cell.
+ */
+export function keptCharacters(
+  nodes: readonly PMNode[],
+  lineEnding: string,
+): KeptCharacters {
   const out: PMNode[] = [];
+  /** The live offset of each kept unit, ascending. */
+  const live: number[] = [];
+  /** The index in `live` at which each node of `out` starts. */
+  const starts: number[] = [];
   let atLineStart = true;
+  let at = 0;
   for (const node of unmarkEdgeWhitespace(nodes)) {
+    const size = node.nodeSize;
     if (!node.isText || schema.marks.inline_code.isInSet(node.marks) !== undefined) {
       atLineStart = node.type === schema.nodes.hard_break;
+      starts.push(live.length);
+      for (let i = 0; i < size; i += 1) live.push(at + i);
       out.push(node);
+      at += size;
       continue;
     }
-    let text = (node.text as string).replace(LINE_ENDING_RUN, lineEnding);
+    const collapsed = collapseLineEndings(node.text as string, lineEnding, at);
     // The block's start is the first node that survives; a link there keeps its leading
     // whitespace (the block's first byte is its `[`), a link after a line ending does not.
     const atBlockStart = out.length === 0;
-    if (atLineStart && !(atBlockStart && isLinked(node)))
-      text = text.replace(LEADING_WHITESPACE, "");
-    if (text === "") continue;
-    atLineStart = text.endsWith("\n");
-    out.push(text === node.text ? node : schema.text(text, node.marks));
+    const kept =
+      atLineStart && !(atBlockStart && isLinked(node)) ? dropLeadingWhitespace(collapsed) : collapsed;
+    at += size;
+    if (kept.text === "") continue;
+    atLineStart = kept.text.endsWith("\n");
+    starts.push(live.length);
+    live.push(...kept.live);
+    out.push(kept.text === node.text ? node : schema.text(kept.text, node.marks));
   }
   // The block's end: drop trailing breaks and whitespace-only runs, and take the trailing
   // whitespace of the run that is last once they are gone, until the last node is neither.
   for (;;) {
     const last = out[out.length - 1];
     if (last === undefined) break;
+    const start = starts[starts.length - 1];
     if (last.type === schema.nodes.hard_break) {
       out.pop();
+      starts.pop();
+      live.length = start;
       continue;
     }
     if (!last.isText || schema.marks.inline_code.isInSet(last.marks) !== undefined) break;
@@ -934,12 +1027,87 @@ function stripUnparsableWhitespace(nodes: readonly PMNode[], lineEnding: string)
     const text = (last.text as string).replace(TRAILING_WHITESPACE, "");
     if (text === "") {
       out.pop();
+      starts.pop();
+      live.length = start;
       continue;
     }
-    if (text !== last.text) out[out.length - 1] = schema.text(text, last.marks);
+    if (text !== last.text) {
+      out[out.length - 1] = schema.text(text, last.marks);
+      live.length = start + text.length;
+    }
     break;
   }
-  return out;
+  const end = live.length === 0 ? 0 : live[live.length - 1] + 1;
+  const liveOf = (offset: number): number =>
+    offset < 0 ? 0 : offset < live.length ? live[offset] : end;
+  const search = (target: number): number => {
+    // The first kept unit at or after `target`; `live` is strictly increasing, so a binary search
+    // answers it, and `live.length` — the block's end — is the answer when none is.
+    let low = 0;
+    let high = live.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (live[middle] < target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+  const liveEndOf = (offset: number): number => (offset <= 0 ? liveOf(0) : liveOf(offset - 1) + 1);
+  return {
+    nodes: out,
+    width: live.length,
+    liveWidth: at,
+    ranges: out.map((node, index) => ({
+      start: liveOf(starts[index]),
+      end: liveEndOf(starts[index] + node.nodeSize),
+    })),
+    liveOf,
+    liveEndOf,
+    offsetOf: search,
+    keeps(target) {
+      const offset = search(target);
+      return offset < live.length && live[offset] === target;
+    },
+  };
+}
+
+/** One text node's characters, and the live offset each of them came from. */
+interface KeptText {
+  readonly text: string;
+  readonly live: number[];
+}
+
+/**
+ * {@link LINE_ENDING_RUN} collapsed to `lineEnding`, carrying the live offsets across: every
+ * character outside a run keeps its own, and the one character a run collapses to sits at the
+ * run's **first** live offset (the ownership rule in {@link keptCharacters}).
+ */
+function collapseLineEndings(text: string, lineEnding: string, at: number): KeptText {
+  const live: number[] = [];
+  let out = "";
+  let i = 0;
+  for (const match of text.matchAll(LINE_ENDING_RUN)) {
+    const index = match.index as number;
+    for (; i < index; i += 1) {
+      out += text[i];
+      live.push(at + i);
+    }
+    out += lineEnding;
+    live.push(at + index);
+    i = index + match[0].length;
+  }
+  for (; i < text.length; i += 1) {
+    out += text[i];
+    live.push(at + i);
+  }
+  return { text: out, live };
+}
+
+/** {@link LEADING_WHITESPACE} dropped from a {@link KeptText}, its live offsets dropped with it. */
+function dropLeadingWhitespace(kept: KeptText): KeptText {
+  const edge = LEADING_WHITESPACE.exec(kept.text);
+  if (edge === null) return kept;
+  return { text: kept.text.slice(edge[0].length), live: kept.live.slice(edge[0].length) };
 }
 
 /** A node carrying the `link` mark: its edge whitespace is the link's, inside the brackets. */

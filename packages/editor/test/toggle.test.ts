@@ -15,7 +15,14 @@ import {
 import { EditorState as CMState, type TransactionSpec } from "@codemirror/state";
 import type { Mark } from "prosemirror-model";
 import { EditorState, Selection, TextSelection } from "prosemirror-state";
-import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
+import {
+  CELL_LINE_ENDING,
+  LINE_ENDING,
+  keptCharacters,
+  mdastToPM,
+  pmToMdast,
+  schema,
+} from "../src/schema.js";
 import {
   bindProseMirror,
   createDocumentStore,
@@ -2040,6 +2047,485 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
     expect(text.split("\n")[after.line - 1][after.ch - 1]).toBe("Q");
     assertInverseEverywhere(typed.doc, typedMap);
   });
+
+  /* --------------------------------------------------------------------------------------- */
+
+  /**
+   * **Whitespace the conversion drops (task 1.64, DECISIONS #review-1-r8 N2).** The editor keeps
+   * every character typed into a textblock; `stripUnparsableWhitespace` does not, and the tree
+   * that leaves the editor is the stripped one. An inline correspondence is therefore built from
+   * the **kept-character map** ({@link keptCharacters}), so its `pmStart`/`pmEnd` are live
+   * positions and the leaf-interior arithmetic translates through the map in both directions —
+   * before this task the widths of the *normalised* tree were used as live distances, and every
+   * character after dropped whitespace was mapped one place off in both directions at once (the
+   * inverse held while both were wrong).
+   *
+   * The guards below enumerate the strip's own branches — the six whitespace classes — over the
+   * node classes and the containers, each seeded from a typing- or deleting-shaped transaction on
+   * `mdastToPM(parse(·))`, never a hand-built document. Every case asserts three things:
+   *
+   * - **the two views' bytes** at every position the map returns to, `X` typed in the rendered
+   *   view against `X` written into the source at the column `toSource` answers (`toBe`);
+   * - **the inverse** there, and over every text position of the document;
+   * - **the ownership rule** at every position it does not return to: a live position inside
+   *   dropped whitespace answers the *next kept character*'s column and comes back to that
+   *   character, and one past the last kept character answers the block's end. It is the one rule
+   *   for the whole class, stated once in {@link keptCharacters}' doc comment and reached here at
+   *   the first, middle and last character of a three-character run by the guard that names it.
+   *
+   * The positions a case does not assert bytes at are exactly the positions of that rule: typing
+   * *into* whitespace the source does not hold writes bytes the source cannot write, because the
+   * keystroke keeps the whitespace alive (`X `+backtick+`cd`+backtick+` b` against
+   * `X`+backtick+`cd`+backtick+` b`). Each case counts them and asserts every one is of that
+   * class, so the set is bounded positively and never narrowed (DECISIONS #032).
+   */
+  describe("whitespace the conversion drops: the correspondence is the live document's, and a position inside dropped whitespace is the next kept character's (task 1.64, DECISIONS #review-1-r8 N2)", () => {
+    type Doc = ReturnType<typeof mdastToPM>["doc"];
+    interface Block {
+      readonly node: Doc;
+      readonly start: number;
+    }
+
+    /** The last textblock that holds inline content: every case below puts its line there. */
+    function targetBlock(doc: Doc): Block {
+      let found: Block | null = null;
+      doc.descendants((node, pos) => {
+        if (!node.isTextblock) return true;
+        if (node.type !== schema.nodes.code_block) found = { node, start: pos + 1 };
+        return false;
+      });
+      expect(found, "the source holds a textblock with inline content").not.toBeNull();
+      return found as unknown as Block;
+    }
+
+    function childrenOf(node: Doc): Doc[] {
+      const out: Doc[] = [];
+      node.forEach((child) => out.push(child));
+      return out;
+    }
+
+    /** The conversion's own normalisation of `block`, with the line ending its kind is given. */
+    function charsOf(block: Block): ReturnType<typeof keptCharacters> {
+      return keptCharacters(
+        childrenOf(block.node),
+        block.node.type === schema.nodes.table_cell ? CELL_LINE_ENDING : LINE_ENDING,
+      );
+    }
+
+    /** `text` inserted at `pos` with `marks` — `insertText`, the call a keystroke makes. */
+    function typeAt(doc: Doc, pos: number, text: string, marks: readonly Mark[] | null = null): Doc {
+      return EditorState.create({ doc }).tr.setStoredMarks(marks).insertText(text, pos).doc;
+    }
+
+    /** `tr.delete`, the call a Backspace makes. */
+    function deleteRange(doc: Doc, from: number, to: number): Doc {
+      return EditorState.create({ doc }).tr.delete(from, to).doc;
+    }
+
+    /** The position just after `block`'s first `hard_break`. */
+    function afterHardBreak(block: Block): number {
+      let at: number | null = null;
+      block.node.forEach((child, offset) => {
+        if (at === null && child.type === schema.nodes.hard_break)
+          at = block.start + offset + child.nodeSize;
+      });
+      expect(at, "the seeded source holds a hard break").not.toBeNull();
+      return at as unknown as number;
+    }
+
+    /** The position of `block`'s first soft line ending — the `\n` a text node holds. */
+    function softLineEnding(block: Block): number {
+      let at: number | null = null;
+      block.node.forEach((child, offset) => {
+        if (at !== null || !child.isText) return;
+        const index = (child.text as string).indexOf("\n");
+        if (index !== -1) at = block.start + offset + index;
+      });
+      expect(at, "the seeded source holds a soft line break").not.toBeNull();
+      return at as unknown as number;
+    }
+
+    /** The first character of `block`'s first text child — one code point, as a Delete takes it. */
+    function firstCharacter(block: Block): [number, number] {
+      const first = block.node.firstChild;
+      expect(first?.isText, "the seeded block begins with text").toBe(true);
+      const character = [...((first as Doc).text as string)][0] as string;
+      return [block.start, block.start + character.length];
+    }
+
+    /** Whether `pos` sits between the two UTF-16 units of one code point: no caret can be there. */
+    function insideSurrogatePair(doc: Doc, pos: number): boolean {
+      const $pos = doc.resolve(pos);
+      const before = $pos.nodeBefore;
+      const after = $pos.nodeAfter;
+      return (
+        before !== null &&
+        after !== null &&
+        before.isText &&
+        after.isText &&
+        /[\uD800-\uDBFF]$/.test(before.text as string) &&
+        /^[\uDC00-\uDFFF]/.test(after.text as string)
+      );
+    }
+
+    interface Seeded {
+      doc: Doc;
+      root: Root;
+      text: string;
+      map: ReturnType<typeof cursorMap>;
+      block: Block;
+      chars: ReturnType<typeof keptCharacters>;
+    }
+
+    /** One case: parse `source`, apply `transaction` to its target block, read the two views. */
+    function seed(source: string, transaction: (doc: Doc, block: Block) => Doc): Seeded {
+      const editor = mdastToPM(parse(source));
+      const doc = transaction(editor.doc, targetBlock(editor.doc));
+      const root = pmToMdast({ doc, frontMatter: editor.frontMatter });
+      const block = targetBlock(doc);
+      return { doc, root, text: format(root), map: cursorMap(root, doc), block, chars: charsOf(block) };
+    }
+
+    /**
+     * **A class this task's assertions found outside its scope, filed in `docs/V1.1-BACKLOG.md`
+     * with a revisit trigger and bounded positively here (DECISIONS #032, #review-1-r1).** The
+     * caret straight after a `hard_break` inside a container that writes a continuation prefix — a
+     * list item's indentation, a blockquote's `> ` — is answered with the break's own range end,
+     * which is column 1 of the next line, *before* that prefix; the rendered view types after the
+     * prefix. It is not this task's: the same position disagrees in the parsed document with
+     * nothing dropped at all (`- a\` + newline + `  *bc* d`, no transaction), so it is the
+     * position map's rule for a break's end in an indented container, not the correspondence's
+     * for dropped whitespace. Asserted, never skipped: the position is one whose `nodeBefore` is
+     * a break, whose block sits in a `list_item` or `blockquote`, and whose answer is column 0 of
+     * a line whose own bytes begin with that container's prefix.
+     */
+    function afterBreakInIndentedContainer(seeded: Seeded, pos: number): boolean {
+      // Back over whitespace the conversion dropped: every position of a dropped run answers the
+      // same column (the ownership rule), so the class is the break's wherever in the run the
+      // caret is — the run is what the break's own line start took.
+      let kept = pos;
+      while (kept > seeded.block.start && !seeded.chars.keeps(kept - 1 - seeded.block.start))
+        kept -= 1;
+      const before = seeded.doc.resolve(kept).nodeBefore;
+      if (before === null || before.type !== schema.nodes.hard_break) return false;
+      const $pos = seeded.doc.resolve(pos);
+      let indented = false;
+      for (let depth = $pos.depth; depth > 0; depth -= 1) {
+        const type = $pos.node(depth).type;
+        if (type === schema.nodes.list_item || type === schema.nodes.blockquote) indented = true;
+      }
+      if (!indented) return false;
+      const at = seeded.map.toSource(pos);
+      const line = seeded.text.split("\n")[at.line - 1];
+      expect(at.ch, `the excluded position ${pos} is column 0 of its line`).toBe(0);
+      expect(line, `the excluded position ${pos} is on a prefixed continuation line`).toMatch(
+        /^(?:\s{2,}|> )/,
+      );
+      return true;
+    }
+
+    /** Whether `pos` is a member of the backlog class *and* the two views actually part there. */
+    function excluded(seeded: Seeded, pos: number, parted: boolean): boolean {
+      return parted && afterBreakInIndentedContainer(seeded, pos);
+    }
+
+    /** What one case reached: the dropped characters, and the positions of each kind. */
+    interface Reach {
+      dropped: number[];
+      settled: number[];
+      insideDropped: number[];
+      /** The positions the backlog class above took out of both assertions. */
+      excluded: number[];
+      /** Whether the dropped whitespace is a whole node between two kept ones (a gap). */
+      gap: boolean;
+    }
+
+    /**
+     * The whole of what a case asserts (see the describe's comment): the two views' bytes and the
+     * inverse at every position the map returns to, the ownership rule at every position it does
+     * not, and the inverse over every text position of the document outside this block.
+     */
+    function assertBothViews(seeded: Seeded): Reach {
+      const { doc, text, map, block, chars } = seeded;
+      const reach: Reach = { dropped: [], settled: [], insideDropped: [], excluded: [], gap: false };
+      for (let live = 0; live < chars.liveWidth; live += 1) {
+        if (!chars.keeps(live)) reach.dropped.push(live);
+      }
+      expect(reach.dropped.length, "this seeding drops whitespace the editor holds").toBeGreaterThan(0);
+      reach.gap = reach.dropped.some(
+        (live) => !chars.ranges.some((range) => range.start <= live && live < range.end),
+      );
+      for (let live = 0; live <= chars.liveWidth; live += 1) {
+        const pos = block.start + live;
+        if (insideSurrogatePair(doc, pos)) continue;
+        if (chars.liveOf(chars.offsetOf(live)) === live) reach.settled.push(pos);
+        else reach.insideDropped.push(pos);
+      }
+      for (const pos of reach.settled) {
+        const at = map.toSource(pos);
+        const rendered = typedInRendered(doc, pos);
+        const typed = typedInSource(text, at);
+        const back = map.toRendered(at);
+        if (excluded(seeded, pos, typed !== rendered || back !== pos)) {
+          reach.excluded.push(pos);
+          continue;
+        }
+        expect(typed, `the two views at ${pos} (${at.line}:${at.ch}) of ${JSON.stringify(text)}`).toBe(
+          rendered,
+        );
+        expect(back, `the inverse at ${pos} of ${JSON.stringify(text)}`).toBe(pos);
+      }
+      for (const pos of reach.insideDropped) {
+        const next = block.start + chars.liveOf(chars.offsetOf(pos - block.start));
+        if (excluded(seeded, pos, map.toRendered(map.toSource(pos)) !== next)) {
+          reach.excluded.push(pos);
+          continue;
+        }
+        expect(
+          map.toSource(pos),
+          `the ownership rule at ${pos}: the next kept character's column`,
+        ).toEqual(map.toSource(next));
+        expect(map.toRendered(map.toSource(pos)), `the ownership rule at ${pos}`).toBe(next);
+      }
+      // Every other text position of the document is its own inverse: the transaction touched one
+      // block, and the map is the identity wherever nothing was dropped.
+      const outside = textPositions(doc).filter(
+        (pos) => pos < block.start || pos > block.start + chars.liveWidth,
+      );
+      const failures: number[] = [];
+      for (const pos of outside) {
+        if (map.toRendered(map.toSource(pos)) === pos) continue;
+        if (excluded(seeded, pos, true)) reach.excluded.push(pos);
+        else failures.push(pos);
+      }
+      expect(failures, "the inverse outside the seeded block").toEqual([]);
+      return reach;
+    }
+
+    /** The five inline node classes the whitespace can meet, and the Markdown that spells them. */
+    const NODES = [
+      { node: "plain text", markdown: "bc" },
+      { node: "marked text", markdown: "*bc*" },
+      { node: "inline code", markdown: "`bc`" },
+      { node: "a link's text", markdown: "[bc](u)" },
+      { node: "a run beside an atom", markdown: "![bc](u)" },
+    ];
+
+    /** The astral members: a non-BMP symbol and a non-BMP letter beside the dropped whitespace. */
+    const ASTRAL_NODES = [
+      { node: "a non-BMP symbol", markdown: "\u{1F600}bc" },
+      { node: "a non-BMP letter", markdown: "\u{10400}bc" },
+    ];
+
+    /**
+     * The containers, and how each spells a block of one or two lines. A heading and a table cell
+     * are one line of Markdown each — the parser can put neither a soft nor a hard break in one —
+     * so a class that needs a second line names only the other three (the cell's own line-ending
+     * run is reached by a paste below, which is the only way a cell gets one).
+     */
+    const CONTAINERS = [
+      { container: "paragraph", lines: 2, wrap: (ls: string[]) => `${ls.join("\n")}\n` },
+      { container: "heading", lines: 1, wrap: (ls: string[]) => `# ${ls[0]}\n` },
+      { container: "list item", lines: 2, wrap: (ls: string[]) => `- ${ls.join("\n  ")}\n` },
+      { container: "blockquote", lines: 2, wrap: (ls: string[]) => `> ${ls.join("\n> ")}\n` },
+      {
+        container: "table cell",
+        lines: 1,
+        wrap: (ls: string[]) => `| h1 | h2 |\n| -- | -- |\n| z | ${ls[0]} |\n`,
+      },
+    ];
+
+    /**
+     * The whitespace classes: one per branch of the strip's ownership rule, each with the
+     * keystroke that reaches it and the node classes it can meet.
+     *
+     * `a lead after a hard break` and `a whitespace-only run between two nodes` are the same
+     * keystroke — one space typed at a line start — split by what the space becomes: it merges
+     * into the following text when that node is plain text (a lead inside one node) and stands as
+     * its own node, dropped whole, when it is not (a gap between two kept nodes). Each case
+     * asserts which of the two it reached, and the summary asserts both were.
+     */
+    const CLASSES = [
+      {
+        whitespace: "a lead at the block's start",
+        needs: 1,
+        nodes: [...NODES, ...ASTRAL_NODES],
+        lines: (markdown: string) => [`a ${markdown} d`],
+        // One Delete at the block's start, which leaves the space that followed it leading.
+        seed: (doc: Doc, block: Block) => deleteRange(doc, ...firstCharacter(block)),
+      },
+      {
+        whitespace: "a lead after a hard break",
+        needs: 2,
+        nodes: NODES.slice(0, 1),
+        lines: (markdown: string) => ["a\\", `${markdown} d`],
+        seed: (doc: Doc, block: Block) => typeAt(doc, afterHardBreak(block), " ", []),
+      },
+      {
+        whitespace: "a whitespace-only run between two nodes",
+        needs: 2,
+        nodes: NODES.slice(1),
+        lines: (markdown: string) => ["a\\", `${markdown} d`],
+        seed: (doc: Doc, block: Block) => typeAt(doc, afterHardBreak(block), " ", []),
+      },
+      {
+        whitespace: "a trailing run at the block's end",
+        needs: 1,
+        nodes: NODES,
+        lines: (markdown: string) => [`a ${markdown}`],
+        // Typed with the stored marks an input rule leaves (`[]`), so the space lands *outside*
+        // the node it follows: inside an `inline_code` run or a link's text the strip keeps it
+        // (both are opaque to it), and the class would have no member there.
+        seed: (doc: Doc, block: Block) =>
+          typeAt(doc, block.start + block.node.content.size, " ", []),
+      },
+      {
+        whitespace: "a line-ending run with spaces on both sides (LINE_ENDING)",
+        needs: 2,
+        nodes: NODES,
+        lines: (markdown: string) => [`a ${markdown}`, "d e"],
+        // The two spaces are typed with stored marks `[]` (an input rule's own route), so the one
+        // before the break cannot join the node it follows — the run, not that node, is the case.
+        seed: (doc: Doc, block: Block) => {
+          const at = softLineEnding(block);
+          return typeAt(typeAt(doc, at + 1, " ", []), at, " ", []);
+        },
+      },
+      {
+        whitespace: "a dropped trailing hard break",
+        needs: 2,
+        nodes: NODES,
+        lines: (markdown: string) => [`a ${markdown}\\`, "d"],
+        seed: (doc: Doc, block: Block) =>
+          deleteRange(doc, afterHardBreak(block), block.start + block.node.content.size),
+      },
+    ];
+
+    let cases = 0;
+    let gaps = 0;
+    let insideNodes = 0;
+    let droppedPositions = 0;
+    let excludedPositions = 0;
+    const reached: string[] = [];
+
+    for (const { whitespace, needs, nodes, lines, seed: transact } of CLASSES) {
+      for (const { node, markdown } of nodes) {
+        for (const { container, lines: held, wrap } of CONTAINERS) {
+          if (held < needs) continue;
+          it(`${whitespace}, ${node}, in a ${container}: the two views write the same bytes at every position the map returns to, and a position inside the dropped whitespace is the next kept character's`, () => {
+            const seeded = seed(wrap(lines(markdown)), transact);
+            const reach = assertBothViews(seeded);
+            cases += 1;
+            droppedPositions += reach.insideDropped.length;
+            excludedPositions += reach.excluded.length;
+            if (reach.gap) gaps += 1;
+            else insideNodes += 1;
+            reached.push(`${whitespace} | ${node} | ${container}`);
+          });
+        }
+      }
+    }
+
+    it("a line-ending run with spaces on both sides (CELL_LINE_ENDING): a pasted line ending in a table cell collapses to one space", () => {
+      // A GFM row ends at its line ending, so no cell the parser builds holds one; a paste is the
+      // only route, and `replaceSelection`'s text is what a two-line paste carries in.
+      for (const { node, markdown } of NODES) {
+        const source = `| h1 | h2 |\n| -- | -- |\n| z | a ${markdown} d |\n`;
+        const seeded = seed(source, (doc, block) => typeAt(doc, block.start + 1, " \n ", []));
+        expect(seeded.block.node.type, node).toBe(schema.nodes.table_cell);
+        // The pasted line ending collapses to the one space the cell already held, so the bytes
+        // are the source's own canonical form (whose columns the formatter pads to the header's).
+        expect(seeded.text, node).toBe(format(parse(source)));
+        const reach = assertBothViews(seeded);
+        cases += 1;
+        droppedPositions += reach.insideDropped.length;
+        excludedPositions += reach.excluded.length;
+        if (reach.gap) gaps += 1;
+        else insideNodes += 1;
+        reached.push(`a line-ending run (CELL_LINE_ENDING) | ${node} | table cell`);
+      }
+    });
+
+    it("the ownership rule at the first, middle and last character of a dropped run: all three answer the next kept character, and the run's own three positions come back to it", () => {
+      // Three spaces typed at a line start: a dropped run three characters wide, so the rule's
+      // first, middle and last positions are three different positions of one run.
+      const seeded = seed("a\\\nbc d\n", (doc, block) => typeAt(doc, afterHardBreak(block), "   ", []));
+      const reach = assertBothViews(seeded);
+      expect(reach.dropped).toHaveLength(3);
+      expect(reach.insideDropped).toHaveLength(3);
+      const [first, middle, last] = reach.insideDropped;
+      expect(middle).toBe(first + 1);
+      expect(last).toBe(first + 2);
+      const next = last + 1;
+      expect(reach.settled).toContain(next);
+      for (const pos of [first, middle, last]) {
+        expect(seeded.map.toSource(pos), `dropped position ${pos}`).toEqual(seeded.map.toSource(next));
+        expect(seeded.map.toRendered(seeded.map.toSource(pos)), `dropped position ${pos}`).toBe(next);
+      }
+      // And past the last kept character the rule's other half: the block's end.
+      const end = seeded.block.start + seeded.chars.liveWidth;
+      expect(seeded.map.toRendered(seeded.map.toSource(end))).toBe(end);
+    });
+
+    it("Sol's route (`a `+backtick+`cd`+backtick+` b`, the first character deleted): the caret between `c` and `d` is column 2 on both routes, and the caret before the fence is outside it only when the typed marks are", () => {
+      const seeded = seed("a `cd` b\n", (doc, block) => deleteRange(doc, ...firstCharacter(block)));
+      expect(seeded.text).toBe("`cd` b\n");
+      const start = seeded.block.start;
+      // The reconciliation's own position: between `c` and `d`, which answered column 3 — the
+      // rendered view wrote `` `cXd` b `` and the source view `` `cdX` b ``.
+      expect(seeded.map.toSource(start + 2)).toEqual({ line: 1, ch: 2 });
+      expect(typedInRendered(seeded.doc, start + 2)).toBe("`cXd` b\n");
+      expect(typedInSource(seeded.text, { line: 1, ch: 2 })).toBe("`cXd` b\n");
+      // The position after the stripped lead, both routes. A click leaves `storedMarks` null and
+      // the marks at that boundary are the dropped space's, empty: the caret is before the fence.
+      expect(seeded.map.toSource(start + 1)).toEqual({ line: 1, ch: 0 });
+      expect(typedInRendered(seeded.doc, start + 1)).toBe("X`cd` b\n");
+      // With `inline_code` stored — the toggle's own route — the caret is inside the fence.
+      const inside = [schema.marks.inline_code.create()];
+      expect(seeded.map.toSource(start + 1, inside)).toEqual({ line: 1, ch: 1 });
+      expect(typedInRendered(seeded.doc, start + 1, inside)).toBe("`Xcd` b\n");
+      expect(typedInSource(seeded.text, { line: 1, ch: 1 })).toBe("`Xcd` b\n");
+    });
+
+    it("a mark with no children takes no units of the normalised sequence: with the store's root holding an empty link the editor's document cannot (DevEditor's own shape — the root is the source buffer's, the doc is the editor's), every live position is its own inverse and the text after it is where the source writes it", () => {
+      // The one node class whose width is zero, and the only route to it: `[](u)` is a `link`
+      // with no children, so `mdastToPM` writes nothing for it and the live document holds one
+      // text node where the root holds three children — the walk's zero-width entry, whose end is
+      // its start rather than the kept-character map's end of the unit before it.
+      const { root, doc } = pair("a [](u) bc\n");
+      const text = format(root);
+      const block = targetBlock(doc);
+      expect(block.node.childCount, "the live document holds no trace of the empty link").toBe(1);
+      expect(block.node.textContent).toBe("a  bc");
+      const map = cursorMap(root, doc);
+      for (let live = 0; live <= block.node.content.size; live += 1) {
+        const pos = block.start + live;
+        expect(map.toRendered(map.toSource(pos)), `the inverse at ${pos}`).toBe(pos);
+      }
+      // The zero-width entry does not shift its neighbours: the caret before `bc` answers the
+      // column the source writes `b` at, not one short of it.
+      expect(map.toSource(block.start + 3)).toEqual({ line: 1, ch: text.indexOf("bc") });
+      expect(map.toSource(block.start + 4)).toEqual({ line: 1, ch: text.indexOf("bc") + 1 });
+    });
+
+    it("reached every cell of the enumeration, and both sides of the clause the strip's dropped run has", () => {
+      expect(new Set(reached).size).toBe(reached.length);
+      expect(cases).toBe(reached.length);
+      expect(cases).toBeGreaterThan(90);
+      // Both outcomes: whitespace dropped from *inside* a kept node (a lead in a text run, a
+      // collapsed line-ending run) and whitespace dropped *whole*, leaving a gap between two kept
+      // nodes — the hole in the correspondence the block's-start clause of `toSource` is for.
+      expect(gaps).toBeGreaterThan(0);
+      expect(insideNodes).toBeGreaterThan(0);
+      expect(gaps + insideNodes).toBe(cases);
+      // The excluded positions are the dropped ones, and there is at least one per case.
+      expect(droppedPositions).toBeGreaterThanOrEqual(cases);
+      // The backlog class above is reached, and it is a minority of what the enumeration asserts.
+      expect(excludedPositions).toBeGreaterThan(0);
+      expect(excludedPositions).toBeLessThan(droppedPositions);
+    });
+  });
+
 });
 
 describe("canonicalCursor: a live source buffer that is not canonical (task 1.16)", () => {
