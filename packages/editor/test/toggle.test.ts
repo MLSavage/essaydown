@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import type { Root } from "mdast";
+import type { Root, Yaml } from "mdast";
 import {
   COALESCE_WINDOW_MS,
   canRedo,
@@ -1413,10 +1413,11 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
     doc: ReturnType<typeof mdastToPM>["doc"],
     pos: number,
     storedMarks: readonly Mark[] | null = null,
+    frontMatter: Yaml | null = null,
   ): string {
     const marks = storedMarks ?? doc.resolve(pos).marks();
     const tr = EditorState.create({ doc }).tr.replaceWith(pos, pos, schema.text("X", marks));
-    return format(pmToMdast({ doc: tr.doc, frontMatter: null }));
+    return format(pmToMdast({ doc: tr.doc, frontMatter }));
   }
 
   /** `X` at `position` in `text`, reparsed and formatted: what the source view's keystroke yields. */
@@ -1655,6 +1656,372 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
         });
       }
     }
+  });
+
+  /**
+   * **The block-edge rule** (DECISIONS #review-1-r8 N1, Sol finding 1). The family above and
+   * 1.60's both stop at a *leaf*: a boundary between two inline nodes, and the one leaf whose
+   * own inside a typed character can join. At a block's **start** and at its **end** there is no
+   * boundary — one side has no node at all — `isLeafEnd` is `false` for a `text` leaf, and the
+   * answer was the innermost text's own spelling-table end, inside every enclosing delimiter,
+   * whatever the typed marks said. The invariant this family asserts is one sentence:
+   *
+   * > at a block's edge the source caret is outside every enclosing mark the typed marks do not
+   * > carry and inside every one they do — from the innermost mark outward, stopping at the
+   * > first mark the typed marks carry.
+   *
+   * The typed marks are `storedMarks ?? $pos.marks()` ({@link typedInRendered} types with the
+   * same expression), so the two routes a caret arrives by are the two columns of the matrix:
+   *
+   * - **the click route** (`storedMarks` `null`): `$pos.marks()` at an edge keeps every mark the
+   *   text carries whose spec does not say `inclusive: false`, so `emphasis`, `strong` and
+   *   `delete` are carried and the caret stays inside them — and `link` is not, on this route
+   *   too, so a block that begins or ends in a link leaves it (the reconciliation's own find at
+   *   `link-in-emphasis.md`, which no reviewer had);
+   * - **the input-rule route** (`storedMarks` `[]`): `removeStoredMark` (`input.ts`) leaves it
+   *   there the keystroke after a run closes, so no mark is carried, the caret leaves every
+   *   enclosing one, and `see *foo*` + `X` is `see *foo*X` in both views instead of the
+   *   `see *fooX*` the source view wrote before this task.
+   *
+   * The axes: mark kind (`emphasis`, `strong`, `delete`, `link`) × route × edge (start, end) ×
+   * block kind (paragraph, heading, list item, blockquote, table cell), then one astral content
+   * per mark kind (a non-BMP symbol and a non-BMP letter, CLAUDE.md's rule — held away from the
+   * run's own edges, where a punctuation neighbour is the `[1.53]` class and not this one), the
+   * nested member (stored `[emphasis]` at the end of `*foo **bar***`, which is after `**` and
+   * before `*`), and a block-final inline-code run as the control the rule does not touch.
+   *
+   * Each guard asserts the column (computed from the source's own bytes by `indexOf`, never a
+   * literal offset), the two views' bytes by `toBe`, that the parse of the rendered bytes holds
+   * the run with exactly the text the caret's side implies, that the rendered bytes are a fixed
+   * point of `parse ∘ format`, and the inverse over every text position of the document.
+   */
+  describe("at a block's edge the caret is outside every enclosing mark the typed marks do not carry", () => {
+    /** A mark kind: the bytes the serializer writes around its content, and its mdast type. */
+    const MARKS: Record<string, { open: string; close: string }> = {
+      emphasis: { open: "*", close: "*" },
+      strong: { open: "**", close: "**" },
+      delete: { open: "~~", close: "~~" },
+      link: { open: "[", close: "](u)" },
+    };
+
+    /**
+     * The five block kinds the editor has a textblock for, each holding `run` as its whole
+     * content so that the run's own delimiters are the block's two edges. The table's header is
+     * padded to the run's width because that is what the serializer writes (`format` pads a
+     * column to its widest cell), so the source stays canonical without a literal.
+     */
+    const BLOCKS: Record<string, (run: string) => string> = {
+      paragraph: (run) => `${run}\n`,
+      heading: (run) => `# ${run}\n`,
+      "list item": (run) => `- ${run}\n`,
+      blockquote: (run) => `> ${run}\n`,
+      "table cell": (run) =>
+        `| ${"h".padEnd(run.length)} |\n| ${"-".repeat(run.length)} |\n| ${run} |\n`,
+    };
+
+    const ROUTES: Record<string, readonly Mark[] | null> = {
+      "the click route (no stored marks)": null,
+      "the input-rule route (stored marks `[]`)": [],
+    };
+
+    /**
+     * The document's last textblock, as the two positions this family is about: its content start
+     * and its content end. Both are read off the doc and never written as a literal.
+     */
+    function lastTextblockEdges(
+      doc: ReturnType<typeof mdastToPM>["doc"],
+    ): { start: number; end: number } {
+      let edges: { start: number; end: number } | null = null;
+      doc.descendants((node, pos) => {
+        if (node.isTextblock && node.content.size > 0)
+          edges = { start: pos + 1, end: pos + 1 + node.content.size };
+        return true;
+      });
+      expect(edges).not.toBeNull();
+      return edges as unknown as { start: number; end: number };
+    }
+
+    /**
+     * One guard of the matrix. `content` is the run's text, `carried` says whether the typed
+     * marks carry this mark at this edge — which is exactly "the route inherits the document's
+     * marks and the mark is not `link`", `link` being the one mark of the schema whose spec says
+     * `inclusive: false` (`schema.ts`), dropped by `$pos.marks()` at an edge on both routes.
+     */
+    function assertEdge(
+      kind: string,
+      blockKind: string,
+      content: string,
+      edge: "start" | "end",
+      storedMarks: readonly Mark[] | null,
+    ): void {
+      const { open, close } = MARKS[kind];
+      const run = `${open}${content}${close}`;
+      const source = BLOCKS[blockKind](run);
+      const { root, doc } = pair(source);
+      expect(format(root)).toBe(source);
+      const map = cursorMap(root, doc);
+      const carried = storedMarks === null && kind !== "link";
+
+      const lines = source.split("\n");
+      const line = lines.findIndex((text) => text.includes(run)) + 1;
+      expect(line).toBeGreaterThan(0);
+      const runAt = lines[line - 1].indexOf(run);
+      const ch =
+        edge === "end"
+          ? runAt + (carried ? open.length + content.length : run.length)
+          : runAt + (carried ? open.length : 0);
+
+      const edges = lastTextblockEdges(doc);
+      const pos = edge === "end" ? edges.end : edges.start;
+      const at = { line, ch };
+      expect(map.toSource(pos, storedMarks)).toEqual(at);
+
+      const rendered = typedInRendered(doc, pos, storedMarks);
+      expect(typedInSource(source, at)).toBe(rendered);
+      // Which side of the delimiter the bytes put the letter on, read as the run's own text.
+      const inside = edge === "end" ? `${content}X` : `X${content}`;
+      expect(runsOf(parse(rendered), kind)).toEqual([carried ? inside : content]);
+      expect(format(parse(rendered))).toBe(rendered);
+      assertInverseEverywhere(doc, map);
+    }
+
+    for (const kind of Object.keys(MARKS)) {
+      for (const [route, storedMarks] of Object.entries(ROUTES)) {
+        for (const edge of ["start", "end"] as const) {
+          for (const blockKind of Object.keys(BLOCKS)) {
+            const carried = storedMarks === null && kind !== "link";
+            it(`${kind}, ${route}, the block's ${edge}, ${blockKind}: the caret is ${carried ? "inside" : "outside"} the delimiter, and the two views agree byte for byte`, () => {
+              assertEdge(kind, blockKind, "foo", edge, storedMarks);
+            });
+          }
+        }
+      }
+    }
+
+    // One astral content per mark kind, a non-BMP symbol and a non-BMP letter (CLAUDE.md: a lone
+    // surrogate decodes to U+FFFD silently, so an enumeration that is only ASCII cannot see it).
+    // The astral scalar sits *between* the run's own edges: an astral neighbour of a delimiter is
+    // CommonMark punctuation, which is the `[1.53]` encoded-neighbour class and not this one.
+    const ASTRAL: Record<string, string> = {
+      "a non-BMP symbol": "f\u{1F600}o",
+      "a non-BMP letter": "f\u{10400}o",
+    };
+    for (const kind of Object.keys(MARKS)) {
+      for (const [astral, content] of Object.entries(ASTRAL)) {
+        for (const [route, storedMarks] of Object.entries(ROUTES)) {
+          for (const edge of ["start", "end"] as const) {
+            it(`${kind} with ${astral} content (${JSON.stringify(content)}), ${route}, the block's ${edge}: the caret lands on the same side of the delimiter as the ASCII member`, () => {
+              assertEdge(kind, "paragraph", content, edge, storedMarks);
+            });
+          }
+        }
+      }
+    }
+
+    it("nested runs, stored marks `[emphasis]` at the end of `*foo **bar***`: the caret stops at the first carried mark — after `**`, before `*` — because a caret cannot be outside the strong and inside the emphasis at once", () => {
+      const source = "*foo **bar***\n";
+      const { root, doc } = pair(source);
+      expect(format(root)).toBe(source);
+      const map = cursorMap(root, doc);
+      const end = 1 + "foo bar".length;
+      // The document's own marks at that position are both; the stored set is the emphasis only.
+      expect(doc.resolve(end).marks().map((m) => m.type.name).sort()).toEqual([
+        "emphasis",
+        "strong",
+      ]);
+      const stored = doc.resolve(end).marks().filter((m) => m.type === schema.marks.emphasis);
+      expect(stored.map((m) => m.type.name)).toEqual(["emphasis"]);
+
+      const at = { line: 1, ch: source.indexOf("***") + "**".length };
+      expect(map.toSource(end, stored)).toEqual(at);
+      const rendered = typedInRendered(doc, end, stored);
+      expect(typedInSource(source, at)).toBe(rendered);
+      expect(rendered).toBe("*foo **bar**X*\n");
+      expect(runsOf(parse(rendered), "emphasis")).toEqual(["foo barX"]);
+      expect(runsOf(parse(rendered), "strong")).toEqual(["bar"]);
+      expect(format(parse(rendered))).toBe(rendered);
+      assertInverseEverywhere(doc, map);
+    });
+
+    it("the control: a block-final `inline_code` run has no enclosing mark, so the block-edge rule does not fire and 1.60's answer stands on both routes", () => {
+      const source = "see `foo`\n";
+      const { root, doc } = pair(source);
+      const map = cursorMap(root, doc);
+      const end = 1 + "see foo".length;
+      expect(map.toSource(end)).toEqual({ line: 1, ch: "see `foo".length });
+      expect(map.toSource(end, [])).toEqual({ line: 1, ch: "see `foo`".length });
+      expect(typedInSource(source, map.toSource(end))).toBe(typedInRendered(doc, end));
+      expect(typedInSource(source, map.toSource(end, []))).toBe(typedInRendered(doc, end, []));
+      assertInverseEverywhere(doc, map);
+    });
+  });
+
+  /**
+   * **The block-edge rule over the corpus** (DECISIONS #review-1-r8 N1). The matrix above is
+   * hand-built; this is the invariant itself, asserted over every fixture in
+   * `fixtures/markdown/index.json`: at every textblock's start and its end, on both routes, the
+   * bytes the rendered view writes for a letter typed there and the bytes the source view writes
+   * at the mapped column are the same string.
+   *
+   * **What is not in the leg.** A fenced code block is a textblock in the schema and its interior
+   * is outside this leg, as it is outside 1.52's: the map places a `code` node and never enters
+   * it, so a position inside one is not a caret among inline marks. A zero-width textblock (the
+   * placeholder `block+` needs, which no correspondence covers) has no inline node on either
+   * side, so it has no edge in this sense and no enclosing mark either.
+   *
+   * **The two named exclusions, each positively bounded and each asserted non-empty** (DECISIONS
+   * #032: never a test marked as expected to fail, never a narrowing). A position the leg
+   * excludes is asserted to *be* a member of its class and to actually disagree; every other
+   * position is asserted to agree.
+   *
+   * 1. `[1.53, a raw source keystroke before a punctuation-edged run]`, the after side
+   *    (DECISIONS #review-1-r8 N8). On the `[]` route at a block end whose last inline node
+   *    carries one of the three flanking marks and whose last code point is CommonMark
+   *    punctuation, the caret leaves the run and the two views part company for a reason that is
+   *    not the cursor map's: the rendered view keeps the run by writing the letter as a character
+   *    reference (`a ~~(b)~~&#x58;`, the encoded-neighbour rule of tasks 1.45/1.49 — `~~` before
+   *    a letter and after punctuation is not right-flanking, CommonMark §6.2), while the raw
+   *    keystroke in the source view dissolves the run (`a \~\~(b)\~\~X`). The caret is in the
+   *    same place in both; only the bytes differ, and which bytes each view writes is each view's
+   *    own rule. In scope for this leg only as a bounded member.
+   * 2. **Found by this leg, outside this task's scope** and filed in `docs/V1.1-BACKLOG.md` with
+   *    a revisit trigger: the block-*start* twin of 1.60's block-end inline-code rule. On the
+   *    `[]` route at a block start whose first inline node is an `inline_code` run and carries no
+   *    other mark, the rendered view types plain text *before* the span while `toSource` answers
+   *    inside the run's value — `isLeafEnd` (`toggle.ts`) is a rule for a leaf's *end* and has no
+   *    start twin, and this task's rule is about the marks *enclosing* a leaf, which a run at a
+   *    block's start has none of. Three positions in two fixtures.
+   */
+  describe("the block-edge rule over the corpus", () => {
+    const index = fixtureIndex();
+    const names = Object.keys(index);
+
+    /**
+     * CommonMark's punctuation, `Intl`-free: the Unicode punctuation and symbol categories, which
+     * is what `micromark-util-classify-character` reads (`classifyCharacter`'s
+     * `unicodePunctuation`) and what decides whether a closing `~~` is right-flanking.
+     */
+    const PUNCTUATION = /[\p{P}\p{S}]/u;
+
+    /** The three marks that flank with a delimiter run; `link` writes `[…](…)` and does not. */
+    const FLANKING = ["emphasis", "strong", "delete"];
+
+    interface Edge {
+      readonly pos: number;
+      readonly edge: "start" | "end";
+    }
+
+    /** Every non-empty textblock's content start and content end, except a fenced code block's. */
+    function inlineEdges(doc: ReturnType<typeof mdastToPM>["doc"]): Edge[] {
+      const out: Edge[] = [];
+      doc.descendants((node, pos) => {
+        if (node.type === schema.nodes.code_block) return false;
+        if (node.isTextblock && node.content.size > 0) {
+          out.push({ pos: pos + 1, edge: "start" });
+          out.push({ pos: pos + 1 + node.content.size, edge: "end" });
+        }
+        return true;
+      });
+      return out;
+    }
+
+    function markNames(node: ReturnType<typeof mdastToPM>["doc"] | null): string[] {
+      return node === null ? [] : node.marks.map((mark) => mark.type.name);
+    }
+
+    /** Exclusion 1: the `[1.53]` class's after side — a punctuation-edged flanking run at a block end. */
+    function isPunctuationEdgedRunEnd(
+      doc: ReturnType<typeof mdastToPM>["doc"],
+      { pos, edge }: Edge,
+      storedMarks: readonly Mark[] | null,
+    ): boolean {
+      if (edge !== "end" || storedMarks === null) return false;
+      const before = doc.resolve(pos).nodeBefore;
+      if (before === null || !before.isText) return false;
+      if (!markNames(before).some((name) => FLANKING.includes(name))) return false;
+      const last = [...(before.text as string)].pop();
+      return last !== undefined && PUNCTUATION.test(last);
+    }
+
+    /** Exclusion 2: the block-start twin of 1.60's leaf rule — a bare `inline_code` run first. */
+    function isInlineCodeRunStart(
+      doc: ReturnType<typeof mdastToPM>["doc"],
+      { pos, edge }: Edge,
+      storedMarks: readonly Mark[] | null,
+    ): boolean {
+      if (edge !== "start" || storedMarks === null) return false;
+      return markNames(doc.resolve(pos).nodeAfter).join(",") === "inline_code";
+    }
+
+    const punctuationEdged: string[] = [];
+    const inlineCodeStarts: string[] = [];
+    const fixturesWithEdges: string[] = [];
+    const fixturesWithoutEdges: string[] = [];
+    let agreements = 0;
+
+    // The essay fixture alone carries a few hundred edges, and every one of them serialises the
+    // whole document twice (the rendered view's `format ∘ pmToMdast` and the source view's
+    // `format ∘ parse`), so the leg is given a minute rather than the file's 5 s default.
+    it.each(names)("%s: at every textblock edge, on both routes, the two views write the same bytes", (name) => {
+      const source = fixture(name);
+      const { root } = pair(source);
+      const { doc, frontMatter } = mdastToPM(root);
+      const text = format(root);
+      const map = cursorMap(root, doc);
+      const edges = inlineEdges(doc);
+      (edges.length > 0 ? fixturesWithEdges : fixturesWithoutEdges).push(name);
+
+      for (const edge of edges) {
+        for (const storedMarks of [null, [] as readonly Mark[]]) {
+          const at = map.toSource(edge.pos, storedMarks);
+          const where = `${name} ${edge.edge} ${storedMarks === null ? "click" : "[]"} ${at.line}:${at.ch}`;
+          const rendered = typedInRendered(doc, edge.pos, storedMarks, frontMatter);
+          const typed = typedInSource(text, at);
+
+          if (isPunctuationEdgedRunEnd(doc, edge, storedMarks)) {
+            // Positively bounded: the views disagree, the rendered view wrote the letter as a
+            // character reference on that line, and the source view wrote the raw keystroke.
+            expect(typed, where).not.toBe(rendered);
+            expect(rendered.split("\n")[at.line - 1], where).toMatch(/&#x58;$/);
+            expect(typed.split("\n")[at.line - 1], where).toMatch(/X$/);
+            punctuationEdged.push(where);
+            continue;
+          }
+          if (isInlineCodeRunStart(doc, edge, storedMarks)) {
+            // Positively bounded: the views disagree, and the mapped column is *inside* the code
+            // span — past its opening fence, which is the whole of the defect.
+            expect(typed, where).not.toBe(rendered);
+            const line = text.split("\n")[at.line - 1];
+            expect(line.slice(0, at.ch), where).toMatch(/`+$/);
+            inlineCodeStarts.push(where);
+            continue;
+          }
+          expect(typed, where).toBe(rendered);
+          agreements += 1;
+        }
+      }
+    }, 60_000);
+
+    it("ran the leg over every fixture in the index, and both sides of every clause were reached", () => {
+      expect(names.length).toBeGreaterThan(40);
+      expect([...fixturesWithEdges, ...fixturesWithoutEdges].sort()).toEqual([...names].sort());
+      // The presence/absence pair the per-fixture assertion cannot make: most fixtures have an
+      // inline textblock, and the ones that are nothing but a fenced code block have none — the
+      // leg's own statement that a fence's interior is outside it.
+      expect(fixturesWithEdges.length).toBeGreaterThan(0);
+      expect(fixturesWithoutEdges.length).toBeGreaterThan(0);
+      // The positive side: the overwhelming majority of edges agree byte for byte.
+      expect(agreements).toBeGreaterThan(0);
+      // Exclusion 1 is non-empty and lives in more than one fixture (the reconciliation counted
+      // eight positions in six fixtures); the count itself is read from the run, never asserted
+      // as a literal, and is recorded in the journal.
+      expect(punctuationEdged.length).toBeGreaterThan(0);
+      expect(new Set(punctuationEdged.map((where) => where.split(" ")[0])).size).toBeGreaterThan(1);
+      // Exclusion 2 is non-empty too — the class this leg found outside the task's scope.
+      expect(inlineCodeStarts.length).toBeGreaterThan(0);
+      // …and neither exclusion swallowed the leg: agreements outnumber them by far.
+      expect(agreements).toBeGreaterThan(punctuationEdged.length + inlineCodeStarts.length);
+    });
   });
 
   it("a one-character marked first run (`*a* y`, DECISIONS #031 (a)): a letter typed after `a` in the rendered view lands inside the run, and the source caret after it satisfies the letter leg's `ch - 1` model", () => {

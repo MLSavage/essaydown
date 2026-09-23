@@ -440,6 +440,14 @@ export interface CursorMap {
    * the end of a block-final `inlineCode` run is inside the span or after its closing fence
    * ({@link isLeafEnd}). Omitted — the document alone — the answer is the resolved marks', which
    * is what a caret placed by a click or an arrow key takes.
+   *
+   * At a block's **start** and at its **end** — the two positions with no inline node on one
+   * side, so no boundary and no later node — those same marks decide how far out of the marks
+   * enclosing the innermost leaf the source caret sits: outside every enclosing mark they do not
+   * carry and inside every one they do, from the innermost outward, stopping at the first
+   * carried mark ({@link markEdgePoint}, {@link blockEdge}; DECISIONS #review-1-r8 N1). They are
+   * `Transaction.insertText`'s own `storedMarks ?? $from.marks()`, prosemirror-state 1.4.4,
+   * `dist/index.js` 627–644.
    */
   toSource(pos: number, storedMarks?: readonly Mark[] | null): SourcePosition;
   /**
@@ -500,6 +508,11 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
       if (inside !== null) {
         const range = map.ranges[inside.path];
         const table = spellings[inside.path];
+        const edge = blockEdge(doc, pos, marks);
+        if (edge !== null) {
+          const outside = markEdgePoint(entries, map, inside, pos, marks ?? [], edge);
+          if (outside !== null) return outside;
+        }
         if (range !== undefined && isLeafEnd(inside, pos, boundary, table !== undefined, marks)) {
           return { line: range.endLine, ch: range.endCol - 1 };
         }
@@ -568,6 +581,102 @@ function isLeafEnd(
   if (!hasTable) return true;
   if (boundary !== null) return false;
   return !(marks ?? []).some((mark) => mark.type === schema.marks.inline_code);
+}
+
+/**
+ * Which edge of a textblock `pos` is, when it is one: `"start"` when no inline node is before it,
+ * `"end"` when none is after it, `null` everywhere else — inside the block (a node on each side,
+ * which is {@link inlineBoundary}'s case), in an empty block (neither side has one, so there is
+ * no enclosing mark to be inside or outside of), and at every position that is not a textblock
+ * position at all (`marks` is `null` there).
+ */
+function blockEdge(
+  doc: PMNode,
+  pos: number,
+  marks: readonly Mark[] | null,
+): "start" | "end" | null {
+  if (marks === null) return null;
+  const $pos = doc.resolve(pos);
+  const before = $pos.nodeBefore;
+  const after = $pos.nodeAfter;
+  if (before !== null && after === null) return "end";
+  if (before === null && after !== null) return "start";
+  return null;
+}
+
+/** The mark entries enclosing `inside` that cover `pos`, innermost first (`entries` is pre-order). */
+function enclosingMarks(
+  entries: readonly Correspondence[],
+  inside: Correspondence,
+  pos: number,
+): Correspondence[] {
+  const out: Correspondence[] = [];
+  for (const entry of entries) {
+    if (!isMark(entry.node.type)) continue;
+    if (!inside.path.startsWith(`${entry.path}.`)) continue;
+    if (entry.pmStart > pos || entry.pmEnd < pos) continue;
+    out.push(entry);
+  }
+  return out.reverse();
+}
+
+/**
+ * **The block-edge rule (DECISIONS #review-1-r8 N1).** At a block's edge the source caret is
+ * *outside* every enclosing mark the typed marks do not carry and *inside* every one they do,
+ * taken from the innermost mark outward and stopping at the first mark the typed marks carry;
+ * this answers the range of the outermost mark of that leading uncarried run — its end at the
+ * block's `"end"` edge (past `*`, `~~`, a link's `](url)`), its start at the block's `"start"`
+ * edge (before `*`, before `[`) — and `null` when the innermost enclosing mark is carried, or
+ * when there is no enclosing mark, which leaves every other position exactly as it was.
+ *
+ * **Why both edges and no other position.** Inside a block a position has an inline node on each
+ * side and {@link innermostAt} already decides which of the two owns it from the same marks
+ * (task 1.53). At an edge one side is empty, so no boundary exists, {@link isLeafEnd} is `false`
+ * for a `text` leaf, and the answer was the innermost text's own spelling-table end — inside
+ * every enclosing delimiter, whatever the typed marks say. The marks are the only thing left to
+ * read, and they are `storedMarks ?? $pos.marks()` ({@link typedMarks}), the expression
+ * `Transaction.insertText` gives an inserted character, read in prosemirror-state 1.4.4,
+ * `dist/index.js` 627–644 (the `insertText` path for the empty range a keystroke replaces; the
+ * `replaceSelectionWith` twin at 609–615 is the same two in the same order). Both routes to a
+ * caret are covered by that one expression: an input rule's `removeStoredMark` leaves stored
+ * marks `[]`, so the character after `see *foo*` is plain and the caret belongs after the `*`,
+ * while a click leaves `storedMarks` `null` and `$pos.marks()` keeps every inclusive mark the
+ * text carries, so the caret stays inside — and drops a `link`, whose spec says
+ * `inclusive: false` (`schema.ts`), on *both* routes, which is why a block that begins or ends
+ * in a link leaves it on either side.
+ *
+ * **The nesting order.** The marks of a nested run are a set, and the delimiters are not: a
+ * caret cannot be outside `**` and inside `*` at once, so the walk stops at the first carried
+ * mark rather than skipping it. `*foo **bar**` at its end with stored marks `[emphasis]` is
+ * after `**` and before `*` — `*foo **bar**X*` — and with stored marks `[]` it is past both.
+ * The schema's mark names are the mdast node types (`emphasis`, `strong`, `delete`, `link`), so
+ * a mark entry is carried exactly when some typed mark has its `type.name`.
+ *
+ * An inline leaf's own rule — an atom's end, an `inlineCode` run's fence ({@link isLeafEnd},
+ * tasks 1.52 and 1.60) — is unchanged and decides the leaf; this rule only says how far out of
+ * the marks *around* that leaf the caret then sits, and does not fire at all when the innermost
+ * enclosing mark is one the typed marks carry.
+ */
+function markEdgePoint(
+  entries: readonly Correspondence[],
+  map: PositionMap,
+  inside: Correspondence,
+  pos: number,
+  marks: readonly Mark[],
+  edge: "start" | "end",
+): SourcePosition | null {
+  const carried = new Set(marks.map((mark) => mark.type.name));
+  let outermost: Correspondence | null = null;
+  for (const entry of enclosingMarks(entries, inside, pos)) {
+    if (carried.has(entry.node.type)) break;
+    outermost = entry;
+  }
+  if (outermost === null) return null;
+  const range = map.ranges[outermost.path];
+  if (range === undefined) return null;
+  return edge === "end"
+    ? { line: range.endLine, ch: range.endCol - 1 }
+    : { line: range.startLine, ch: range.startCol - 1 };
 }
 
 /**

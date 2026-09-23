@@ -356,10 +356,36 @@ function positionOf(node: Nodes, at: string): NonNullable<Nodes["position"]> {
 
 /** The last leaf of a reparsed node, or the node itself when it has no children. */
 function lastLeaf(node: Nodes): Nodes {
+  const chain = lastLeafChain(node);
+  return chain[chain.length - 1];
+}
+
+/**
+ * The `link` the last leaf of `node` sits directly in, or `null` — the one mark of the schema
+ * whose spec says `inclusive: false`, so the one the click route's typed marks drop at a block's
+ * end and the one the cursor there is outside of (DECISIONS #review-1-r8 N1). A link further out
+ * than the leaf's own parent is not it: the mark between them is carried, and the cursor stops
+ * inside that one.
+ */
+function enclosingLinkOfLastLeaf(node: Nodes): Nodes | null {
+  const chain = lastLeafChain(node);
+  const parent = chain[chain.length - 2];
+  return parent !== undefined && parent.type === "link" ? parent : null;
+}
+
+/**
+ * The chain from `node` down to its last leaf — `node` first, the leaf last — so a caller can see
+ * what *encloses* that leaf and not only the leaf. The block-edge rule (DECISIONS #review-1-r8
+ * N1) is about exactly that: which enclosing mark the cursor at a block's end sits outside of.
+ */
+function lastLeafChain(node: Nodes): Nodes[] {
+  const chain: Nodes[] = [node];
   let current: Nodes = node;
-  while ("children" in current && current.children.length > 0)
+  while ("children" in current && current.children.length > 0) {
     current = current.children[current.children.length - 1] as Nodes;
-  return current;
+    chain.push(current);
+  }
+  return chain;
 }
 
 /** Whether `path` is `ancestor` itself or lies below it. */
@@ -507,6 +533,19 @@ function pairWithEntries(
  * inside the fences the value's last occurrence ends where the value ends — whatever padding
  * space the serializer wrote after it is the rest. A block with no content (a cell emptied by
  * the deletion) has no bytes of its own, and its place is the point the map keeps for it.
+ *
+ * **The link branch (DECISIONS #review-1-r8 N1).** The leaf is not the whole story when a mark
+ * encloses it: this leg's cursor is the click route's (`toSource` with no stored marks), whose
+ * typed marks are `doc.resolve(pos).marks()`, and at a block's end that set drops `link` and
+ * nothing else — `link` is the one mark whose spec says `inclusive: false` (`schema.ts`), and
+ * every other mark of the schema is inclusive, so the resolved set keeps it. So when the last
+ * leaf's own parent is a `link` the cursor is *outside* that link, and the bytes of its
+ * `](destination "title")` tail — or, for an autolink, its closing `>` — are taken off nothing:
+ * micromark's `position.end` of the **link** is already one past them, so the link's own end is
+ * the answer, exactly as a text leaf's end is inside an enclosing `*` or `~~` (those marks are
+ * carried, and the cursor stays inside them). A `link` deeper than the leaf's parent — a link
+ * around an emphasis around the text — is not this branch: the emphasis is carried, the cursor
+ * stops inside it, and the text leaf's own end is right.
  */
 function byteEndOf(
   entry: PositionEntry,
@@ -516,6 +555,11 @@ function byteEndOf(
 ): { line: number; ch: number } {
   if (!("children" in reparsed) || reparsed.children.length === 0)
     return { line: entry.startLine, ch: entry.startCol - 1 };
+  const enclosingLink = enclosingLinkOfLastLeaf(reparsed);
+  if (enclosingLink !== null) {
+    const linkEnd = positionOf(enclosingLink, at);
+    return { line: linkEnd.end.line, ch: linkEnd.end.column - 1 };
+  }
   const last = lastLeaf(reparsed);
   const position = positionOf(last, at);
   if (last.type !== "inlineCode") return { line: position.end.line, ch: position.end.column - 1 };
@@ -687,6 +731,8 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
    */
   let blocksEndingPastCorrespondence = 0;
   let splitParagraphsPastCorrespondence = 0;
+  /** The link branch's reach: blocks whose cursor the block-edge rule put outside a link (N1). */
+  let blocksEndingOutsideALink = 0;
   /** The mark's-neighbour clause's reach: fixtures with a neighbour, and encoded neighbours. */
   const fixturesWithMarkNeighbours: string[] = [];
   let markNeighboursChecked = 0;
@@ -822,11 +868,29 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
         if (width < node.content.size) blocksEndingPastCorrespondence += 1;
         else {
           // The bytes themselves: the character before the cursor is the block's last character
-          // (nothing was dropped, so the editor's last character is the one the bytes end in).
+          // (nothing was dropped, so the editor's last character is the one the bytes end in) —
+          // unless the block-edge rule put the cursor outside an enclosing `link` (N1), where the
+          // bytes before it are that link's whole `[text](destination)` (or autolink `<…>`) and
+          // the editor's last character is the last character of its text, inside them. Both
+          // sides are read off the link's own bytes, never spelled as a literal `)` or `>`.
           const last = lastCharacterOf(node);
           if (last !== null) {
             const line = lines[expected.line - 1];
-            expect(line.slice(expected.ch - last.length, expected.ch), at).toBe(last);
+            const enclosingLink = enclosingLinkOfLastLeaf(reparsed.get(entry.path) as Nodes);
+            if (enclosingLink === null) {
+              expect(line.slice(expected.ch - last.length, expected.ch), at).toBe(last);
+            } else {
+              const linkAt = positionOf(enclosingLink, at);
+              const bytes = text.slice(
+                linkAt.start.offset as number,
+                linkAt.end.offset as number,
+              );
+              expect(line.slice(expected.ch - bytes.length, expected.ch), at).toBe(bytes);
+              expect(bytes, `${at}: the link's bytes hold the editor's last character`).toContain(
+                last,
+              );
+              blocksEndingOutsideALink += 1;
+            }
           }
         }
         expect(cursors.toSource(end), at).toEqual(expected);
@@ -889,6 +953,10 @@ describe("the position-map round-trip family, seeded from the editor's own outpu
     // deletion exists to build), and an item the split gave an empty second paragraph.
     expect(blocksEndingPastCorrespondence).toBeGreaterThan(0);
     expect(splitParagraphsPastCorrespondence).toBeGreaterThan(0);
+    // The oracle's link branch (DECISIONS #review-1-r8 N1) is reached by the corpus too: some
+    // changed block ends in a link, so the cursor sits past its `](destination)` tail and the
+    // byte clause read the link's own bytes rather than the block's last character.
+    expect(blocksEndingOutsideALink).toBeGreaterThan(0);
   });
 
   it("ran the mark's-neighbour clause over every fixture in the index, and the corpus reached an encoded neighbour — strikethrough-punctuation.md among the fixtures with one", () => {
