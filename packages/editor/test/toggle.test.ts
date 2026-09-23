@@ -13,7 +13,7 @@ import {
   type Sidecar,
 } from "@essaydown/core";
 import { EditorState as CMState, type TransactionSpec } from "@codemirror/state";
-import type { Mark } from "prosemirror-model";
+import type { Mark, Node as PMNode } from "prosemirror-model";
 import { EditorState, Selection, TextSelection } from "prosemirror-state";
 import {
   CELL_LINE_ENDING,
@@ -23,6 +23,7 @@ import {
   pmToMdast,
   schema,
 } from "../src/schema.js";
+import { blockAlone, type BlockAlone } from "./block-alone";
 import {
   bindProseMirror,
   createDocumentStore,
@@ -1916,6 +1917,8 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
     interface Edge {
       readonly pos: number;
       readonly edge: "start" | "end";
+      /** The textblock's own position (before the node), what {@link blockAlone} cuts around. */
+      readonly blockPos: number;
     }
 
     /** Every non-empty textblock's content start and content end, except a fenced code block's. */
@@ -1924,8 +1927,8 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       doc.descendants((node, pos) => {
         if (node.type === schema.nodes.code_block) return false;
         if (node.isTextblock && node.content.size > 0) {
-          out.push({ pos: pos + 1, edge: "start" });
-          out.push({ pos: pos + 1 + node.content.size, edge: "end" });
+          out.push({ pos: pos + 1, edge: "start", blockPos: pos });
+          out.push({ pos: pos + 1 + node.content.size, edge: "end", blockPos: pos });
         }
         return true;
       });
@@ -1965,32 +1968,72 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
     const fixturesWithEdges: string[] = [];
     const fixturesWithoutEdges: string[] = [];
     let agreements = 0;
+    /** Every edge × route pair the block-alone oracle answered and bridged back to the document. */
+    let edgesBridged = 0;
 
-    // The essay fixture alone carries a few hundred edges, and every one of them serialises the
-    // whole document twice (the rendered view's `format ∘ pmToMdast` and the source view's
-    // `format ∘ parse`), so the leg is given a minute rather than the file's 5 s default.
+    /**
+     * DECISIONS #review-1-r9 CI timing, task 1.66: the same defect and the same fix as task 1.64's
+     * (`block-alone.ts`'s own doc comment) — the essay fixture's few hundred edges, each compared
+     * on the whole document twice (the rendered view's `format ∘ pmToMdast` and the source view's
+     * `format ∘ parse`), cost 7.8 s in this container and 60–96 s on GitHub's ubuntu and windows
+     * runners, over the one-minute budget the leg gave itself. A correspondence at a textblock's
+     * edge is block-local, so {@link blockAlone} answers the same bytes at a hundredth of the cost
+     * and the family's usual 30_000 ms budget (DECISIONS #review-1-r7 M6) holds on every runner.
+     */
+    const BLOCK_EDGE_LEG_TIMEOUT_MS = 30_000;
+
     it.each(names)("%s: at every textblock edge, on both routes, the two views write the same bytes", (name) => {
       const source = fixture(name);
-      const { root } = pair(source);
-      const { doc, frontMatter } = mdastToPM(root);
-      const text = format(root);
+      const { root, doc } = pair(source);
       const map = cursorMap(root, doc);
       const edges = inlineEdges(doc);
       (edges.length > 0 ? fixturesWithEdges : fixturesWithoutEdges).push(name);
 
+      // One block-alone oracle per swept textblock, shared by its two edges and both routes.
+      const alones = new Map<number, BlockAlone>();
+      function aloneFor(blockPos: number): BlockAlone {
+        const cached = alones.get(blockPos);
+        if (cached !== undefined) return cached;
+        const node = doc.nodeAt(blockPos);
+        expect(node, `${name}: the textblock at ${blockPos}`).not.toBeNull();
+        const found = blockAlone(doc, blockPos, node as PMNode);
+        alones.set(blockPos, found);
+        return found;
+      }
+
+      // Where one line of a block alone sits in the whole document: its line, its column shift —
+      // asserted the same across both routes of an edge and across both edges of a block that
+      // share a block-local line (the bridge, DECISIONS #review-1-r8 N2's form). Keyed by the
+      // block's own position beside the block-local line: two unrelated blocks (a document has
+      // many single-line paragraphs, each block-local line 1) are not the same shift.
+      const shifts = new Map<string, { line: number; ch: number }>();
+
       for (const edge of edges) {
+        const alone = aloneFor(edge.blockPos);
         for (const storedMarks of [null, [] as readonly Mark[]]) {
           const at = map.toSource(edge.pos, storedMarks);
           const where = `${name} ${edge.edge} ${storedMarks === null ? "click" : "[]"} ${at.line}:${at.ch}`;
-          const rendered = typedInRendered(doc, edge.pos, storedMarks, frontMatter);
-          const typed = typedInSource(text, at);
+          const inBlock = alone.map.toSource(edge.pos + alone.offset, storedMarks);
+          const shift = { line: at.line, ch: at.ch - inBlock.ch };
+          const shiftKey = `${edge.blockPos}:${inBlock.line}`;
+          const first = shifts.get(shiftKey);
+          if (first === undefined) shifts.set(shiftKey, shift);
+          else
+            expect(
+              shift,
+              `${where}: the block's line ${inBlock.line} sits at one line and one column shift of the document`,
+            ).toEqual(first);
+          edgesBridged += 1;
+
+          const rendered = typedInRendered(alone.doc, edge.pos + alone.offset, storedMarks);
+          const typed = typedInSource(alone.text, inBlock);
 
           if (isPunctuationEdgedRunEnd(doc, edge, storedMarks)) {
             // Positively bounded: the views disagree, the rendered view wrote the letter as a
             // character reference on that line, and the source view wrote the raw keystroke.
             expect(typed, where).not.toBe(rendered);
-            expect(rendered.split("\n")[at.line - 1], where).toMatch(/&#x58;$/);
-            expect(typed.split("\n")[at.line - 1], where).toMatch(/X$/);
+            expect(rendered.split("\n")[inBlock.line - 1], where).toMatch(/&#x58;$/);
+            expect(typed.split("\n")[inBlock.line - 1], where).toMatch(/X$/);
             punctuationEdged.push(where);
             continue;
           }
@@ -1998,8 +2041,8 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
             // Positively bounded: the views disagree, and the mapped column is *inside* the code
             // span — past its opening fence, which is the whole of the defect.
             expect(typed, where).not.toBe(rendered);
-            const line = text.split("\n")[at.line - 1];
-            expect(line.slice(0, at.ch), where).toMatch(/`+$/);
+            const line = alone.text.split("\n")[inBlock.line - 1];
+            expect(line.slice(0, inBlock.ch), where).toMatch(/`+$/);
             inlineCodeStarts.push(where);
             continue;
           }
@@ -2007,7 +2050,7 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
           agreements += 1;
         }
       }
-    }, 60_000);
+    }, BLOCK_EDGE_LEG_TIMEOUT_MS);
 
     it("ran the leg over every fixture in the index, and both sides of every clause were reached", () => {
       expect(names.length).toBeGreaterThan(40);
@@ -2028,6 +2071,8 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       expect(inlineCodeStarts.length).toBeGreaterThan(0);
       // …and neither exclusion swallowed the leg: agreements outnumber them by far.
       expect(agreements).toBeGreaterThan(punctuationEdged.length + inlineCodeStarts.length);
+      // Every edge × route pair compared was bridged from the block alone back to the document.
+      expect(edgesBridged).toBe(agreements + punctuationEdged.length + inlineCodeStarts.length);
     });
   });
 
