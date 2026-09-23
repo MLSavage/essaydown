@@ -116,6 +116,23 @@ describe("formatWithMap over fixtures/markdown (task 1.2)", () => {
     },
   );
 
+  // The second leg of the same case, over the tree the canonical bytes parse back to (task 1.65,
+  // DECISIONS #review-1-r8 N3). `format` is idempotent on the corpus (invariant A, asserted in
+  // roundtrip.test.ts), so this tree serialises to the same bytes; what it is not is the same
+  // tree — a fixture's source shape is not always canonical, and the walk of format.ts whose
+  // give-ups `unresolved` now carries is per child of whatever tree it is handed. Both legs are
+  // asserted so the walk is covered for the trees the app edits as well as the ones it reads.
+  it.each(names)(
+    "%s: maps every node of format(parse(·))'s own tree, and nothing is unresolved",
+    (name) => {
+      const root = parse(format(parse(sourceOf(name))));
+      const { map } = formatWithMap(root);
+      expect(map.unresolved).toEqual([]);
+      expect(Object.keys(map.ranges)).toHaveLength(countNodes(root as unknown as Node));
+      expect(map.entries).toHaveLength(Object.keys(map.ranges).length);
+    },
+  );
+
   it.each(names)("%s: every node's range sits inside its parent's, siblings apart", (name) => {
     const { map } = formatWithMap(parse(sourceOf(name)));
     const byPath = map.ranges;

@@ -1,7 +1,7 @@
 import type { Nodes, Root } from "mdast";
 import type { Options } from "remark-stringify";
 import type { Data, Processor } from "unified";
-import { createFormatter } from "./format.js";
+import { createFormatter, wideningGiveUps, type RecordedGiveUp } from "./format.js";
 
 type ToMarkdownExtensions = NonNullable<Data["toMarkdownExtensions"]>;
 type StringifyHandlers = NonNullable<Options["handlers"]>;
@@ -33,6 +33,15 @@ export interface PositionEntry extends NodeRange {
  * the same ranges in document (pre-)order with the node itself attached, and is what
  * {@link nodeAt} searches. `unresolved` lists the paths of nodes that could not be placed —
  * empty for every fixture in the corpus, and the check that keeps "every node" honest.
+ *
+ * `unresolved` carries a second kind of entry, of the same shape and with the same meaning — this
+ * node's place in the canonical string is not known to be right (DECISIONS #review-1-r8 N3). The
+ * serializer's per-child widening walk (`widenSplitSurrogateReferences` in format.ts) stops at a
+ * child whose bytes none of its enumerated forms match, leaving that child and every later
+ * sibling unwidened; that child and those siblings are reported here, as is the one child whose
+ * edit the walk had to drop as an overlap. The walk's own enumeration is stricter than
+ * {@link locateEmission}'s, so this is the only guard that can go red when it gives up: a path
+ * appears here whether or not the node was placed.
  */
 export interface PositionMap {
   ranges: Record<string, NodeRange>;
@@ -154,6 +163,13 @@ interface Emission {
 interface Instrumentation {
   stack: Emission[];
   patched: boolean;
+  /**
+   * The `State` `mdast-util-to-markdown` built for this call, captured by {@link wrapHandle} on
+   * the first dispatched node — the same "first moment a `State` is in reach" the two installers
+   * of format.ts use. It is what {@link wideningGiveUps} is read off; `undefined` only for a tree
+   * that dispatches nothing at all, which is a tree with no child for a walk to give up on.
+   */
+  state?: ToMarkdownState;
 }
 
 /** Maps an offset in some intermediate string to its offset in a string built out of it. */
@@ -188,12 +204,21 @@ interface Line {
  * Any node still without a range after all that takes the hull of the descendants that were
  * dispatched, and one with no dispatched descendant either is reported in `unresolved`.
  *
+ * The serializer this runs is `createFormatter()`'s, so the app's own `root` handler runs and
+ * installs the per-child widening walk and the autolink fallback exactly as `format` does — the
+ * instrumented handlers are pushed as one more extension and `root` is not among them. Every
+ * give-up that walk records on the `State` is therefore this call's own, and is reported in
+ * `map.unresolved` as the path of the child it names (DECISIONS #review-1-r8 N3, see
+ * {@link PositionMap}).
+ *
  * `formatWithMap(root).text` is `format(root)`, and the map is a pure function of `root`: the
  * tree is never mutated and nothing is carried between calls.
  */
 export function formatWithMap(root: Root): FormatWithMapResult {
   const rootEmission: Emission = { node: root, value: "", children: [] };
   const instrumentation: Instrumentation = { stack: [rootEmission], patched: false };
+  const giveUpsOfThisCall = (): readonly RecordedGiveUp[] =>
+    instrumentation.state === undefined ? [] : wideningGiveUps(instrumentation.state);
   const handlers = wrapHandlers(configuredHandlers(), instrumentation);
   const text = createFormatter()
     .use(function instrument(this: Processor) {
@@ -208,7 +233,7 @@ export function formatWithMap(root: Root): FormatWithMapResult {
   const written = new Map<Nodes, SpellingTable>();
   spans.set(root, { start: 0, end: text.length });
   placeChildren(rootEmission, (offset) => offset, spans, written, false);
-  const map = buildMap(root, text, spans);
+  const map = buildMap(root, text, spans, giveUpsOfThisCall());
   const spellings: Record<string, SpellingTable> = {};
   for (const entry of map.entries) {
     const table = written.get(entry.node);
@@ -507,6 +532,7 @@ function wrapHandlers(
  */
 function wrapHandle(original: Handle, instrumentation: Instrumentation): Handle {
   const handle: Handle = (node, parent, state, info) => {
+    instrumentation.state ??= state;
     patchIndentLines(state, instrumentation);
     const emission: Emission = { node, value: "", children: [] };
     const { stack } = instrumentation;
@@ -991,13 +1017,31 @@ function splitLines(value: string): Line[] {
   return lines;
 }
 
-/** Walk the tree, filling in the nodes the serializer never dispatched, and key it by path. */
-function buildMap(root: Root, text: string, spans: Map<Nodes, Span>): PositionMap {
+/**
+ * Walk the tree, filling in the nodes the serializer never dispatched, and key it by path.
+ *
+ * `giveUps` are the serializer's own (see {@link PositionMap}): each names a parent node and the
+ * index of the child the widening walk could not account for. An `unlocatable-child` give-up
+ * reports that child and every later sibling — the walk stops there, so children `index`…n were
+ * all left as the parent wrote them — and an `overlapping-edit` give-up reports the one child
+ * whose edit was dropped. The lookup is done here, on the one walk that already knows every
+ * node's path, and a path a node's missing span has already reported is not repeated.
+ */
+function buildMap(
+  root: Root,
+  text: string,
+  spans: Map<Nodes, Span>,
+  giveUps: readonly RecordedGiveUp[],
+): PositionMap {
   completeSpans(root, spans);
   const starts = splitLines(text);
   const ranges: Record<string, NodeRange> = {};
   const entries: PositionEntry[] = [];
   const unresolved: string[] = [];
+  // One path at most once: a node with no span and a give-up naming it can both report it.
+  const report = (path: string): void => {
+    if (!unresolved.includes(path)) unresolved.push(path);
+  };
   const visit = (node: Nodes, path: string): void => {
     const span = spans.get(node);
     if (span) {
@@ -1005,7 +1049,16 @@ function buildMap(root: Root, text: string, spans: Map<Nodes, Span>): PositionMa
       ranges[path] = range;
       entries.push({ path, node, ...range });
     } else {
-      unresolved.push(path);
+      report(path);
+    }
+    for (const giveUp of giveUps) {
+      if (giveUp.parent !== node) continue;
+      // An unlocatable child stops the walk, so that child *and every later sibling* were left as
+      // the parent wrote them and none of their positions is known to be right; a dropped
+      // overlapping edit is one child's own bytes and stops nothing.
+      const last =
+        giveUp.reason === "unlocatable-child" ? childrenOf(node).length - 1 : giveUp.index;
+      for (let index = giveUp.index; index <= last; index += 1) report(childPath(path, index));
     }
     childrenOf(node).forEach((child, index) => visit(child, childPath(path, index)));
   };

@@ -1,7 +1,7 @@
 import { gfmAutolinkLiteralToMarkdown } from "mdast-util-gfm-autolink-literal";
 import { gfmStrikethroughToMarkdown } from "mdast-util-gfm-strikethrough";
 import { gfmTableToMarkdown } from "mdast-util-gfm-table";
-import type { Delete, Html, Root, Yaml } from "mdast";
+import type { Delete, Html, Nodes, Root, Yaml } from "mdast";
 import remarkStringify, { type Options } from "remark-stringify";
 import { unified, type Data, type Processor } from "unified";
 
@@ -187,9 +187,53 @@ const PHRASING_TYPES: ReadonlySet<string> = new Set([
 
 /**
  * A `State` carrying the markers {@link installSurrogateWidening} and {@link installAutolinkFallback}
- * leave once they have run.
+ * leave once they have run, and the give-up log the first of them installs
+ * ({@link wideningGiveUps}). All three live on the `State`, which `mdast-util-to-markdown` creates
+ * per `toMarkdown` call, so nothing here is module-level state (PRD §9).
  */
-type WidenedState = ToMarkdownState & { astralWidened?: true; autolinkGuarded?: true };
+type WidenedState = ToMarkdownState & {
+  astralWidened?: true;
+  autolinkGuarded?: true;
+  wideningGiveUps?: RecordedGiveUp[];
+};
+
+/**
+ * One place {@link widenSplitSurrogateReferences} did less than a full pass over one parent's
+ * join, as the walk itself sees it — the walk's own give-up paths, made visible instead of silent
+ * (DECISIONS #review-1-r8 N3).
+ *
+ * - `"unlocatable-child"`: {@link locateChild} found none of {@link emissionForms}' forms at the
+ *   cursor, so the walk stopped and children `index`…n were left as the parent wrote them.
+ * - `"overlapping-edit"`: {@link applyEdits} dropped an edit that overlaps one already taken and
+ *   is not the duplicate that the two anchors of one slice produce by construction, so that
+ *   edit's bytes were not written.
+ *
+ * `index` is the child's index in its parent's `children` — `containerPhrasing` dispatches them in
+ * order, one per index — and `type` is its node type.
+ */
+export interface WideningGiveUp {
+  reason: "unlocatable-child" | "overlapping-edit";
+  index: number;
+  type: string;
+}
+
+/** A {@link WideningGiveUp} with the parent whose join it happened in, as the `State` logs it. */
+export interface RecordedGiveUp extends WideningGiveUp {
+  parent: Nodes;
+}
+
+/** How {@link widenSplitSurrogateReferences} hands a give-up back to its caller. */
+export type GiveUpRecorder = (giveUp: WideningGiveUp) => void;
+
+/**
+ * The give-ups {@link installSurrogateWidening} recorded on `state` during this `toMarkdown` call,
+ * in the order the walks hit them. Empty for every tree whose children the walk could locate;
+ * {@link formatWithMap} turns each entry into an `unresolved` path, which is the instrument that
+ * guards the branch (see {@link widenSplitSurrogateReferences}).
+ */
+export function wideningGiveUps(state: ToMarkdownState): readonly RecordedGiveUp[] {
+  return (state as WidenedState).wideningGiveUps ?? [];
+}
 
 /** A handler as `containerPhrasing` reads it: the `peek` it looks ahead with is optional. */
 type PeekableHandle = Handle & { peek?: Handle };
@@ -308,7 +352,7 @@ function encodeLastUnit(value: string): string {
 }
 
 /** One direct child of a phrasing parent and the bytes its handler returned for it. */
-interface RecordedChild {
+export interface RecordedChild {
   node: HandledNode;
   value: string;
 }
@@ -332,11 +376,17 @@ interface LocatedChild {
   eolAsSpace: boolean;
 }
 
-/** One replacement to make in the join: the half-open slice `[start, end)` and its new bytes. */
-interface Edit {
+/**
+ * One replacement to make in the join: the half-open slice `[start, end)` and its new bytes,
+ * together with the child whose own slice it was derived from (`index` and `type`), so that an
+ * edit {@link applyEdits} drops can name that child in a {@link WideningGiveUp}.
+ */
+export interface Edit {
   start: number;
   end: number;
   replacement: string;
+  index: number;
+  type: string;
 }
 
 /**
@@ -433,7 +483,7 @@ function locateChild(
 }
 
 /** The edit {@link SPLIT_PAIR}.head makes when a split pair starts exactly at `at`, if one does. */
-function headEdit(joined: string, at: number): Edit | undefined {
+function headEdit(joined: string, at: number, index: number, type: string): Edit | undefined {
   SPLIT_PAIR.head.lastIndex = at;
   const match = SPLIT_PAIR.head.exec(joined);
   if (!match) return undefined;
@@ -442,28 +492,69 @@ function headEdit(joined: string, at: number): Edit | undefined {
     start: at,
     end: at + match[0].length,
     replacement: widenedPair(parseInt(match[1], 16), low),
+    index,
+    type,
   };
 }
 
 /** The edit {@link SPLIT_PAIR}.tail makes when a split pair ends exactly at `at`, if one does. */
-function tailEdit(joined: string, at: number): Edit | undefined {
+function tailEdit(joined: string, at: number, index: number, type: string): Edit | undefined {
   const match = SPLIT_PAIR.tail.exec(joined.slice(0, at));
   if (!match) return undefined;
   const high = match[1] === undefined ? parseInt(match[2], 16) : match[1].charCodeAt(0);
-  return { start: match.index, end: at, replacement: widenedPair(high, parseInt(match[3], 16)) };
+  return {
+    start: match.index,
+    end: at,
+    replacement: widenedPair(high, parseInt(match[3], 16)),
+    index,
+    type,
+  };
 }
 
-/** `joined` with `edits` applied in order; an edit overlapping one already taken is dropped. */
-function applyEdits(joined: string, edits: readonly Edit[]): string {
+/**
+ * `joined` with `edits` applied in order; an edit overlapping one already taken is dropped.
+ *
+ * **Which overlaps happen (DECISIONS #review-1-r8 N3, clause 4).** Two edits do overlap by
+ * construction, and exactly one way: a slice whose whole content is one split pair matches both
+ * {@link SPLIT_PAIR} anchors, so {@link headEdit} and {@link tailEdit} return the same
+ * `[start, end)` with the same replacement (`&#xD83D;&#xDE00;` → `&#x1F600;`, the third form of
+ * {@link SPLIT_PAIR}'s doc comment). That duplicate is the enumeration working as designed — the
+ * bytes written are the same whichever of the two is taken — so it is dropped silently. Every
+ * other overlap means two different rewrites claimed one stretch of the join and one of them was
+ * not written, which is the quiet give-up this file no longer takes: it is handed to `record` and
+ * surfaces as an `unresolved` path. No walk of a parseable tree has produced one — the head and
+ * tail anchors of a child longer than one pair land on disjoint slices, and the edits of two
+ * children lie inside their own disjoint slices — so the branch is reached only by calling this
+ * function directly, which is why it is exported and guarded there
+ * ("two edits that overlap on different bytes are recorded", format-widening-giveup.test.ts).
+ */
+export function applyEdits(joined: string, edits: readonly Edit[], record: GiveUpRecorder): string {
   if (edits.length === 0) return joined;
   let out = "";
   let at = 0;
+  let taken: Edit = NO_EDIT;
   for (const edit of [...edits].sort((left, right) => left.start - right.start)) {
-    if (edit.start < at) continue;
+    if (edit.start < at) {
+      if (!duplicates(edit, taken)) record({ reason: "overlapping-edit", index: edit.index, type: edit.type });
+      continue;
+    }
     out += joined.slice(at, edit.start) + edit.replacement;
     at = edit.end;
+    taken = edit;
   }
   return out + joined.slice(at);
+}
+
+/**
+ * The value `taken` holds before the first edit is written. An edit's `start` is an offset of the
+ * join and so is never negative, and `at` starts at 0, so no edit is ever compared against this
+ * one: the first edit reached always has `start >= at` and is taken.
+ */
+const NO_EDIT: Edit = { start: -1, end: -1, replacement: "", index: -1, type: "" };
+
+/** Whether `edit` writes exactly what `taken` already wrote, over exactly the same slice. */
+function duplicates(edit: Edit, taken: Edit): boolean {
+  return edit.start === taken.start && edit.end === taken.end && edit.replacement === taken.replacement;
 }
 
 /**
@@ -496,15 +587,28 @@ function applyEdits(joined: string, edits: readonly Edit[]): string {
  *
  * Nothing else in the join is touched — the `html` child's own bytes least of all — so the literal
  * bytes `&#xD83D;&#xDE00;` inside a verbatim leaf — a code span, an inline `html` node, either of them in a table cell, inside a mark or
- * inside a link's text — are left exactly as the parser read them (PRD §6.1). A child the walk
- * cannot locate stops the walk and the rest of the join is left as the parent wrote it, never
- * widened blind; no such child is expected, because `locateEmission` in positions.ts enumerates
- * the same forms and the corpus case "maps every node of the tree, and nothing is unresolved" is
- * the guard that says so for every fixture in `fixtures/markdown/index.json`.
+ * inside a link's text — are left exactly as the parser read them (PRD §6.1).
+ *
+ * **The contract at a child the walk cannot locate (DECISIONS #review-1-r8 N3).** The walk stops
+ * at the first child whose bytes are none of {@link emissionForms}' forms: the edits derived from
+ * children before it are applied, children from it on are left exactly as the parent wrote them —
+ * never widened blind — the join is otherwise returned unchanged, and the give-up is handed to
+ * `record` as an `unlocatable-child` {@link WideningGiveUp}. That record is the guard on this
+ * branch: {@link installSurrogateWidening} logs it on the `State`, {@link formatWithMap} reports
+ * every entry of the log as an `unresolved` path, and the corpus case "maps every node of the
+ * tree, and nothing is unresolved" is therefore red for any fixture in
+ * `fixtures/markdown/index.json` whose walk gives up, in either leg — `parse(fixture)` and
+ * `parse(format(parse(fixture)))`. The instrument is what says so, and nothing else does: the
+ * child lookup positions.ts uses to place a node is a *different, more permissive* enumeration —
+ * it searches forward with `indexOf` from the cursor rather than requiring `startsWith` at it, and
+ * offers a non-text child its raw handler value alone rather than the head-, tail- and
+ * eol-as-space forms this walk carries — so it can succeed on a join this walk gives up on, and a
+ * guard read off it would be green while this walk did nothing.
  */
-function widenSplitSurrogateReferences(
+export function widenSplitSurrogateReferences(
   joined: string,
   children: readonly RecordedChild[],
+  record: GiveUpRecorder,
 ): string {
   const edits: Edit[] = [];
   let cursor = 0;
@@ -512,25 +616,28 @@ function widenSplitSurrogateReferences(
     const { node, value } = children[index];
     const next = children[index + 1];
     const located = locateChild(joined, cursor, node, value, next?.node.type === "html");
-    if (located === undefined) break;
+    if (located === undefined) {
+      record({ reason: "unlocatable-child", index, type: node.type });
+      break;
+    }
     const { start, end, headEncoded, tailEncoded, eolAsSpace } = located;
     if (node.type === "break" && eolAsSpace && next !== undefined) {
-      edits.push({ start, end, replacement: repairBreakBeforeHtml(value, next.value) });
+      edits.push({ start, end, replacement: repairBreakBeforeHtml(value, next.value), index, type: node.type });
     }
     const markerLength = MARK_MARKER_LENGTH.get(node.type);
     const head = node.type === "text" ? (headEncoded ? start : undefined) : markerLength === undefined ? undefined : start + markerLength;
     const tail = node.type === "text" ? (tailEncoded ? end : undefined) : markerLength === undefined ? undefined : end - markerLength;
     if (head !== undefined) {
-      const edit = headEdit(joined, head);
+      const edit = headEdit(joined, head, index, node.type);
       if (edit) edits.push(edit);
     }
     if (tail !== undefined) {
-      const edit = tailEdit(joined, tail);
+      const edit = tailEdit(joined, tail, index, node.type);
       if (edit) edits.push(edit);
     }
     cursor = end;
   }
-  return applyEdits(joined, edits);
+  return applyEdits(joined, edits, record);
 }
 
 /**
@@ -563,10 +670,18 @@ function widenSplitSurrogateReferences(
  * `State` is in reach (the shape positions.ts's `patchIndentLines` uses), and the marker on the
  * state makes a second install a no-op. The wrapper calls the original bound to `state`, as the
  * handlers do (`containerPhrasingBound` reads `this`).
+ *
+ * The give-up log lives on the same `State` and for the same reason (DECISIONS #review-1-r8 N3):
+ * every walk this call makes hands back what it could not do, tagged with the `parent` whose join
+ * it was walking, and {@link wideningGiveUps} is how a caller that wants to know — today
+ * {@link formatWithMap} — reads it afterwards. `format` reads it not at all and its bytes are
+ * unchanged: the walk still stops, and nothing is widened blind.
  */
 function installSurrogateWidening(state: WidenedState): void {
   if (state.astralWidened) return;
   state.astralWidened = true;
+  const giveUps: RecordedGiveUp[] = [];
+  state.wideningGiveUps = giveUps;
   const originalContainerPhrasing = state.containerPhrasing;
   const containerPhrasing: ContainerPhrasing = (parent, info) => {
     const children: RecordedChild[] = [];
@@ -584,7 +699,9 @@ function installSurrogateWidening(state: WidenedState): void {
     } finally {
       state.handle = originalHandle;
     }
-    return widenSplitSurrogateReferences(joined, children);
+    return widenSplitSurrogateReferences(joined, children, (giveUp) => {
+      giveUps.push({ ...giveUp, parent });
+    });
   };
   state.containerPhrasing = containerPhrasing;
 }
