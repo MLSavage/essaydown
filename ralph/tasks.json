@@ -3181,13 +3181,171 @@
   "targetBranch": "phase/1"
  },
  {
+  "id": "1.9.r1",
+  "model": "opus",
+  "execution": "human",
+  "description": "HUMAN GATE, approval retry of 1.9 (DECISIONS #040 — Michael's yes to #review-1-r8 N4; RUNNER-SPEC §2 rewrite rule (b); the same `gateKind` and `recordTarget` as 1.9, no `outcomes`: an observation gate records ACCEPT once its record is complete, ralph/lib/gate.mjs:205, so #040's REJECT route is the note's content, read by 1.10.r10d — DECISIONS #review-1-r9). The tree Michael drives is the r9 implementation SHA 287c884: until 1.67 integrates the phase head's product files are that tree (`git diff --stat 287c884 phase/1 -- packages apps e2e fixtures` prints nothing), after it a detached checkout of 287c884. Michael runs `pnpm install --frozen-lockfile && pnpm dev`, writes ~1,000 words on /dev/editor, toggles source, copies the Markdown and opens the copy in two readers with different engines (the `[repair-1.9 (c)]` line): Typora (1.9's reader) and BBEdit's preview with its CommonMark (cmark) processor; the note says what each reader shows and names the tree driven. The r9 blocker O1 (Backspace between `*(b)*` and `**z**`) is known at this tree and is 1.67's. Record via `scripts/gate.sh 1.9.r1 --outcome ACCEPT --file` with the note's path (never a placeholder, DECISIONS #019); the next reconciliation (1.10.r10d) copies it to DECISIONS.md#002-outline-feel, and a round trip the note reports broken is a blocker candidate that goes to Michael before any planning commit (DECISIONS #041 D1).",
+  "acceptance": "scripts/gate.sh 1.9.r1 wrote .evidence/human/1.9.r1/a<n>.md and accepted.json and it validates; the note names the tree driven and both readers' results (the next reconciliation copies it into DECISIONS.md).",
+  "dependencies": [
+   "1.10.r9d"
+  ],
+  "blockedOnHuman": true,
+  "gateKind": "observation",
+  "recordTarget": "002-outline-feel",
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.67",
+  "model": "opus",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r9 O1 — Claude r9 finding 1, blocker, taken under Michael's stop rule DECISIONS #041 D1; packages/core/src/format.ts, the serializer of passed tasks 1.1, 1.40, 1.57 and 1.58, whose records are not edited — a new task per DECISIONS #016): two flanking runs of different marks made adjacent, the first ending in punctuation, serialise their delimiters as one run and the bytes parse to a different tree — `emphasis(\"(b)\") + strong(\"z\")` → `*(b)***z**`, parsed as `text(\"*(b)*\") + strong(\"z\")`; `strong(\"(b)\") + emphasis(\"z\")` → `**(b)***z*`, likewise — and Copy Markdown puts those bytes on the clipboard and reports `Copied Markdown`. Two one-keystroke routes, both driven in Chromium by the r9 review at 287c884: Backspace at the start of the second of two paragraphs `*(b)*` and `**z**` (`baseKeymap`'s `joinBackward`, packages/editor/src/input.ts:236), and Delete of the single space in `*(b)* **z**`. The cause is the built-in `emphasis`/`strong` handlers `handleRoot` (format.ts:786) leaves in place: they encode the outside neighbour's flanking, never a neighbour that is itself a delimiter of an adjacent run. `[review-1-r6 L11]`'s \"unreachable from the editor\" premise is true of same-mark runs (the editor merges them) and false of different-mark runs (the backlog line correcting it is written by the reconciliation). First, before any read of node_modules: `pnpm install --frozen-lockfile` (a fresh container has none). Do exactly this. (1) Read the installed handlers before touching anything (CLAUDE.md's mark-edge rule — both halves are owned, the tree the editor builds and the bytes the serializer writes): node_modules/.pnpm/mdast-util-to-markdown@2.1.2/node_modules/mdast-util-to-markdown/lib/handle/emphasis.js and strong.js with the `check-emphasis`/`check-strong` utilities they call, and name in the journal the lines that choose the marker and the lines that encode the flanking neighbours. (2) Give `emphasis` and `strong` app handlers in format.ts in the shape `handleDelete` (format.ts:131) has — the built-in's body mirrored, the tracker, `peek` and `state.attentionEncodeSurroundingInfo` kept, registered after the extensions in `toMarkdownExtensions` as `handleDelete` is — that write a run with the other marker (`_`/`__` for `*`/`**`) when the character before it in `info.before` is the marker the run would open with, so two adjacent runs never share one delimiter run; the rule is a function of the tree and its neighbours, so `format` stays a fixed point of `parse ∘ format` (the review verified `parse(\"*(b)*__z__\")` is `emphasis + strong`). Whether the other marker can open and close at that position (an `_` run beside an alphanumeric cannot, CommonMark §6.2) is read from the parser's rules, never assumed; the doc comment states the rule once, with its zero-width ownership answer. (3) Claude's sweep D as the test, a new file packages/editor/test/adjacent-runs.test.ts: every ordered pair of two adjacent marked runs in one paragraph of the editor's own tree through `pmToMdast` and `format` — first mark × second mark over {emphasis, strong, delete, link, inline_code} × the first run's last-character class over {punctuation, letter, astral (one non-BMP symbol, one non-BMP letter — CLAUDE.md's astral rule)} — the list generated from the axis arrays and its length asserted equal to the product of their lengths, never a literal (75 at the review's axes); each pair asserts `format(parse(out)) === out` and that `parse(out)` holds the tree the editor made (node types and text; DECISIONS #022 — the bytes cannot tell the two trees apart); the two pairs the review found broken are named `it` guards beside the sweep. The pairs are asserted as the invariant; the guards are instances on top of it (CLAUDE.md). (4) The destructive writing-surface legs, in the same file, over every fixture in fixtures/markdown/index.json (the keys read from the index): (a) the join of every adjacent pair of paragraphs in one parent — the transaction `joinBackward` performs at the second's start — and (b) the deletion of every single space that is the only character between two marked runs; after each transaction the changed block, cut out with `blockAlone` from packages/editor/test/block-alone.ts (the family's 30_000 ms budget holds on every runner only for a block-local oracle, DECISIONS #039, lesson [1.66]), is asserted a fixed point of `parse ∘ format` whose parse holds the editor's tree; each leg's transaction count is read from the run into the journal and asserted positive over the corpus, and where the corpus holds no member of leg (b) the journal says so and the sweep of (3) is that leg's instance. (5) Asserted able to fail, recorded in the journal and not committed: the two app handlers unregistered — the named guards and the sweep's two pairs red, the received bytes recorded. (6) Evidence only, in the journal: whether L11's own reproduction `parse(\"*x.*_y_\\n\")` is a fixed point after the change (L11's line and trigger stand either way). A disagreement the legs find outside the adjacent-pair class — another shape of join, a container — is filed and positively bounded, never fixed here (the sentence below); if it writes wrong bytes the reconciliation brings it to Michael (DECISIONS #041 D1). Scope: packages/core/src/format.ts, packages/editor/test/adjacent-runs.test.ts (new), packages/core/test (a handler unit guard only if the new file cannot reach a branch), docs/V1.1-BACKLOG.md (filed members only), docs/lessons.md, the journal. No change under packages/editor/src, apps/, e2e/, fixtures/, config or workflow files; no fixture added; zero new dependencies (PRD §4). Each attempt appends a NEW `- [<id>] ` journal line to docs/progress/journal-main.md, stubbed first by one `printf` that prints the timestamp (`printf -- '- [%s] %s Task: …' <id> \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"`) and completed in place before the commit that prints DONE — an earlier attempt's line is never edited; completing an earlier attempt's stub and appending nothing is `NO-JOURNAL` even with DONE printed and the suite green (lessons [1.29], [1.41]). Run the suite once: after the implementation is complete, `pnpm lint && pnpm test && cargo test` and the e2e/web suite each one time (`e2e/web/node_modules/.bin/playwright install chromium` first, lesson [1.50]), then complete the stub, commit and print DONE — the runner re-runs the whole suite on the squashed candidate (RUNNER-SPEC §4), and a second verification pass in the same attempt is what the r5–r9 chains' turn caps were spent on (lessons [1.41], [1.42], [1.47], [1.54], [1.64], [1.66]); each verification step is one foreground tool call with the tool's maximum timeout, never a background job polled by later calls. A defect found outside this scope gets a docs/V1.1-BACKLOG.md line with a revisit trigger and a hard stop in this task's commit, never only a lesson or a test comment (DECISIONS #review-1-r1); a class this task's new assertions turn red outside its scope is filed the same way and asserted as a named, positively bounded member, never as `it.fails` and never by narrowing (DECISIONS #032). Procedure note (DECISIONS #review-1-r2 H7): this task's generated `PROMPT.md` wrapper still lists the pre-1.verify.r2 iteration steps; CLAUDE.md's stub-first `## Every iteration` list is the one that stands — the mismatch is mechanical and not a conflict to stop on — so stub the journal, commit, implement, complete the stub.",
+  "acceptance": "The two app handlers present and registered (`grep -c 'export function handleEmphasis\\|export function handleStrong' packages/core/src/format.ts` is 2; both names appear in `toMarkdownExtensions`); packages/editor/test/adjacent-runs.test.ts green with the sweep's pair count equal to the product of its axis lengths (both numbers in the journal from the run), the two named guards present (their titles in the journal), and legs (a) and (b) green over every fixture in the index with their transaction counts in the journal; the installed-handler lines named in the journal; the mutation recorded with its received bytes; L11's reproduction result recorded; `pnpm lint && pnpm test && cargo test` green; every e2e/web spec green in the container, their number in the journal read from the directory; `grep -c 'it.fails' packages/editor/test/adjacent-runs.test.ts` and `grep -c '\\.skip(' packages/editor/test/adjacent-runs.test.ts` print 0; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4).",
+  "dependencies": [
+   "1.10.r9d"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.68",
+  "model": "sonnet",
+  "description": "Phase 1 review fix (DECISIONS #review-1-r9 O3 — Claude r9 finding 3, should-fix, taken under DECISIONS #041 D1 as the phase's fifth caret-precondition race after #029, #035, #036 and #037; e2e/web/editor-soft-line-breaks.spec.ts, a file of passed tasks whose records are not edited — a new task per DECISIONS #016): the caret precondition after the computed-point click (the `expect.poll(() => caret(page))` at line 181 at 287c884, after `page.mouse.click(clickPoint.x, clickPoint.y)`) timed out once in three full-suite runs in the r9 reviewer's container with the caret still at the seed offset (16, the end of `alpha\\nbeta gamma`; expected 5, `\"alpha\".length`) — the click was lost, or landed after the layout it was computed from moved; the spec alone with `--workers=1` was 3/3 green and CI green on all three runners. The test left the arrow route for this step because windows-latest reverted a native vertical motion before the next synthetic key (its own comment, the `[1.46]` class), so the fix is the click route made bounded, never a return to arrows and never a longer timeout. First, before any read of node_modules: `pnpm install --frozen-lockfile` (a fresh container has none). Do exactly this. (1) A local helper in the spec: up to three tries, each re-reading the geometry (the `Range` over the last character of `alpha` in the paragraph's own text node) immediately before its `mouse.click`, then polling the caret with a short bound; it stops at the first try whose caret reads the expected text and offset, and the test's existing `expect.poll(() => caret(page)).toEqual(…)` then asserts the precondition exactly as now — the try count is never asserted and no timing magnitude from one run enters the test (DECISIONS #037, #039: the per-test budget stays the family's). The caret is read the way the test already reads it at that step (the DOM selection's anchor text and offset, byte-exact) — never a DOM anchor at a widget boundary (#037). (2) Every other test in this file whose caret precondition follows a single computed-point `mouse.click` uses the same helper (the journal lists them from `grep -n 'mouse.click' e2e/web/editor-soft-line-breaks.spec.ts`); no other spec file changes. (3) Evidence, in the journal: the spec alone once with `--repeat-each=5`, its pass count read from the reporter. Scope: e2e/web/editor-soft-line-breaks.spec.ts, docs/V1.1-BACKLOG.md (filed members only), docs/lessons.md, the journal. No change under packages/, apps/, fixtures/, any other spec, config or workflow file; zero new dependencies (PRD §4). Each attempt appends a NEW `- [<id>] ` journal line to docs/progress/journal-main.md, stubbed first by one `printf` that prints the timestamp (`printf -- '- [%s] %s Task: …' <id> \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"`) and completed in place before the commit that prints DONE — an earlier attempt's line is never edited; completing an earlier attempt's stub and appending nothing is `NO-JOURNAL` even with DONE printed and the suite green (lessons [1.29], [1.41]). Run the suite once: after the implementation is complete, `pnpm lint && pnpm test && cargo test` and the e2e/web suite each one time (`e2e/web/node_modules/.bin/playwright install chromium` first, lesson [1.50]), then complete the stub, commit and print DONE — the runner re-runs the whole suite on the squashed candidate (RUNNER-SPEC §4), and a second verification pass in the same attempt is what the r5–r9 chains' turn caps were spent on (lessons [1.41], [1.42], [1.47], [1.54], [1.64], [1.66]); each verification step is one foreground tool call with the tool's maximum timeout, never a background job polled by later calls. A defect found outside this scope gets a docs/V1.1-BACKLOG.md line with a revisit trigger and a hard stop in this task's commit, never only a lesson or a test comment (DECISIONS #review-1-r1); a class this task's new assertions turn red outside its scope is filed the same way and asserted as a named, positively bounded member, never as `it.fails` and never by narrowing (DECISIONS #032). Procedure note (DECISIONS #review-1-r2 H7): this task's generated `PROMPT.md` wrapper still lists the pre-1.verify.r2 iteration steps; CLAUDE.md's stub-first `## Every iteration` list is the one that stands — the mismatch is mechanical and not a conflict to stop on — so stub the journal, commit, implement, complete the stub.",
+  "acceptance": "The helper present and used at the line-181 precondition (the journal names it and every call site; `grep -c 'mouse.click' e2e/web/editor-soft-line-breaks.spec.ts` read at the branch base and after, both in the journal); no Home/End key or modifier chord added (`tests/no-caret-chords-in-e2e.test.ts` green); the `--repeat-each=5` pass count in the journal; `pnpm lint && pnpm test && cargo test` green; every e2e/web spec green in the container, their number in the journal read from the directory; `grep -c '\\.skip(\\|\\.only(' e2e/web/editor-soft-line-breaks.spec.ts` prints 0; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4).",
+  "dependencies": [
+   "1.67"
+  ],
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r10",
+  "model": "sonnet",
+  "description": "Phase 1 verification for review attempt r10 (RUNNER-SPEC §3, §5.5): freeze dependencies (no lockfile change allowed), run the full suite in the container, confirm the phase head is ready for the three-OS CI run that the CI gate performs, and carry the promote-lessons step for the r10 chain — nine candidates weighed at DECISIONS #review-1-r9, one promoted and eight recorded. (a) Promote, as a bullet of `## Code rules` in both CLAUDE.md and AGENTS.md, after the three r8 bullets (N1, N2, N3), verbatim and identical in both files: \"A round-trip family's corpus legs seeded from the writing surface include one transaction that joins two blocks and one that deletes the whole separator between two inline nodes, and the family enumerates ordered pairs of the schema's mark kinds × the first run's edge-character class (punctuation, letter, astral), because a leg that edits one position inside one block never makes two nodes adjacent (DECISIONS #review-1-r9 O1).\" Discharged by 1.67's pair sweep and its join and separator-deletion legs in packages/editor/test/adjacent-runs.test.ts — name them by title in the journal. (b) Record, do not promote: Claude's r9 lesson that a deferral reading \"unreachable from the editor\" names the commands it was read against addresses backlog authors and reviewers (the `[review-1-r9 O1]` correction line carries it). (c) Record, do not promote: Claude's r9 lesson on a block-local oracle's bridge to the document is finding O2's, backlogged with a `2.verify` trigger. (d) Record, do not promote: Sol's three r9 lessons (a neither-neighbour mark set; an early cursor-map return discharging the carried-mark invariant; varying the native action that reaches a state) are findings O7–O9's, backlogged with a `2.verify` trigger. (e) Record, do not promote: Grok's three r9 lessons restate rules already in CLAUDE.md (the r8 N1, N2 bullets; DECISIONS #039). The journal says so in one sentence each. `ralph/check-agent-rules.sh` must exit 0 and tests/agent-rules.test.ts must pass after the edit. The journal states the number of spec files under e2e/web/ counted from the directory (`find e2e/web -name '*.spec.ts' -not -path '*/node_modules/*' | wc -l`), never a literal (DECISIONS #review-1-r6 L10). No other procedure change this attempt. First, before any read of node_modules: `pnpm install --frozen-lockfile` (a fresh container has none). Each attempt appends a NEW `- [<id>] ` journal line to docs/progress/journal-main.md, stubbed first by one `printf` that prints the timestamp (`printf -- '- [%s] %s Task: …' <id> \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"`) and completed in place before the commit that prints DONE — an earlier attempt's line is never edited; completing an earlier attempt's stub and appending nothing is `NO-JOURNAL` even with DONE printed and the suite green (lessons [1.29], [1.41]). Run the suite once: after the implementation is complete, `pnpm lint && pnpm test && cargo test` and the e2e/web suite each one time (`e2e/web/node_modules/.bin/playwright install chromium` first, lesson [1.50]), then complete the stub, commit and print DONE — the runner re-runs the whole suite on the squashed candidate (RUNNER-SPEC §4), and a second verification pass in the same attempt is what the r5–r9 chains' turn caps were spent on (lessons [1.41], [1.42], [1.47], [1.54], [1.64], [1.66]); each verification step is one foreground tool call with the tool's maximum timeout, never a background job polled by later calls. A defect found outside this scope gets a docs/V1.1-BACKLOG.md line with a revisit trigger and a hard stop in this task's commit, never only a lesson or a test comment (DECISIONS #review-1-r1); a class this task's new assertions turn red outside its scope is filed the same way and asserted as a named, positively bounded member, never as `it.fails` and never by narrowing (DECISIONS #032). Procedure note (DECISIONS #review-1-r2 H7): this task's generated `PROMPT.md` wrapper still lists the pre-1.verify.r2 iteration steps; CLAUDE.md's stub-first `## Every iteration` list is the one that stands — the mismatch is mechanical and not a conflict to stop on — so stub the journal, commit, implement, complete the stub.",
+  "acceptance": "pnpm lint (which includes `node scripts/check-deps.mjs`), pnpm test, cargo test green in the container; `grep -c 'it.fails' packages/core/test/*.ts packages/editor/test/*.ts` prints 0 for each file; every e2e/web spec green in the container, their number in the journal read from the directory; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change and touches only CLAUDE.md, AGENTS.md, docs/lessons.md and the journal; `grep -c 'review-1-r9 O1' CLAUDE.md` and the same on AGENTS.md print 1; `ralph/check-agent-rules.sh` exits 0; `tests/agent-rules.test.ts` passes; the journal names the discharging tests for (a) and records (b)–(e).",
+  "dependencies": [
+   "1.68"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r10/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r10h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "phase": "1",
+  "execution": "loop",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.verify.r10h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "1.verify.r10",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/1.verify.r10/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "playwright-report"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "1",
+  "targetBranch": "phase/1",
+  "description": "CI gate for 1.verify.r10: scripts/gate.sh 1.verify.r10h pushes integrated_sha of 1.verify.r10 to ci/1.verify.r10/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"playwright-report\"] into /logs/ci/1.verify.r10/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + e2e/web (Playwright: every spec file under e2e/web/ including the 1.17 latency spec, count from the directory; a failing spec fails the job, DECISIONS #019) green on all three runners at the implementation SHA; a green gate proves both suites ran on ubuntu, macos and windows at the integrated SHA; the accepted `test-logs` and `playwright-report` artifacts under /logs/ci/1.verify.r10h/accepted/ (the gate id; DECISIONS #018) each hold three OS directories.",
+  "dependencies": [
+   "1.verify.r10"
+  ]
+ },
+ {
+  "id": "1.10.r10a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r10",
+  "description": "Review attempt r10, claude reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r10 (after the r9 FAIL, DECISIONS #review-1-r9; all three r9 reports were independent — DECISIONS #025's condition met by the parallel start). Scope, in Michael's words (DECISIONS #041 D1): \"confirming the two fixes and the backlog dispositions, blockers only, no new sweeps or browser drives\". Confirm, from the tree and the accepted gate evidence (/logs/ci/1.verify.r10h/accepted/, three OS directories in both artifacts; the spec-file count read from the directory; the accepted logs stand for the cold build): (1) O1 fixed by 1.67 — the `emphasis`/`strong` app handlers in packages/core/src/format.ts read against the installed `mdast-util-to-markdown` handlers, the pair sweep with its two named guards and the join and separator-deletion legs in packages/editor/test/adjacent-runs.test.ts, green on three OSes; (2) O3 fixed by 1.68 — e2e/web/editor-soft-line-breaks.spec.ts's click precondition bounded, no magnitude asserted, green on three OSes; (3) the r9 dispositions in DECISIONS #review-1-r9 present in docs/V1.1-BACKLOG.md with their triggers, not re-derived: O2 (the block-local bridge, position-map-inverse.test.ts:583, toggle.test.ts:2009), O4 (positions.ts:1060 `overlapping-edit`), O5 (toggle.ts:414/:420), O6 (schema.ts:1042/:1055), O7 (toggle.ts:508, the neither-neighbour boundary), O8 (toggle.ts:675, the dropped-whitespace shortcut), O9 (toggle.ts:692, the leaf-start twin, superseding the `[1.63]` line's trigger), the `[review-1-r9 O1]` correction of `[review-1-r6 L11]`, and `[repair-1.9 (c)]` fired as 1.9.r1; a disposition is questioned only if its premise is false; (4) the promote bullet present once in each of CLAUDE.md and AGENTS.md; (5) 1.9.r1's record present if taken, read for a round trip it reports broken. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; no new sweep, probe generator or browser drive. The report fills docs/reviews/TEMPLATE.md (the gate table from the accepted evidence, test counts and coverage from the accepted logs, findings — blockers only, or `None.` —, three riskiest things, class-level lessons). Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory.",
+  "acceptance": "/logs/reviews/1/r10/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r10h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r10b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r10",
+  "description": "Review attempt r10, sol reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r10 (after the r9 FAIL, DECISIONS #review-1-r9; all three r9 reports were independent — DECISIONS #025's condition met by the parallel start). Scope, in Michael's words (DECISIONS #041 D1): \"confirming the two fixes and the backlog dispositions, blockers only, no new sweeps or browser drives\". Confirm, from the tree and the accepted gate evidence (/logs/ci/1.verify.r10h/accepted/, three OS directories in both artifacts; the spec-file count read from the directory; the accepted logs stand for the cold build): (1) O1 fixed by 1.67 — the `emphasis`/`strong` app handlers in packages/core/src/format.ts read against the installed `mdast-util-to-markdown` handlers, the pair sweep with its two named guards and the join and separator-deletion legs in packages/editor/test/adjacent-runs.test.ts, green on three OSes; (2) O3 fixed by 1.68 — e2e/web/editor-soft-line-breaks.spec.ts's click precondition bounded, no magnitude asserted, green on three OSes; (3) the r9 dispositions in DECISIONS #review-1-r9 present in docs/V1.1-BACKLOG.md with their triggers, not re-derived: O2 (the block-local bridge, position-map-inverse.test.ts:583, toggle.test.ts:2009), O4 (positions.ts:1060 `overlapping-edit`), O5 (toggle.ts:414/:420), O6 (schema.ts:1042/:1055), O7 (toggle.ts:508, the neither-neighbour boundary), O8 (toggle.ts:675, the dropped-whitespace shortcut), O9 (toggle.ts:692, the leaf-start twin, superseding the `[1.63]` line's trigger), the `[review-1-r9 O1]` correction of `[review-1-r6 L11]`, and `[repair-1.9 (c)]` fired as 1.9.r1; a disposition is questioned only if its premise is false; (4) the promote bullet present once in each of CLAUDE.md and AGENTS.md; (5) 1.9.r1's record present if taken, read for a round trip it reports broken. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; no new sweep, probe generator or browser drive. The report fills docs/reviews/TEMPLATE.md (the gate table from the accepted evidence, test counts and coverage from the accepted logs, findings — blockers only, or `None.` —, three riskiest things, class-level lessons). Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory.",
+  "acceptance": "/logs/reviews/1/r10/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r10h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r10c",
+  "model": "grok",
+  "execution": "reviewer",
+  "reviewer": "grok",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r10",
+  "description": "Review attempt r10, grok reviewer, for review set 1.10 (phase 1). Review set for Phase 1, attempt r10 (after the r9 FAIL, DECISIONS #review-1-r9; all three r9 reports were independent — DECISIONS #025's condition met by the parallel start). Scope, in Michael's words (DECISIONS #041 D1): \"confirming the two fixes and the backlog dispositions, blockers only, no new sweeps or browser drives\". Confirm, from the tree and the accepted gate evidence (/logs/ci/1.verify.r10h/accepted/, three OS directories in both artifacts; the spec-file count read from the directory; the accepted logs stand for the cold build): (1) O1 fixed by 1.67 — the `emphasis`/`strong` app handlers in packages/core/src/format.ts read against the installed `mdast-util-to-markdown` handlers, the pair sweep with its two named guards and the join and separator-deletion legs in packages/editor/test/adjacent-runs.test.ts, green on three OSes; (2) O3 fixed by 1.68 — e2e/web/editor-soft-line-breaks.spec.ts's click precondition bounded, no magnitude asserted, green on three OSes; (3) the r9 dispositions in DECISIONS #review-1-r9 present in docs/V1.1-BACKLOG.md with their triggers, not re-derived: O2 (the block-local bridge, position-map-inverse.test.ts:583, toggle.test.ts:2009), O4 (positions.ts:1060 `overlapping-edit`), O5 (toggle.ts:414/:420), O6 (schema.ts:1042/:1055), O7 (toggle.ts:508, the neither-neighbour boundary), O8 (toggle.ts:675, the dropped-whitespace shortcut), O9 (toggle.ts:692, the leaf-start twin, superseding the `[1.63]` line's trigger), the `[review-1-r9 O1]` correction of `[review-1-r6 L11]`, and `[repair-1.9 (c)]` fired as 1.9.r1; a disposition is questioned only if its premise is false; (4) the promote bullet present once in each of CLAUDE.md and AGENTS.md; (5) 1.9.r1's record present if taken, read for a round trip it reports broken. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; no new sweep, probe generator or browser drive. The report fills docs/reviews/TEMPLATE.md (the gate table from the accepted evidence, test counts and coverage from the accepted logs, findings — blockers only, or `None.` —, three riskiest things, class-level lessons). Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory.",
+  "acceptance": "/logs/reviews/1/r10/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "1.verify.r10h"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
+  "id": "1.10.r10d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "reviewSet": "1.10",
+  "reviewAttempt": "r10",
+  "description": "Reconciliation of review attempt r10 for review set 1.10 (phase 1): copy the three reports to docs/reviews/phase-1-r10-{claude,sol,grok}.md, append accepted human records by recordTarget into DECISIONS.md (1.9.r1's to #002-outline-feel), write DECISIONS.md#review-1-r10 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 1.verify.r11 and 1.10.r11a/b/c/d in the same planning commit (RUNNER-SPEC §5.4). A blocker reported in r10, or a round trip 1.9.r1's note reports broken, goes to Michael before any planning commit (DECISIONS #041 D1): the reconciliation gives him the finding with its counts and its route and writes no planning commit until he answers; the task stays principal-pending.",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "1.10.r10a",
+   "1.10.r10b",
+   "1.10.r10c",
+   "1.9.r1"
+  ],
+  "phase": "1",
+  "targetBranch": "phase/1"
+ },
+ {
   "id": "1.close",
   "model": "opus",
   "execution": "runner",
   "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/1 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/2; then finalise .evidence/closes and the next phase base record.",
   "acceptance": "main == reconciliation_sha of the newest Phase 1 review attempt (verdict PASS); suite green on that commit; branch phase/2 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
   "dependencies": [
-   "1.10.r9d"
+   "1.10.r10d",
+   "1.9.r1"
   ],
   "nextPhase": "2",
   "nextBranch": "phase/2",
