@@ -13,6 +13,8 @@ wt="/work/.wt/$id"
 [ -f /work/ralph/PROMPT.md ] || die "/work/ralph/PROMPT.md missing"
 attempt="${RALPH_ATTEMPT:-1}"
 model="${RALPH_MODEL:-sonnet}"
+# tasks.json keeps the opus|sonnet enum; the alias → full id mapping lives here (DECISIONS, proposal 001 D3).
+[ "$model" = opus ] && model=claude-opus-5-5
 turns="${RALPH_MAX_TURNS:-50}"
 mkdir -p "/logs/tasks/$id"
 logfile="/logs/tasks/$id/$attempt.log"
