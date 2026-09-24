@@ -105,7 +105,7 @@ function stepLoop(ctx, t, r) {
   const logPath = join(ctx.taskLogDir(t.id), `${attempt}.log`);
   // recovery: a dirty tree from a crashed iteration is committed first
   if (gitOut(repo, ["-C", wt, "status", "--porcelain"])) { git(repo, ["-C", wt, "add", "-A"]); git(repo, ["-C", wt, "commit", "-q", "-m", `wip(${t.id}): recovery of uncommitted changes`]); }
-  const maxTurns = SETUP_TASKS.includes(t.id) ? 30 : 50;
+  const maxTurns = SETUP_TASKS.includes(t.id) ? 30 : 80; // 50 → 80 at the Phase 2 boundary (DECISIONS: turn budget, Michael's yes)
   const cmd = process.env.RALPH_ITERATION_CMD ?? `docker compose run --rm claude-task`;
   const env = { ESSAYDOWN_ROOT: ctx.root, RALPH_ATTEMPT: String(attempt), RALPH_MODEL: t.model, RALPH_MAX_TURNS: String(maxTurns), RALPH_TASK_ID: t.id, RALPH_WORKTREE: wt, RALPH_LOG: logPath };
   console.log(`[ralph] ${t.id} attempt ${attempt} (${t.execution}, ${t.model}, max-turns ${maxTurns}) in ${wt}`);

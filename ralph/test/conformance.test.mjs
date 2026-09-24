@@ -112,6 +112,15 @@ test("stop-check: STUCK after 3 attempts without DONE; retry resets; NO-JOURNAL 
   cleanup(f.root);
 });
 
+test("turn budget: an implementation attempt runs at max-turns 80 (Phase 2 boundary; [review-1-r1, turn budget])", () => {
+  const f = makeFixture({ phases: onePhase() });
+  control(f.root, "0.1", { done: false });
+  const out = ralph(f.root, ["run", "--phase", "0"]).out;
+  assert.match(out, /\[ralph\] 0\.1 attempt 1 \(loop, [a-z]+, max-turns 80\)/);
+  assert.doesNotMatch(out, /max-turns 50\b/);
+  cleanup(f.root);
+});
+
 test("approval rejection → plan request → planning commit → dependents rewired → superseded gate", () => {
   const f = makeFixture({ phases: onePhase({ extra: [approval] }) });
   let r = runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.5v" });
