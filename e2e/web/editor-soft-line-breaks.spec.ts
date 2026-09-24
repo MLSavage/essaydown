@@ -113,6 +113,34 @@ function caret(page: Page): Promise<{ kind: string; text: string | null; offset:
   });
 }
 
+/**
+ * A computed-point click made bounded (DECISIONS #review-1-r9 O3, #041 D1): the click was lost
+ * once in three full-suite container runs, or landed after the layout it was computed from
+ * moved. Up to three tries, each re-reading `geometry` immediately before its own
+ * `page.mouse.click` and then polling the caret with a short bound; the first try whose caret
+ * reads `expected` stops the loop. The try count is never asserted here and no timing magnitude
+ * from any one run enters this helper (#037, #039) — each poll uses Playwright's own default
+ * timeout. The caller's own `expect.poll(() => caret(page))` still asserts the precondition
+ * afterwards, exactly as before this helper existed; that assertion, not this one, is what a
+ * genuinely lost click still fails.
+ */
+async function clickAtComputedPoint(
+  page: Page,
+  geometry: () => Promise<{ x: number; y: number }>,
+  expected: { kind: string; text: string | null; offset: number },
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const point = await geometry();
+    await page.mouse.click(point.x, point.y);
+    try {
+      await expect.poll(() => caret(page)).toEqual(expected);
+      return;
+    } catch {
+      // The next try re-reads the geometry; the caller's own poll is the final assertion.
+    }
+  }
+}
+
 test.describe("a soft line break survives typing, and the whitespace around it never reaches the Markdown", () => {
   test("G3: a character typed at the end of a wrapped paragraph keeps the break", async ({
     page,
@@ -157,28 +185,28 @@ test.describe("a soft line break survives typing, and the whitespace around it n
     // flight, so the caret is placed there instead: a `Range` over the last character of `alpha`,
     // in the paragraph's own text node, gives the geometry to click at (DECISIONS #024, the route
     // beside arrows).
-    const clickPoint = await page.evaluate(() => {
-      const root = document.querySelector(".ProseMirror");
-      if (root === null) throw new Error("no .ProseMirror root");
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      let target: Text | null = null;
-      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-        if (node.textContent === "alpha\nbeta gamma") {
-          target = node as Text;
-          break;
+    const geometry = () =>
+      page.evaluate(() => {
+        const root = document.querySelector(".ProseMirror");
+        if (root === null) throw new Error("no .ProseMirror root");
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let target: Text | null = null;
+        for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+          if (node.textContent === "alpha\nbeta gamma") {
+            target = node as Text;
+            break;
+          }
         }
-      }
-      if (target === null) throw new Error("text node not found");
-      const range = document.createRange();
-      range.setStart(target, "alpha".length - 1);
-      range.setEnd(target, "alpha".length);
-      const rect = range.getBoundingClientRect();
-      return { x: rect.right - 1, y: rect.top + rect.height / 2 };
-    });
-    await page.mouse.click(clickPoint.x, clickPoint.y);
-    await expect
-      .poll(() => caret(page))
-      .toEqual({ kind: "text", text: "alpha\nbeta gamma", offset: "alpha".length });
+        if (target === null) throw new Error("text node not found");
+        const range = document.createRange();
+        range.setStart(target, "alpha".length - 1);
+        range.setEnd(target, "alpha".length);
+        const rect = range.getBoundingClientRect();
+        return { x: rect.right - 1, y: rect.top + rect.height / 2 };
+      });
+    const expectedCaret = { kind: "text", text: "alpha\nbeta gamma", offset: "alpha".length };
+    await clickAtComputedPoint(page, geometry, expectedCaret);
+    await expect.poll(() => caret(page)).toEqual(expectedCaret);
     await page.keyboard.type(" ", { delay: 10 });
 
     // The discriminator the bytes cannot give (DECISIONS #022: a case whose bytes cannot tell two
