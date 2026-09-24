@@ -1,7 +1,7 @@
 import { gfmAutolinkLiteralToMarkdown } from "mdast-util-gfm-autolink-literal";
 import { gfmStrikethroughToMarkdown } from "mdast-util-gfm-strikethrough";
 import { gfmTableToMarkdown } from "mdast-util-gfm-table";
-import type { Delete, Html, Nodes, Root, Yaml } from "mdast";
+import type { Delete, Emphasis, Html, Nodes, Root, Strong, Yaml } from "mdast";
 import remarkStringify, { type Options } from "remark-stringify";
 import { unified, type Data, type Processor } from "unified";
 
@@ -75,23 +75,32 @@ function classifyCharacter(code: number): "whitespace" | "punctuation" | "other"
 }
 
 /**
- * Whether to encode the character on either side of a `~~` delimiter run so that the run still
- * opens or closes when it is parsed back — the table of `mdast-util-to-markdown`'s
- * `lib/util/encode-info.js`, for the `*` column (GFM's `~` forms the way `*` does, not the stricter
- * `_`): letter outside and punctuation inside → the outside letter is encoded, because
- * `micromark-extension-gfm-strikethrough` can open a run only when what follows is not punctuation
- * or what precedes is (and close it only mirrored), so `x~~.~~` and `~~.~~x` are text; whitespace
- * inside → the inside whitespace is encoded (and the outside letter with it, as the built-ins
- * do), because a run beside whitespace never opens or closes; letter inside → nothing, the run
- * already forms against every neighbour. Punctuation is never encoded (it is what Markdown's own
- * constructs are made of), so punctuation outside beside punctuation inside stays as written: GFM
- * reads `.~~.~~.` as a strikethrough already.
+ * Whether to encode the character on either side of a `~~`, `*` or `_` delimiter run so that the
+ * run still opens or closes when it is parsed back — the table of `mdast-util-to-markdown`'s
+ * `lib/util/encode-info.js`, branch for branch, with `marker` selecting the same column that file
+ * does. For `*` and for GFM's `~` (which forms the way `*` does): letter outside and punctuation
+ * inside → the outside letter is encoded, because `micromark-extension-gfm-strikethrough` can open
+ * a run only when what follows is not punctuation or what precedes is (and close it only
+ * mirrored), so `x~~.~~` and `~~.~~x` are text; whitespace inside → the inside whitespace is
+ * encoded (and the outside letter with it, as the built-ins do), because a run beside whitespace
+ * never opens or closes; letter inside → nothing, the run already forms against every neighbour.
+ * `_` is the one stricter column (`encode-info.js:51`, `marker === '_'`): CommonMark §6.2 forbids
+ * intraword `_`, so a letter on both sides encodes *both* of them, where `*` needs neither.
+ * Punctuation is never encoded (it is what Markdown's own constructs are made of), so punctuation
+ * outside beside punctuation inside stays as written: GFM reads `.~~.~~.` as a strikethrough
+ * already, and CommonMark reads `.*.*.` as emphasis.
  */
-function encodeInfo(outside: number, inside: number): { inside: boolean; outside: boolean } {
+function encodeInfo(
+  outside: number,
+  inside: number,
+  marker: "*" | "_" | "~",
+): { inside: boolean; outside: boolean } {
   const outsideKind = classifyCharacter(outside);
   const insideKind = classifyCharacter(inside);
   if (outsideKind === "other") {
-    if (insideKind === "other") return { inside: false, outside: false };
+    if (insideKind === "other") {
+      return marker === "_" ? { inside: true, outside: true } : { inside: false, outside: false };
+    }
     if (insideKind === "whitespace") return { inside: true, outside: true };
     return { inside: false, outside: true };
   }
@@ -142,10 +151,10 @@ export function handleDelete(
     state.containerPhrasing(node, { after: marker, before, ...tracker.current() }),
   );
   const betweenHead = between.charCodeAt(0);
-  const open = encodeInfo(info.before.charCodeAt(info.before.length - 1), betweenHead);
+  const open = encodeInfo(info.before.charCodeAt(info.before.length - 1), betweenHead, marker);
   if (open.inside) between = encodeCharacterReference(betweenHead) + between.slice(1);
   const betweenTail = between.charCodeAt(between.length - 1);
-  const close = encodeInfo(info.after.charCodeAt(0), betweenTail);
+  const close = encodeInfo(info.after.charCodeAt(0), betweenTail, marker);
   if (close.inside) between = between.slice(0, -1) + encodeCharacterReference(betweenTail);
   const after = tracker.move(marker + marker);
   exit();
@@ -154,6 +163,147 @@ export function handleDelete(
 }
 handleDelete.peek = function peekDelete(): string {
   return "~";
+};
+
+/**
+ * The parent every phrasing handler is dispatched with. `mdast-util-to-markdown` types a handler's
+ * second argument `Parents | undefined` for the one node that has no parent — `root`, which
+ * {@link handleRoot} answers — so a handler for a phrasing node is always called with a parent, as
+ * `containerPhrasing` shows (`util/container-phrasing.js:82`, the parent it was given). The type
+ * cannot be narrowed on the handler itself (`Handlers` is a record of `Handle`, whose parameters
+ * TypeScript checks contravariantly), so the `undefined` case is a guard in
+ * {@link opensBesideAttentionRun} rather than a signature.
+ */
+
+/** The two node types whose bytes end in the `*` or `_` of a delimiter run. */
+const ATTENTION_TYPES: ReadonlySet<string> = new Set(["emphasis", "strong"]);
+
+/**
+ * Whether the delimiter run this node is about to open would be written flush against the closing
+ * delimiter run of an adjacent sibling of the same marker — the one condition
+ * {@link handleEmphasis} and {@link handleStrong} take the other marker on.
+ *
+ * Both halves are needed and neither alone is the rule. The **bytes** half (`before` ends in `*`)
+ * is not enough: the character before a run is also `*` when the run is the first child of its own
+ * `emphasis` or `strong` parent, where `***a***` is one nesting and not two runs. The **tree**
+ * half (the previous sibling is an attention node) is not enough either: in
+ * `emphasis + strong + emphasis` the middle run has already taken `_`, so the third run's
+ * neighbour is `_` and `*` is the marker that does not collide. Read together they name exactly
+ * the adjacency: the previous sibling wrote a run, and what it wrote ends in the marker this run
+ * would open with.
+ *
+ * `parent` is `undefined` only for `root` (see {@link DefinedParent}), which is not an attention
+ * node's parent; the guard is there because `mdast-util-to-markdown` types it so, and
+ * `packages/core/test/adjacent-attention.test.ts` is where that branch is exercised.
+ */
+export function opensBesideAttentionRun(node: Nodes, parent: Parents, before: string): boolean {
+  if (before.charAt(before.length - 1) !== "*") return false;
+  const siblings: readonly Nodes[] = parent === undefined ? [] : (parent.children as Nodes[]);
+  const previous = siblings[siblings.indexOf(node) - 1];
+  return previous !== undefined && ATTENTION_TYPES.has(previous.type);
+}
+
+/**
+ * The `emphasis` and `strong` handlers, replacing the built-ins of
+ * `mdast-util-to-markdown/lib/handle/emphasis.js` and `lib/handle/strong.js` (DECISIONS
+ * #review-1-r9 O1). The built-ins choose their marker from `state.options` alone
+ * (`util/check-emphasis.js:10`, `util/check-strong.js:10`) and encode only the neighbours *outside*
+ * the run (`handle/emphasis.js:33-48`, `handle/strong.js:33-48`, through
+ * `util/encode-info.js`), never a neighbour that is itself the delimiter of an adjacent run. Two
+ * flanking runs of different marks made adjacent by one keystroke — Backspace joining `*(b)*` and
+ * `**z**`, or Delete of the single space in `*(b)* **z**` — therefore serialised as `*(b)***z**`,
+ * one `***` delimiter run that CommonMark reads as neither run's, so the bytes parse back to
+ * `text("*(b)*") + strong("z")`, and Copy Markdown put them on the clipboard.
+ *
+ * The rule, stated once: **a run opens with `_` (`__` for strong) when the character already
+ * written before it is the `*` it would otherwise open with, and with `*` otherwise** — so the
+ * neighbouring run's closing delimiter and this run's opening delimiter are never one run. The
+ * alternative marker is legal at exactly the positions the rule fires at: the character before is
+ * `*`, which CommonMark §6.2 classifies as punctuation, and an `_` run preceded by punctuation is
+ * left-flanking-and-openable whatever follows it, while the stricter cells `_` has against letters
+ * are the ones {@link encodeInfo}'s `marker === "_"` column encodes, exactly as the built-ins do
+ * for `_` (the parser's own rule, read in `encode-info.js`, never assumed here). The rule is a
+ * function of the tree and of the bytes already written for its neighbours, so it makes the same
+ * choice on the second pass: `format` stays a fixed point of `parse ∘ format`.
+ *
+ * Ownership of a zero-width run: a run with no children writes its two delimiters with nothing
+ * between them and is decided by the same rule — `info.before`'s last character — because the
+ * character before the opening delimiter is all the rule reads; `between` is `""`, whose
+ * `charCodeAt` is `NaN`, the "other" class, which is the built-ins' own reading of an empty inside
+ * and encodes nothing. Such a node is not reachable from the editor (an empty mark is dropped) and
+ * is reached here only from a hand-built tree.
+ *
+ * `_` is stricter than `*` against letters, and that strictness is the built-ins' own and is kept:
+ * {@link encodeInfo}'s `marker === "_"` column encodes a letter on both sides of a run, so
+ * `emphasis("(b)") + strong("z") + text("w")` is written `*(b)*__&#x7A;__&#x77;` — CommonMark
+ * forbids intraword `_`, and a run whose neighbour is its own content's letter forms only once
+ * one of the two is a reference. Every side read here is non-empty: `containerFlow` hands a block
+ * `before: "\n"` and `after: "\n"` and `handle/paragraph.js:16` passes them through, so the
+ * `NaN` an empty side would give `charCodeAt` never reaches {@link classifyCharacter} for these
+ * two handlers (asserted by the whole suite: a `throw` on an empty side is never taken).
+ *
+ * Everything else is the built-in's body mirrored: the `emphasis` / `strong` construct name for
+ * `state.enter`, the tracker, `containerPhrasing` with the single-character `after`, the two
+ * {@link encodeInfo} calls, `state.attentionEncodeSurroundingInfo` for the neighbours outside, and
+ * `peek`. `peek` answers `*` always: `containerPhrasing` calls it with `before: ''`
+ * (`util/container-phrasing.js:50-54`), so it cannot know which marker this run will take, and it
+ * does not need to — `*` and `_` are both punctuation, so the previous sibling classifies its own
+ * closing neighbour identically either way, and `_` in text is escaped unconditionally
+ * (`unsafe.js:133`), so no text byte depends on the answer.
+ */
+function handleAttention(
+  node: Emphasis | Strong,
+  parent: Parents,
+  state: ToMarkdownState,
+  info: Info,
+  construct: "emphasis" | "strong",
+  width: 1 | 2,
+): string {
+  const beforeCode = info.before.charCodeAt(info.before.length - 1);
+  const marker = opensBesideAttentionRun(node, parent, info.before) ? "_" : "*";
+  const run = marker.repeat(width);
+  const exit = state.enter(construct);
+  const tracker = state.createTracker(info);
+  const before = tracker.move(run);
+  let between = tracker.move(
+    state.containerPhrasing(node, { after: marker, before, ...tracker.current() }),
+  );
+  const betweenHead = between.charCodeAt(0);
+  const open = encodeInfo(beforeCode, betweenHead, marker);
+  if (open.inside) between = encodeCharacterReference(betweenHead) + between.slice(1);
+  const betweenTail = between.charCodeAt(between.length - 1);
+  const close = encodeInfo(info.after.charCodeAt(0), betweenTail, marker);
+  if (close.inside) between = between.slice(0, -1) + encodeCharacterReference(betweenTail);
+  const after = tracker.move(run);
+  exit();
+  state.attentionEncodeSurroundingInfo = { after: close.outside, before: open.outside };
+  return before + between + after;
+}
+
+/** The `emphasis` handler of {@link handleAttention}: one marker character. */
+export function handleEmphasis(
+  node: Emphasis,
+  parent: Parents,
+  state: ToMarkdownState,
+  info: Info,
+): string {
+  return handleAttention(node, parent, state, info, "emphasis", 1);
+}
+handleEmphasis.peek = function peekEmphasis(): string {
+  return "*";
+};
+
+/** The `strong` handler of {@link handleAttention}: the marker character twice. */
+export function handleStrong(
+  node: Strong,
+  parent: Parents,
+  state: ToMarkdownState,
+  info: Info,
+): string {
+  return handleAttention(node, parent, state, info, "strong", 2);
+}
+handleStrong.peek = function peekStrong(): string {
+  return "*";
 };
 
 /**
@@ -794,7 +944,11 @@ export function handleRoot(node: Root, _parent: Parents, state: ToMarkdownState,
  * The `mdast-util` serializers matching the parse-side extension set (PRD §4). The strikethrough
  * extension is taken for its `unsafe` pattern only: `mdast-util-to-markdown` merges `handlers`
  * with `Object.assign` in extension order (`lib/configure.js`), so the app's {@link handleDelete}
- * — registered here, after the extension — is the one that runs for every `delete` node.
+ * — registered here, after the extension — is the one that runs for every `delete` node. The last
+ * entry replaces two *built-in* handlers the same way: the built-ins are the base `Object.assign`
+ * starts from (`lib/handle/index.js`), so {@link handleEmphasis} and {@link handleStrong},
+ * registered after every extension, are the handlers that run for every `emphasis` and `strong`
+ * node.
  */
 export function toMarkdownExtensions(): ToMarkdownExtensions {
   return [
@@ -802,6 +956,7 @@ export function toMarkdownExtensions(): ToMarkdownExtensions {
     gfmStrikethroughToMarkdown(),
     { handlers: { delete: handleDelete } },
     gfmAutolinkLiteralToMarkdown(),
+    { handlers: { emphasis: handleEmphasis, strong: handleStrong } },
   ];
 }
 
