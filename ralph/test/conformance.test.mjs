@@ -868,6 +868,47 @@ test("ralph/PROMPT.md's iteration steps 2–5 are CLAUDE.md's steps 2–5 verbat
   assert.match(wrapper[5], /print exactly: `<promise>DONE \{\{TASK_ID\}\}<\/promise>`/);
 });
 
+/** A phase-0 fixture driven to PRINCIPAL 0.9.r0d, then a FAIL reconciliation that appends 0.3, 0.verify.r1 and an r1 set with `rows` reviewers. */
+function failR0WithR1(rows) {
+  const f = makeFixture({ phases: onePhase() });
+  const r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r0d" });
+  assert.equal(r.stopped, "PRINCIPAL 0.9.r0d");
+  const rev = { a: ["claude", "claude-opus"], b: ["sol", "sol"], c: ["grok", "grok"] };
+  const tasks = phaseTasks("0", { next: "1" });
+  const verify = tasks.find((x) => x.id === "0.verify"), close = tasks.find((x) => x.id === "0.close");
+  tasks.splice(tasks.indexOf(close), 0,
+    { id: "0.3", model: "sonnet", description: "fix from review", acceptance: "x", dependencies: ["0.9.r0d"] },
+    { ...verify, id: "0.verify.r1", dependencies: ["0.3"], ci: { ...verify.ci, refTemplate: "ci/0.verify.r1/a{n}" } },
+    ...rows.map((s) => ({ id: `0.9.r1${s}`, model: rev[s][1], execution: "reviewer", reviewer: rev[s][0], reviewSet: "0.9", reviewAttempt: "r1", description: "review r1", acceptance: "x", dependencies: ["0.verify.r1"] })),
+    { id: "0.9.r1d", model: "opus", execution: "interactive-principal", reviewSet: "0.9", reviewAttempt: "r1", description: "reconcile r1", acceptance: "x", dependencies: rows.map((s) => `0.9.r1${s}`) });
+  close.dependencies = ["0.9.r1d"];
+  principalCommit(f.root, join(f.root, ".wt/0.9.r0d"), "0.9.r0d", { verdict: "FAIL", phase: "0", attempt: "r0", prdText: prdFor([{ n: "0", tasks }]) });
+  return f;
+}
+
+test("Grok r0-only (Michael, Phase 2 boundary): an r1 set with only a and b runs two reviewers and its d becomes eligible; with c present it runs three", async (t) => {
+  await t.test("r1 with a and b only: two reviewers, no grok directory, PRINCIPAL 0.9.r1d", () => {
+    const f = failR0WithR1(["a", "b"]);
+    const r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r1d" });
+    assert.equal(r.stopped, "PRINCIPAL 0.9.r1d", r.error ?? r.log.slice(-1)[0]);
+    const s = state(f.root);
+    assert.equal(s["0.9.r1a"].status, "passed"); assert.equal(s["0.9.r1b"].status, "passed");
+    assert.equal(s["0.9.r1c"], undefined);
+    for (const who of ["claude", "sol"]) assert.ok(existsSync(join(f.root, `.evidence/reviews/0/r1/${who}/report.md`)), who);
+    assert.equal(existsSync(join(f.root, ".evidence/reviews/0/r1/grok")), false, "no grok reviewer ran at r1");
+    assert.ok(existsSync(join(f.root, ".evidence/reviews/0/r0/grok/report.md")), "grok still ran at r0");
+    cleanup(f.root);
+  });
+  await t.test("r1 with c present: three reviewers, as before", () => {
+    const f = failR0WithR1(["a", "b", "c"]);
+    const r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r1d" });
+    assert.equal(r.stopped, "PRINCIPAL 0.9.r1d", r.error ?? r.log.slice(-1)[0]);
+    for (const who of ["claude", "sol", "grok"]) assert.ok(existsSync(join(f.root, `.evidence/reviews/0/r1/${who}/report.md`)), who);
+    assert.equal(state(f.root)["0.9.r1c"].status, "passed");
+    cleanup(f.root);
+  });
+});
+
 test("recovery-commit guard (handoffs 028, 029; #review-1-r7 M3 (b)): the runner's recovery commit flags a source change on a test-only task and a swept zz-* probe; one case per guard", async (t) => {
   const fixture = (description) => {
     const tasks = phaseTasks("0", { next: "1" });

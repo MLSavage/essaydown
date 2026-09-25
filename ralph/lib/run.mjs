@@ -250,7 +250,8 @@ function stepPlan(ctx, plan) {
 /** Review attempt r<k>: record metadata (§5.1), three parallel reviewers from one snapshot (§5.2). */
 function stepReview(ctx, t) {
   const phase = t.phase, attempt = t.reviewAttempt, set = t.reviewSet;
-  const trio = ["a", "b", "c"].map((s) => ctx.task(`${set}.${attempt}${s}`));
+  // the reviewer rows that exist: r0 has a/b/c; a later attempt may omit c (Grok r0-only; Michael, Phase 2 boundary)
+  const trio = ["a", "b", "c"].filter((s) => ctx.hasTask(`${set}.${attempt}${s}`)).map((s) => ctx.task(`${set}.${attempt}${s}`));
   const s = ctx.state();
   const todo = trio.filter((x) => ["pending", "running"].includes(s[x.id].status));
   if (!todo.length) return {};

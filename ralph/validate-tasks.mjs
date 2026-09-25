@@ -127,8 +127,10 @@ export function validate(tasks, { expectedCount = null } = {}) {
       const newest = `${set}.r${attempts[attempts.length - 1]}d`;
       for (const k of attempts) {
         const d = byId.get(`${set}.r${k}d`);
-        const abc = ["a", "b", "c"].map((s) => byId.get(`${set}.r${k}${s}`));
-        if (abc.some((x) => !x)) { err(`phase ${p}: attempt r${k} lacks a/b/c reviewer tasks`); continue; }
+        // r0 has all three reviewers; from r1 the `c` (Grok) row may be omitted — Grok reviews r0 only
+        // (Michael, Phase 2 boundary, "Grok r0-only"); a present `c` is checked like a and b
+        const abc = ["a", "b", "c"].map((s) => byId.get(`${set}.r${k}${s}`)).filter((x, i) => x || k === 0 || i < 2);
+        if (abc.some((x) => !x)) { err(`phase ${p}: attempt r${k} lacks ${k === 0 ? "a/b/c" : "a/b"} reviewer tasks`); continue; }
         for (const x of abc) if (x.execution !== "reviewer") err(`${x.id}: must be execution reviewer`);
         if (!abc.every((x) => d.dependencies.includes(x.id))) err(`${d.id}: must depend on ${abc.map((x) => x.id).join(", ")}`);
         // the attempt's verifier gate: N.verify[.r<k>][.g<n>]h must be among the reviewers' dependencies

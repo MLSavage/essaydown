@@ -58,6 +58,39 @@ const cases = [
 ];
 for (const [name, mutate, re] of cases) test(`validator rejects: ${name}`, () => { const errs = errorsFor(mutate); assert.ok(errs.length > 0, "expected errors"); assert.match(errs.join("\n"), re); });
 
+// Grok r0-only (Michael, Phase 2 boundary): an r<k> (k ≥ 1) attempt may omit its `c` row; r0 may not
+const addR1 = (raw, suffixes, dDeps = suffixes) => {
+  const rev = { a: ["claude", "claude-opus"], b: ["sol", "sol"], c: ["grok", "grok"] };
+  raw.push({ id: "0.2", model: "sonnet", description: "fix", acceptance: "x", dependencies: ["0.9"] });
+  const v = find(raw, "0.verify");
+  raw.push({ ...v, id: "0.verify.r1", dependencies: ["0.2"], ci: { ...v.ci, refTemplate: "ci/0.verify.r1/a{n}" } });
+  for (const s of suffixes) raw.push({ id: `0.9.r1${s}`, model: rev[s][1], execution: "reviewer", reviewer: rev[s][0], reviewSet: "0.9", reviewAttempt: "r1", description: "x", acceptance: "x", dependencies: ["0.verify.r1"] });
+  raw.push({ id: "0.9.r1d", model: "opus", execution: "interactive-principal", reviewSet: "0.9", reviewAttempt: "r1", description: "x", acceptance: "x", dependencies: dDeps.map((s) => `0.9.r1${s}`) });
+  find(raw, "0.close").dependencies = ["0.9.r1d"];
+};
+const validateRaw = (raw) => { const exp = expand(raw); return validate(exp, { expectedCount: exp.length }); };
+
+test("Grok r0-only: an r1 attempt with a and b and a d depending on a and b validates", () => {
+  const raw = base(); addR1(raw, ["a", "b"]);
+  assert.deepEqual(validateRaw(raw), []);
+});
+test("Grok r0-only: an r1 attempt with c present still validates (and d must depend on it)", () => {
+  const raw = base(); addR1(raw, ["a", "b", "c"]);
+  assert.deepEqual(validateRaw(raw), []);
+  const raw2 = base(); addR1(raw2, ["a", "b", "c"], ["a", "b"]);
+  assert.match(validateRaw(raw2).join("\n"), /0\.9\.r1d: must depend on 0\.9\.r1a, 0\.9\.r1b, 0\.9\.r1c/);
+});
+test("Grok r0-only: an r1 attempt without b is rejected", () => {
+  const raw = base(); addR1(raw, ["a"]);
+  assert.match(validateRaw(raw).join("\n"), /attempt r1 lacks a\/b reviewer tasks/);
+});
+test("Grok r0-only: r0 is still generated with a/b/c and an r0 without c is rejected", () => {
+  const exp = expand(base());
+  assert.deepEqual(exp.filter((t) => t.reviewAttempt === "r0").map((t) => t.id), ["0.9.r0a", "0.9.r0b", "0.9.r0c", "0.9.r0d"]);
+  const cut = exp.filter((t) => t.id !== "0.9.r0c").map((t) => (t.id === "0.9.r0d" ? { ...t, dependencies: ["0.9.r0a", "0.9.r0b"] } : t));
+  assert.match(validate(cut, { expectedCount: cut.length }).join("\n"), /attempt r0 lacks a\/b\/c reviewer tasks/);
+});
+
 test("review attempt chain must be linear and the close must depend on the newest d", () => {
   const raw = base();
   // add an r2 attempt without r1
