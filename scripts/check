@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# scripts/check — `pnpm lint`, `pnpm test`, `cargo test`, printing only failures and the pass/fail
+# counts per step; exit non-zero on any failure. `scripts/check lint` (or test, cargo) runs a subset.
+# The logic and its parsers live in scripts/check.mjs (tested by ralph/test/check.test.mjs).
+set -euo pipefail
+exec node "$(dirname "${BASH_SOURCE[0]}")/check.mjs" "$@"
