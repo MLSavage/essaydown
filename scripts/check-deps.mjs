@@ -6,6 +6,9 @@
 // in the Cargo workspace, collects direct dependency names, and checks each against the committed
 // allowlist docs/dependencies.json. Fails naming the package and its manifest when a direct dependency
 // has no entry, and fails naming a stale entry when the allowlist names a package no manifest declares.
+// The allowlist's `majors` map ({package: "Product"}) pins a major version: each declared range of
+// that package must carry the major PRD §4 names as "Product <N>" in the row the npm entry cites, so a
+// silent major bump is red (DECISIONS #043, the React 19 drift of #review-1-r8 N5).
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,11 +59,50 @@ export function npmDependencies(root) {
     for (const field of NPM_FIELDS) {
       for (const [name, spec] of Object.entries(pkg[field] ?? {})) {
         if (typeof spec === "string" && spec.startsWith("workspace:")) continue;
-        out.push({ name, manifest });
+        out.push({ name, manifest, spec });
       }
     }
   }
   return out;
+}
+
+/** The first integer of a semver range ("^19.1.0" → 19), or null for a range with none. */
+function rangeMajor(spec) {
+  const m = /(\d+)/.exec(spec);
+  return m ? Number(m[1]) : null;
+}
+
+/** Errors for every declared package pinned in allowlist.majors whose range major differs from the
+ * "Product <N>" its cited PRD §4 row names. PRD.md is read only when a pinned package is declared. */
+export function checkMajors(root, allowlist, deps) {
+  const errors = [];
+  const majors = allowlist.majors ?? {};
+  let prd = null;
+  for (const { name, manifest, spec } of deps) {
+    if (!(name in majors)) continue;
+    const product = majors[name];
+    const cite = /^PRD §4 (.+) row$/.exec((allowlist.npm ?? {})[name] ?? "");
+    if (!cite) {
+      errors.push(
+        `majors entry "${name}" in docs/dependencies.json: its npm entry does not cite a PRD §4 row`,
+      );
+      continue;
+    }
+    prd ??= readFileSync(join(root, "docs/PRD.md"), "utf8");
+    const row = prd.split("\n").find((l) => l.startsWith(`| ${cite[1]} |`));
+    const pinned = row && new RegExp(`\\b${product} (\\d+)\\b`).exec(row);
+    if (!pinned) {
+      errors.push(`majors entry "${name}": PRD §4 ${cite[1]} row names no "${product} <N>"`);
+      continue;
+    }
+    const got = rangeMajor(spec);
+    if (got !== Number(pinned[1])) {
+      errors.push(
+        `major drift: "${name}" is ${spec} in ${manifest} but PRD §4 ${cite[1]} row names ${product} ${pinned[1]}`,
+      );
+    }
+  }
+  return errors;
 }
 
 /** Every Cargo.toml in the Cargo workspace: the root plus every `[workspace].members` entry. */
@@ -110,8 +152,9 @@ export function checkAllowlist(root) {
   const npmAllowed = allowlist.npm ?? {};
   const cargoAllowed = allowlist.cargo ?? {};
 
+  const npmDeps = npmDependencies(root);
   const seenNpm = new Set();
-  for (const { name, manifest } of npmDependencies(root)) {
+  for (const { name, manifest } of npmDeps) {
     seenNpm.add(name);
     if (!(name in npmAllowed)) {
       errors.push(
@@ -144,6 +187,7 @@ export function checkAllowlist(root) {
     }
   }
 
+  errors.push(...checkMajors(root, allowlist, npmDeps));
   return errors;
 }
 

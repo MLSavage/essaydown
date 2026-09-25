@@ -113,6 +113,55 @@ describe("check-deps: failure modes (temp-dir copies of the real workspace)", ()
     expect(r.stderr).toContain(join("apps", "desktop", "src-tauri", "Cargo.toml"));
   });
 
+  /** scratch() plus the desktop manifest and PRD.md, so the majors map (DECISIONS #043) has a pinned package to read. */
+  function scratchWithMajors() {
+    const dir = scratch();
+    cpSync(join(root, "apps/desktop/package.json"), join(dir, "apps/desktop/package.json"));
+    cpSync(join(root, "docs/PRD.md"), join(dir, "docs/PRD.md"));
+    return dir;
+  }
+
+  it("a pinned package at the PRD row's major passes (presence case of the majors map)", () => {
+    const dir = scratchWithMajors();
+    const r = runCli(dir);
+    // the partial scratch copy reports stale entries for the packages it omits; only the majors lines matter here
+    expect(r.stderr).not.toContain("major drift");
+    expect(r.stderr).not.toContain("names no");
+  });
+
+  it("a pinned package at another major fails, naming the package, its range and the row's major", () => {
+    const dir = scratchWithMajors();
+    const pkgPath = join(dir, "apps/desktop/package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    const pinned = JSON.parse(readFileSync(join(root, "docs/dependencies.json"), "utf8")).majors;
+    const name = Object.keys(pinned).find(
+      (k) => !k.startsWith("_") && pkg.dependencies[k],
+    ) as string;
+    const row = /\| Frontend \|.*?React (\d+)/.exec(readFileSync(join(dir, "docs/PRD.md"), "utf8"));
+    expect(row).not.toBeNull();
+    const other = Number(row?.[1]) + 1;
+    pkg.dependencies[name] = `^${other}.0.0`;
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+    const r = runCli(dir);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(`major drift: "${name}" is ^${other}.0.0`);
+    expect(r.stderr).toContain(`React ${row?.[1]}`);
+  });
+
+  it("a PRD row that stops naming the product's major fails", () => {
+    const dir = scratchWithMajors();
+    const prdPath = join(dir, "docs/PRD.md");
+    writeFileSync(
+      prdPath,
+      readFileSync(prdPath, "utf8").replace(/^\| Frontend \|.*$/m, (row) =>
+        row.replace(/React \d+/g, "React"),
+      ),
+    );
+    const r = runCli(dir);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("PRD §4 Frontend row names no");
+  });
+
   it("a stale allowlist entry fails, naming it", () => {
     const dir = scratch();
     const depsPath = join(dir, "docs/dependencies.json");
