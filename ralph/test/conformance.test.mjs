@@ -868,6 +868,76 @@ test("ralph/PROMPT.md's iteration steps 2–5 are CLAUDE.md's steps 2–5 verbat
   assert.match(wrapper[5], /print exactly: `<promise>DONE \{\{TASK_ID\}\}<\/promise>`/);
 });
 
+test("DECISIONS #025: a single-reviewer retry runs with its siblings held out; one case per guard", async (t) => {
+  const reviewCtl = (root, obj) => writeFileSync(join(root, ".fake", "review-0-r0.json"), JSON.stringify(obj));
+  const R0 = (root) => join(root, ".evidence/reviews/0/r0");
+  const failSol = (ctl) => {
+    const f = makeFixture({ phases: onePhase() });
+    reviewCtl(f.root, ctl);
+    const r = runPhaseGreen(f.root, "0", { until: "STUCK" });
+    assert.equal(r.stopped, "STUCK 0.9.r0", r.error ?? r.log.slice(-1)[0]);
+    assert.equal(state(f.root)["0.9.r0b"].status, "blocked");
+    return f;
+  };
+  await t.test("guard 1: the retried reviewer's attempt directory holds only its own subdirectory and the four metadata files; it reads no sibling report", () => {
+    const f = failSol({ fail: ["sol"] });
+    reviewCtl(f.root, { read: ["sol"] }); // the retry cats every sibling report it can find
+    ok(ralph(f.root, ["retry", "0.9.r0b"]));
+    const r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r0d" });
+    assert.equal(r.stopped, "PRINCIPAL 0.9.r0d", r.error ?? r.log.slice(-1)[0]);
+    assert.deepEqual(readFileSync(join(R0(f.root), "sol/seen.txt"), "utf8").trim().split("\n").sort(), ["implementation_sha", "phase_base_sha", "sol", "verification_sha", "verifier_id"]);
+    assert.doesNotMatch(readFileSync(join(R0(f.root), "sol/transcript.log"), "utf8"), /report\.md/);
+    assert.equal(state(f.root)["0.9.r0b"].status, "passed");
+    assert.match(ralph(f.root, ["doctor"]).out, /^doctor: clean$/m, "the retry ends with doctor clean");
+    cleanup(f.root);
+  });
+  await t.test("guard 3: the siblings are back before passed is written (audit order), and the hold directory is gone", () => {
+    const f = failSol({ fail: ["sol"] });
+    reviewCtl(f.root, {});
+    ok(ralph(f.root, ["retry", "0.9.r0b"]));
+    runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r0d" });
+    for (const who of ["claude", "sol", "grok"]) assert.ok(existsSync(join(R0(f.root), who, "report.md")), who);
+    assert.equal(existsSync(`${R0(f.root)}.held`), false);
+    const audit = readFileSync(join(f.root, ".evidence/state/audit.log"), "utf8").split("\n");
+    const held = audit.findIndex((l) => /review 0\.9\.r0 hold-out: claude, grok moved to/.test(l));
+    const restored = audit.findIndex((l) => /review 0\.9\.r0 hold-out restored: claude, grok/.test(l));
+    const passed = audit.findIndex((l) => /transition 0\.9\.r0b running -> passed/.test(l));
+    assert.ok(held >= 0 && restored > held && passed > restored, `order held ${held} < restored ${restored} < passed ${passed}`);
+    cleanup(f.root);
+  });
+  await t.test("a full-set start is unchanged: no hold-out, every reviewer sees the three directories", () => {
+    const f = makeFixture({ phases: onePhase() });
+    const r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r0d" });
+    assert.equal(r.stopped, "PRINCIPAL 0.9.r0d");
+    assert.equal(existsSync(`${R0(f.root)}.held`), false);
+    assert.doesNotMatch(readFileSync(join(f.root, ".evidence/state/audit.log"), "utf8"), /hold-out/);
+    for (const who of ["claude", "sol", "grok"]) for (const sib of ["claude", "sol", "grok"]) assert.match(readFileSync(join(R0(f.root), who, "seen.txt"), "utf8"), new RegExp(`^${sib}$`, "m"));
+    cleanup(f.root);
+  });
+  await t.test("guard 2: a report whose transcript names a sibling's report of the same attempt is refused (blocked, STUCK)", () => {
+    const f = makeFixture({ phases: onePhase() });
+    reviewCtl(f.root, { cite: ["grok"] });
+    const r = runPhaseGreen(f.root, "0", { until: "STUCK" });
+    assert.equal(r.stopped, "STUCK 0.9.r0");
+    const s = state(f.root);
+    assert.equal(s["0.9.r0c"].status, "blocked");
+    assert.match(s["0.9.r0c"].notes, /report refused: the transcript names a sibling's report of this attempt \(claude, sol\)/);
+    assert.equal(s["0.9.r0a"].status, "passed"); assert.equal(s["0.9.r0b"].status, "passed");
+    cleanup(f.root);
+  });
+  await t.test("guard 4: the retried reviewer's own earlier output is moved aside with its attempt suffix, and a stale report cannot pass the retry", () => {
+    const f = failSol({ failAfterReport: ["sol"] });
+    assert.ok(existsSync(join(R0(f.root), "sol/report.md")), "the failed attempt left a report");
+    reviewCtl(f.root, { fail: ["sol"] }); // the retry writes nothing: the stale report must not carry it
+    ok(ralph(f.root, ["retry", "0.9.r0b"]));
+    runPhaseGreen(f.root, "0", { until: "STUCK" });
+    for (const p of ["report.a1.md", "status.a1.json", "transcript.a1.log"]) assert.ok(existsSync(join(R0(f.root), "sol", p)), p);
+    assert.equal(existsSync(join(R0(f.root), "sol/report.md")), false);
+    assert.equal(state(f.root)["0.9.r0b"].status, "blocked");
+    cleanup(f.root);
+  });
+});
+
 /** A phase-0 fixture driven to PRINCIPAL 0.9.r0d, then a FAIL reconciliation that appends 0.3, 0.verify.r1 and an r1 set with `rows` reviewers. */
 function failR0WithR1(rows) {
   const f = makeFixture({ phases: onePhase() });

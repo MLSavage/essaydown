@@ -1,6 +1,6 @@
 // run.mjs — `ralph.sh run [--phase N]`: selection, one Ralph iteration per attempt, stop-check, reviews,
 // principal hand-offs, human gates, closes (RUNNER-SPEC §4, §5, §11). Sequential; one lock per mutation.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync, rmdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { spawn } from "node:child_process";
 import { RalphError, withLock, revParse, refOid, git, gitOut, rmrf, now, shell, writeAtomic, ensureDir, readJson, writeJsonAtomic } from "./util.mjs";
@@ -247,7 +247,37 @@ function stepPlan(ctx, plan) {
   });
 }
 
-/** Review attempt r<k>: record metadata (§5.1), three parallel reviewers from one snapshot (§5.2). */
+/** Where a single-reviewer run holds its siblings' directories (DECISIONS #025's manual procedure used the same place). */
+const heldDir = (dir) => `${dir}.held`;
+
+/** Move every held sibling directory back into the attempt directory; idempotent. */
+function restoreHeld(ctx, dir, label) {
+  const held = heldDir(dir);
+  if (!existsSync(held)) return;
+  const back = [];
+  for (const who of readdirSync(held)) {
+    if (existsSync(join(dir, who))) throw new RalphError(`${label}: ${join(held, who)} and ${join(dir, who)} both exist; restore by hand (DECISIONS #025)`);
+    renameSync(join(held, who), join(dir, who)); back.push(who);
+  }
+  rmdirSync(held);
+  if (back.length) ctx.audit(`review ${label}`, `hold-out restored: ${back.join(", ")}`);
+}
+
+/**
+ * DECISIONS #025's second guard: a report is refused when the reviewer's own transcript names a sibling's report of
+ * the same attempt (`reviews/<phase>/<attempt>[.held]/<sibling>/report.md`, container or host path). Earlier
+ * attempts' reports and the reviewer's own are not matched.
+ */
+function siblingReportsRead(dir, who, reviewers) {
+  const tr = join(dir, who, "transcript.log");
+  if (!existsSync(tr)) return [];
+  const [attempt, phase] = dir.split("/").reverse();
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const text = readFileSync(tr, "utf8");
+  return reviewers.filter((r) => r !== who && new RegExp(`reviews/${esc(phase)}/${esc(attempt)}(\\.held)?/${esc(r)}/report\\.md`).test(text));
+}
+
+/** Review attempt r<k>: record metadata (§5.1), the attempt's reviewers in parallel from one snapshot (§5.2). */
 function stepReview(ctx, t) {
   const phase = t.phase, attempt = t.reviewAttempt, set = t.reviewSet;
   // the reviewer rows that exist: r0 has a/b/c; a later attempt may omit c (Grok r0-only; Michael, Phase 2 boundary)
@@ -271,16 +301,36 @@ function stepReview(ctx, t) {
   if (acc.sha !== verificationSha) throw new RalphError(`${set}.${attempt}: verifier gate ${gateId} accepted sha ${acc.sha?.slice(0, 7)} != verification_sha ${verificationSha?.slice(0, 7)}`);
   if (acc.sha !== implementationSha) throw new RalphError(`${set}.${attempt}: verifier gate ${gateId} accepted sha ${acc.sha?.slice(0, 7)} != implementation_sha ${implementationSha.slice(0, 7)}`);
   const baseSha = ctx.phases()[phase]?.base_main_sha ?? null;
+  // DECISIONS #025: a strict subset of the attempt's rows (a single-reviewer retry) starts after its siblings finished,
+  // with their reports on disk. Their directories are held out of the attempt directory for the run
+  // (`<attempt>.held/<reviewer>`) and restored before any state transition, so the retried reviewer's view holds
+  // only its own directory and the four metadata files.
+  const held = heldDir(dir);
+  const siblings = trio.filter((x) => !todo.includes(x)).map((x) => x.reviewer);
   withLock(ctx.root, () => {
+    restoreHeld(ctx, dir, `${set}.${attempt}`); // a hold-out a crash left behind is undone before anything starts
     writeAtomic(join(dir, "phase_base_sha"), `${baseSha}\n`);
     writeAtomic(join(dir, "verifier_id"), `${verifierId}\n`);
     writeAtomic(join(dir, "verification_sha"), `${verificationSha}\n`);
     writeAtomic(join(dir, "implementation_sha"), `${implementationSha}\n`);
+    const moved = [];
+    for (const who of siblings) if (existsSync(join(dir, who))) { ensureDir(held); renameSync(join(dir, who), join(held, who)); moved.push(who); }
+    if (moved.length) ctx.audit(`review ${set}.${attempt}`, `hold-out: ${moved.join(", ")} moved to ${held} for ${todo.map((x) => x.reviewer).join(", ")} (DECISIONS #025)`);
     for (const x of todo) {
       const wt = ctx.worktree(`review-${x.reviewer}`);
       rmrf(wt); git(ctx.root, ["worktree", "prune"]);
       git(ctx.root, ["worktree", "add", "--quiet", "--detach", wt, implementationSha]);
       ensureDir(join(dir, x.reviewer));
+      // a retried reviewer's own earlier output is moved aside with an attempt suffix (evidence kept; a stale
+      // report.md would otherwise pass the retry's report check, and grok-review skips its fallback over it).
+      // `retry` resets the attempt counter, so the suffix is the first free `.a<n>`, never an overwrite.
+      const own = ["report.md", "status.json", "transcript.log", "last-message.md"].filter((f) => existsSync(join(dir, x.reviewer, f)));
+      if (own.length) {
+        let n = 1;
+        while (own.some((f) => existsSync(join(dir, x.reviewer, f.replace(/(\.[a-z]+)$/, `.a${n}$1`))))) n++;
+        for (const f of own) renameSync(join(dir, x.reviewer, f), join(dir, x.reviewer, f.replace(/(\.[a-z]+)$/, `.a${n}$1`)));
+        ctx.audit(`review ${set}.${attempt}`, `${x.reviewer}: earlier output moved aside as .a${n} (${own.join(", ")})`);
+      }
       ctx.set(x.id, { status: "running", task_branch: null, started_at: now(), attempts: s[x.id].attempts + 1 }, "reviewer started");
     }
   });
@@ -301,10 +351,13 @@ function stepReview(ctx, t) {
     results.push({ x, code: Number(readFileSync(exitFile, "utf8").trim()) });
   }
   return withLock(ctx.root, () => {
+    restoreHeld(ctx, dir, `${set}.${attempt}`); // the siblings are back before any reviewer's state is written
     let failed = 0;
     for (const { x, code } of results) {
-      const ok = code === 0 && existsSync(join(dir, x.reviewer, "report.md")) && existsSync(join(dir, x.reviewer, "status.json"));
+      const read = siblingReportsRead(dir, x.reviewer, trio.map((y) => y.reviewer));
+      const ok = code === 0 && existsSync(join(dir, x.reviewer, "report.md")) && existsSync(join(dir, x.reviewer, "status.json")) && !read.length;
       if (ok) ctx.set(x.id, { status: "passed", finished_at: now(), integrated_sha: null }, "report ok");
+      else if (read.length) { failed++; ctx.set(x.id, { status: "blocked", notes: `report refused: the transcript names a sibling's report of this attempt (${read.join(", ")}); DECISIONS #025` }, "reviewer read a sibling report"); }
       else { failed++; ctx.set(x.id, { status: "blocked", notes: `reviewer exit ${code}` }, "reviewer failed"); }
       const wt = ctx.worktree(`review-${x.reviewer}`);
       git(ctx.root, ["worktree", "remove", "--force", wt], { check: false }); rmrf(wt);
