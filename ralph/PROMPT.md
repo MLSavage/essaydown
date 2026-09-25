@@ -21,13 +21,14 @@ You are a coding agent inside the essaydown-dev container, in the worktree `/wor
 
 ## Iteration
 
+Steps 2–5 are `CLAUDE.md`'s `## Every iteration` steps 2–5, verbatim (`<id>` is `{{TASK_ID}}`); the conformance suite keeps them identical.
+
 1. `git status`. A dirty tree is committed first as `wip({{TASK_ID}}): recovery of uncommitted changes`. Never rebase.
-2. Implement the task. Scope is the task text: no extra features, no "while I'm here" refactors.
-3. Verify against every acceptance sentence. From task 0.1 onward run `pnpm lint && pnpm test && cargo test` yourself.
-4. Append one journal entry to `docs/progress/journal-main.md` using the template in `docs/progress.md` (`- [{{TASK_ID}}] <ISO> Task: … Status: Complete | Partial | Debugging | Blocked. Files: … Tests: … Iterations used: {{ATTEMPT}}. First attempt passed: y/n. Tool calls: <n>. Notes: <what the next iteration needs>`). Never write a commit SHA into it. Never edit `docs/progress.md`.
-5. If you learned something a future task should know, append one line to `docs/lessons.md` (`[{{TASK_ID}}] <ISO> LESSON: <root cause> → <what to do instead>`).
-6. `git add -A && git commit -m "wip({{TASK_ID}}): <what this iteration did>"`. Every iteration commits, including failed ones.
-7. Only if every acceptance criterion is met and the suite is green, print exactly: `<promise>DONE {{TASK_ID}}</promise>`. Otherwise print what remains and stop.
+2. Before implementing, append a stub journal entry to `docs/progress/journal-main.md` — `- [<id>] <ISO> Task: <the task's first sentence>. Status: In progress.` — and commit it as `wip(<id>): journal stub`, so an attempt cut off at the turn cap leaves a checkpoint the runner reads as a journal entry instead of nothing (a capped attempt still counts toward the three; RUNNER-SPEC §4.3). Each attempt appends its own `- [<id>] ` journal line; completing an earlier attempt's stub and appending nothing is `NO-JOURNAL` even with DONE printed and the suite green (lesson [1.29]; the runner's stop-check counts journal lines per attempt).
+3. Implement, then verify every acceptance sentence. From task 0.1 onward `pnpm lint && pnpm test && cargo test` must be green (root `Cargo.toml` is a workspace so `cargo test` runs from the root). Never `.skip()` a test to get green; file the gap in the journal instead.
+4. Complete your own stub in place, using the template in `docs/progress.md` (never a commit SHA; never edit `docs/progress.md`, it is generated; never touch another task's line — the integrated commit appends exactly one line per attempt). Append to `docs/lessons.md` (`[<id>] <ISO> LESSON: <root cause> → <do instead>`) when you learned something; never edit an old line. Each attempt appends its own `- [<id>] ` journal line; completing an earlier attempt's stub and appending nothing is `NO-JOURNAL` even with DONE printed and the suite green (lesson [1.29]; the runner's stop-check counts journal lines per attempt).
+5. Commit `wip(<id>): …` — every iteration, including failed ones. After 5 tool calls debugging one problem: clean break (notes to lessons + journal, commit, stop without DONE).
+6. Only if every acceptance criterion is met and the suite is green, print exactly: `<promise>DONE {{TASK_ID}}</promise>`. Otherwise print what remains and stop.
 
 ## Clean-break protocol
 

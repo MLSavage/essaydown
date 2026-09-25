@@ -852,6 +852,22 @@ test("ci.yml: every artifact upload or merge step runs if: always() (#review-1-r
   for (const s of uploads) assert.match(s, /\n\s+if: always\(\)\n/, `step "${/- name: (.+)/.exec(s)[1].trim()}" lacks if: always()`);
 });
 
+test("ralph/PROMPT.md's iteration steps 2–5 are CLAUDE.md's steps 2–5 verbatim (#review-1-r2 H7: the wrapper drift at 1.verify.r2.g1)", () => {
+  const repo = join(dirname(new URL(import.meta.url).pathname), "../..");
+  const list = (file, heading) => {
+    const text = readFileSync(join(repo, file), "utf8");
+    const at = text.indexOf(`\n${heading}\n`);
+    assert.ok(at >= 0, `${file} has ${heading}`);
+    const body = text.slice(at + heading.length + 2).split(/\n## /)[0];
+    return body.split("\n").filter((l) => /^\d+\. /.test(l));
+  };
+  const rules = list("CLAUDE.md", "## Every iteration"), wrapper = list("ralph/PROMPT.md", "## Iteration");
+  assert.equal(rules.length, 6); assert.equal(wrapper.length, 6);
+  assert.deepEqual(wrapper.slice(1, 5), rules.slice(1, 5));
+  assert.match(wrapper[1], /stub journal entry/, "the stub-first step is in the wrapper");
+  assert.match(wrapper[5], /print exactly: `<promise>DONE \{\{TASK_ID\}\}<\/promise>`/);
+});
+
 test("transcriptHasDone reads only the assistant's own text (DECISIONS #review-1-r7 M3 (b)): one case per guard", async (t) => {
   const { transcriptHasDone } = await import("../lib/integrate.mjs");
   const { mkdtempSync } = await import("node:fs");
