@@ -186,9 +186,25 @@ export function journalCount(tree, id) {
   return readFileSync(p, "utf8").split("\n").filter((l) => re.test(l)).length;
 }
 
+/**
+ * The DONE promise counts only when the assistant printed it (DECISIONS #review-1-r7 M3 (b)): the transcript is
+ * stream-json, one object per line, and only two kinds of line are the assistant's own words — a `type:"assistant"`
+ * message's `type:"text"` content blocks, and the final `type:"result"` line's `result` string. Tool results, tool
+ * inputs, file echoes (a `cat` of lessons.md or CLAUDE.md), system lines and non-JSON lines never count.
+ */
 export function transcriptHasDone(logPath, id) {
   if (!existsSync(logPath)) return false;
-  return readFileSync(logPath, "utf8").includes(`<promise>DONE ${id}</promise>`);
+  const promise = `<promise>DONE ${id}</promise>`;
+  for (const line of readFileSync(logPath, "utf8").split("\n")) {
+    if (!line.includes(promise)) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o?.type === "result" && typeof o.result === "string" && o.result.includes(promise)) return true;
+    if (o?.type === "assistant" && Array.isArray(o.message?.content)) {
+      for (const b of o.message.content) if (b?.type === "text" && typeof b.text === "string" && b.text.includes(promise)) return true;
+    }
+  }
+  return false;
 }
 
 export function branchHasDone(repo, base, branch, id) {

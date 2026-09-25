@@ -790,3 +790,42 @@ test("stale lock (DECISIONS #review-0-r1 G4): a command that needs the lock refu
   assert.equal(existsSync(lock), false, "the runner left its own lock behind");
   cleanup(f.root);
 });
+
+test("transcriptHasDone reads only the assistant's own text (DECISIONS #review-1-r7 M3 (b)): one case per guard", async (t) => {
+  const { transcriptHasDone } = await import("../lib/integrate.mjs");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "ralph-transcript-"));
+  const id = "9.1", P = `<promise>DONE ${id}</promise>`;
+  let k = 0;
+  const has = (...lines) => { const p = join(dir, `${k++}.log`); writeFileSync(p, lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n") + "\n"); return transcriptHasDone(p, id); };
+  const sys = { type: "system", subtype: "init" };
+  await t.test("a tool_result echoing the promise (a cat of a lessons line) does not count", () => {
+    assert.equal(has(sys, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "x", content: `lessons: print ${P}` }] } }, { type: "result", result: "capped" }), false);
+  });
+  await t.test("a tool_use input carrying the promise (a command the agent typed) does not count", () => {
+    assert.equal(has(sys, { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: `echo "${P}"` } }] } }), false);
+  });
+  await t.test("a non-JSON line (stderr, a docker log line) carrying the promise does not count", () => {
+    assert.equal(has(sys, `plain text ${P}`), false);
+  });
+  await t.test("the promise for another task id does not count", () => {
+    assert.equal(has({ type: "assistant", message: { content: [{ type: "text", text: `<promise>DONE ${id}0</promise>` }] } }), false);
+  });
+  await t.test("an assistant text block with the promise counts", () => {
+    assert.equal(has(sys, { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: {} }, { type: "text", text: `done: ${P}` }] } }), true);
+  });
+  await t.test("the final result line with the promise counts", () => {
+    assert.equal(has(sys, { type: "result", subtype: "success", result: `All green.\n${P}` }), true);
+  });
+  await t.test("through the runner: an attempt whose only promise is a tool_result echo is 'no DONE promise', never integrated", () => {
+    const f = makeFixture({ phases: onePhase() });
+    control(f.root, "0.1", { done: false, echoDone: true });
+    ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+    const s = state(f.root)["0.1"];
+    assert.equal(s.status, "running"); assert.equal(s.notes, "no DONE promise");
+    assert.match(readFileSync(join(f.root, ".evidence/tasks/0.1/1.log"), "utf8"), /tool_result/);
+    cleanup(f.root);
+  });
+  rmSync(dir, { recursive: true, force: true });
+});
