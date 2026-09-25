@@ -787,3 +787,56 @@ verdict: PASS
 - **Graph.** No task appended: a PASS appends none (RUNNER-SPEC §5.4). `ralph/EXPECTED_COUNT` stays 285; `ralph/tasks.json` is unchanged; `generate-tasks --check` and `validate-tasks` run in this commit. `1.close` depends on `1.10.r10d` and `1.9.r1`. Its preconditions (`close.mjs:59–66`: phase head is this reconciliation with verdict PASS, no product file changed since `3e4a3f6`) hold for a commit touching only `docs/**`.
 - **Backlog** lines appended to `docs/V1.1-BACKLOG.md` in this commit: `[1.46, evidence — sixth instance]`; `[review-1-r10, leg (b)]`; `[review-1-r10, 1.9.r1 editing feedback]`; `[review-1-r10, pnpm dev]`; `[review-1-r10, Sol usage-limit retry]`; `[review-1-r10, turn budget]`; `[review-1-r10, reviewer record]`. No earlier line is edited.
 - **Reversal.** Before this commit integrates: `git -C .wt/1.10.r10d reset --hard phase/1` (the task stays `principal-pending`, the status `run` left it in; the cherry-picked stack returns to `handoff/038`, which is not deleted until after `1.close`). After integration a reconciliation has no undo: its verdict is written to `.evidence/reviews/1/r10/verdict` and `1.close` may run; any change is a further planning commit.
+
+## #043-phase-2-boundary-d3-d5-turn-budget-grok-r0-only-and-the-fix-runner-list (2026-09-25, principal; Michael's decisions 2026-09-24/25; runner idle at the Phase 2 boundary, host checkout on `phase/2`, #017)
+
+- **Michael's decisions** (given in the principal session with the counts below in front of him):
+  - D3: yes. The container's Claude Code moves from 2.1.261 to 2.1.281, and opus tasks and the Claude reviewer run on `claude-opus-5-5`.
+  - D4: yes, with one change. `MAX_ATTEMPTS` stays at 3, and the loop-task turn cap goes from 50 to 80.
+  - D5: items 2, 3 and 4 of proposal 001 §4. Items 1 and 5–11 are not taken.
+  - The 429 and reviewer usage-limit signal: yes.
+  - Grok reviews `r0` only, with the drift prompt: yes.
+  - The React 19 ratification and the `check-deps` major-version pin: yes.
+  - `gate.sh gc` and the `main`/`phase/1` push: Michael ran both. `gc` deleted 11 `ci/*` refs; origin `main` and `phase/1` are now at `92a2ec1`.
+- **Counts behind the decisions**, each read at the time of writing:
+  - Turn budget: opus fix tasks from the r7–r9 findings capped at attempt 1 in 7 of 8 (`error_max_turns` for 1.57–1.60, 1.63, 1.65 and 1.67; 1.64 succeeded). Adding r6 gives 9 of 12. The source is each task's `.evidence/tasks/<id>/1.log` `result` line. Handoff 039's "14 of 15" is not reproduced by that measure and is superseded by these numbers.
+  - Grok, from `status.json`: PASS 0/0/0 at r7, r8, r9 and r10.
+    - Unique findings: Phase 0 8 over r0–r2, mostly spec and tooling drift (#review-1-r0 reviewer record); Phase 1 r1–r10 3 (r1 1, r2 1, r5 1), and 0 from r6 on.
+    - Grok's entrypoint was already read-only (no build or test), so "read-only mode" changes nothing. The decision is the lane (drift) and the timing (`r0`).
+- **What changed** (one commit each, each with its reversal; `bash ralph/test/run.sh` went from 83 to 139, all passing):
+  - D3: `docker/versions.env` `CLAUDE_CODE_VERSION=2.1.281`. The versions.env header's DECISIONS note is this entry. `claude-task` maps the tasks.json alias `opus` to `claude-opus-5-5`; the enum, the validator and `sonnet` are unchanged. `claude-review` passes `claude-opus-5-5`.
+  - Turn budget: `run.mjs` `maxTurns` is 80 for loop tasks; setup tasks stay at 30 and reviewers at 160. RUNNER-SPEC §4 is updated, with a conformance leg. This closes `[review-1-r1, turn budget]`.
+  - Grok:
+    - `grok-review`'s prompt names the drift lane: PRD §4/§6/§8, RUNNER-SPEC, DECISIONS, CLAUDE.md, manifests, `dependencies.json`, workflows and `versions.env`, checked against the code and against each other.
+    - `stepReview`, the validator and the generator accept an `r<k>` (k ≥ 1) attempt without its `c` row. `r0` is unchanged.
+    - PRINCIPAL.md tells planning commits to write `r1`+ as `a`, `b` and `d`.
+  - The `fix(runner)` list that handoffs 020–039 carried:
+    - #025: a single-reviewer retry holds its siblings out and moves its own earlier output aside. A report whose transcript names a sibling's report of the same attempt is refused.
+    - A new stop signal, `USAGE-LIMIT`: a task attempt ended by a 429 is not counted; a reviewer usage limit (Codex, Grok 402, Claude 429) is named instead of a generic `STUCK`. This covers #027 and `[review-1-r10, Sol usage-limit retry]`.
+    - #023/#029/#042: doctor records a rerun's rejected attempt, and `--resume` is refused on a superseded or passed gate. With this, the manual `abandon` procedure is no longer needed.
+    - H7: `PROMPT.md` steps 2–5 are CLAUDE.md's verbatim, with a conformance guard. They were re-synced once after D5's routing changed CLAUDE.md.
+    - #review-1-r7 M3 (b): `transcriptHasDone` reads only the assistant's text blocks and the final `result` line.
+    - The recovery-commit guard: WARN plus an audit line, never a stop.
+    - I7: the gate fetches a failed run's artifacts, as evidence only.
+    - #review-1-r8 N7: `ci.yml`'s merge steps run with `if: always()`.
+  - D5:
+    - `node ralph/journal.mjs stub|complete`. `stub` always appends, adding a missing newline first. `complete` fills only the attempt's own open stub.
+    - `summary.md` shows one line per recent journal entry (RUNNER-SPEC §10).
+    - `scripts/check`: lint, test and cargo, printing failures and counts only.
+    - CLAUDE.md and AGENTS.md steps 2–4 name the helper and the script. `USAGE-LIMIT` is added to the agents' stop-signal list.
+  - React 19: the PRD §4 Frontend row says React 19. `docs/dependencies.json` gains `majors` (react and react-dom map to "React"), and `scripts/check-deps.mjs` fails on a range whose major differs from the one the cited row names. Before the row edit it reported both packages as drift. This closes `[review-1-r8 N5, React 19]`.
+  - Docs:
+    - PRINCIPAL.md: the doctor sentence (lesson `[0.0]` 2026-09-06), a Reviewers section, and the principal lessons from r4–r10.
+    - rotate.md: step 5 handles an existing `handoff/NNN` and a stacked base; step 7 carries `--model claude-opus-5-5`; step 4 names `N.10.r0d`; the description line no longer says a lock is taken.
+- **Verification.**
+  - The image was rebuilt twice, after D3 and after the Grok prompt. `claude --version` reads 2.1.281, the new entrypoint text is in the image, and `boundary-check` prints `BOUNDARY-OK`.
+  - `scripts/check` in the container, on this entry's parent, in a probe worktree under `.wt/` that was removed afterwards: lint pass; `Test Files 47 passed (47); Tests 4819 passed (4819)`; cargo 3 suites, 0 tests (no `#[test]` exists in the 3 tracked `.rs` files yet); all green.
+  - `generate-tasks --check`, `validate-tasks` and `EXPECTED_COUNT` all read 285, byte-identical.
+  - `ci.yml`'s change is first exercised by `2.1h`.
+- **2.9 and `[review-1-r10, pnpm dev]`: no change.** 2.9's text never runs a dev server; Michael installs the debug DMG that the `2.verify` CI gate fetches. The backlog line's hard stop (2.9's planning) is discharged by that reading. The next task text that names a dev server must say `pnpm --filter @essaydown/desktop dev`.
+- **Cleanup.** The 27 `handoff/*` branches, `handoff/010`–`030` and `033`–`038`, were deleted after checking that every line they added exists in `main`; next-prompt.md, which each rotation overwrites, was excluded from that check. A branch can be restored with `git branch handoff/NNN <sha>`: 010 77529c7, 011 c0ecaa4, 012 9df4827, 013 3f4a81f, 014 2c63c7d, 015 08c5162, 016 25444fa, 017 56264ce, 018 f13606b, 019 5686550, 020 d7be101, 021 012e200, 022 bb5965e, 023 0424d44, 024 13f7891, 025 d2e5e3b, 026 56a61d5, 027 baf20e1, 028 85b2d27, 029 63b348a, 030 4ddafc8, 033 fa639f3, 034 517bbf0, 035 6c21190, 036 e100424, 037 32a0f85, 038 a1a1ac1. The scratch worktree at `970bb5c` was removed.
+- **Deviations recorded here.**
+  - #025's sibling refusal lives in the runner, not the entrypoints' `check_report`, so the suite covers it.
+  - H7's guard is in `ralph/test`, not `tests/agent-rules.test.ts`.
+  - The agent that implemented the refusal flagged a false-positive risk: it matches a sibling report's path anywhere in the transcript, so a listing that names the path in a full-set run would block a finished review. The principal's proposal to make it a WARN plus a note, with the reconciliation judging derivation, weakens a #025 guard. It is Michael's call and was not made here.
+- **Reversal.** Each commit above has its own reversal line; a `docker/` reversal needs an image rebuild. This entry: `git revert` of its commit.
