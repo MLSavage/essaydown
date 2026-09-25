@@ -59,7 +59,8 @@
     "serde": "PRD §4 Rust crates row",
     "serde_json": "PRD §4 Rust crates row",
     "tauri": "PRD §4 Rust crates row",
-    "tauri-build": "PRD §4 Shell row"
+    "tauri-build": "PRD §4 Shell row",
+    "tauri-plugin-wdio-webdriver": "PRD §4 Rust crates row"
   },
   "majors": {
     "_note": "Package → the product name whose major PRD §4 pins in the row the npm entry cites (\"React 19\" in the Frontend row); check-deps fails on a range with another major (DECISIONS #043).",

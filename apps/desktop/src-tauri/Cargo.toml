@@ -17,8 +17,23 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# Off by default so `pnpm tauri dev` keeps loading the Vite dev server (`build.devUrl`,
+# tauri.conf.json) unchanged; the shell e2e harness (e2e/shell) builds with this feature so the
+# binary embeds `build.frontendDist` instead and needs no dev server running (Tauri's own
+# `dev`/`custom_protocol` cfg alias, set by `tauri`'s build.rs from this exact feature name).
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# debug/test builds only (PRD §4): the embedded WebDriver server the WDIO Tauri plugin's macOS
+# provider needs; ubuntu and windows drive the app through the cargo-installed tauri-driver
+# instead. Cargo's `[target.'cfg(...)'.dependencies]` only understands target-arch/os selectors,
+# not `debug_assertions` (an always-on dependency with a warning, not a conditional one — verified
+# against a bare `cargo build`), so the crate is linked unconditionally and `lib.rs` gates its one
+# `.plugin(...)` registration call behind `#[cfg(debug_assertions)]` instead, matching
+# tauri-plugin-wdio-webdriver's own "Production Considerations" doc.
+tauri-plugin-wdio-webdriver = "1"
 
