@@ -135,7 +135,11 @@ export function main(argv, cwd = process.cwd()) {
   const o = parseArgs(argv);
   const [cmd, id] = o._;
   if (!["stub", "complete"].includes(cmd) || !id) {
-    process.stderr.write("usage: node ralph/journal.mjs stub <id> | complete <id> --status S --files F (--tests T | --check FILE) [--guard G]... --attempt N --tool-calls N --notes TEXT [--no-commit]\n");
+    process.stderr.write(`usage: node ralph/journal.mjs stub <id> [--no-commit]
+       node ralph/journal.mjs complete <id> --status ${STATUSES.join("|")} --files <text>
+         (--tests <text> | --check <file holding scripts/check output>) [--guard "<guard> => <test>"]...
+         --attempt <n> [--iterations <n>] [--first-attempt y|n] --tool-calls <n> --notes <text, <= ${NOTES_CAP} chars> [--no-commit]
+`);
     return 2;
   }
   const top = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
