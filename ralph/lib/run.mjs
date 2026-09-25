@@ -117,6 +117,17 @@ function stepLoop(ctx, t, r) {
   const newCommit = head !== before.head || gitOut(repo, ["-C", wt, "status", "--porcelain"]) !== "";
   const done = transcriptHasDone(logPath, t.id);
   recoveryCommit(ctx, t, repo, wt);
+  // a session limit ended the attempt, not the agent (DECISIONS #027): the attempt is not counted, its transcript is
+  // kept under a name the next attempt cannot overwrite, and the run stops with a named signal
+  const limit = done ? null : taskUsageLimit(logPath);
+  if (limit) return withLock(ctx.root, () => {
+    let k = 1; while (existsSync(join(ctx.taskLogDir(t.id), `${attempt}.usage-limit-${k}.log`))) k++;
+    const kept = join(ctx.taskLogDir(t.id), `${attempt}.usage-limit-${k}.log`);
+    renameSync(logPath, kept);
+    ctx.set(t.id, { notes: `usage limit, attempt not counted: ${limit} (transcript ${kept})` }, `attempt ${attempt}: usage limit (not counted)`);
+    emit(`USAGE-LIMIT ${t.id}: ${limit} → attempt ${attempt} not counted; after the reset: the same ralph.sh run`);
+    return { signal: "USAGE-LIMIT", id: t.id };
+  });
   // an attempt that ends without a journal entry or without a commit still counts toward the three attempts (§4.3)
   const stuckOr = (signal, patch, why) => withLock(ctx.root, () => {
     if (attempt >= MAX_ATTEMPTS) { ctx.set(t.id, { ...patch, status: "blocked", attempts: attempt, notes: `${why} after ${attempt} attempts` }, "STUCK"); emit(`STUCK ${t.id} (${why})`); return { signal: "STUCK", id: t.id }; }
@@ -247,6 +258,37 @@ function stepPlan(ctx, plan) {
   });
 }
 
+/**
+ * A subscription usage limit, not the agent, ended the run (DECISIONS #027; [review-1-r10, Sol usage-limit retry]).
+ * Task transcripts (Claude stream-json): the final `result` line carries `api_error_status: 429` or, with `is_error`,
+ * "You've hit your session limit · resets …" — the line is parsed, so a quoted string elsewhere never matches.
+ * Reviewer transcripts come in three formats, so a failed reviewer's last 60 lines are matched against the three
+ * shapes on record: Codex/Sol "ERROR: You've hit your usage limit … try again at …" (or `"status":402`), Grok
+ * "API error (status 402 Payment Required): … usage balance exhausted" / `"http_status": 402`, Claude's 429 result line.
+ * Returns the matching line (≤ 200 chars) or null.
+ */
+const LIMIT_TEXT = /hit your (session|usage|weekly) limit/i;
+export function taskUsageLimit(logPath) {
+  if (!existsSync(logPath)) return null;
+  const lines = readFileSync(logPath, "utf8").split("\n").filter((l) => l.trim());
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let o; try { o = JSON.parse(lines[i]); } catch { continue; }
+    if (o?.type !== "result") continue;
+    const text = typeof o.result === "string" ? o.result : "";
+    return o.api_error_status === 429 || (o.is_error && LIMIT_TEXT.test(text)) ? (text || `api_error_status ${o.api_error_status}`).slice(0, 200) : null;
+  }
+  return null;
+}
+export function reviewerUsageLimit(transcriptPath) {
+  if (!existsSync(transcriptPath)) return null;
+  const tail = readFileSync(transcriptPath, "utf8").split("\n").filter((l) => l.trim()).slice(-60);
+  // the message line first (it says when the limit resets), the bare status code only when no message is there
+  for (const shape of [/hit your (session|usage|weekly) limit|\(status 402 Payment Required\)/i, /"status"\s*:\s*402\b|"http_status"\s*:\s*402\b|"api_error_status"\s*:\s*429\b/]) {
+    for (let i = tail.length - 1; i >= 0; i--) if (shape.test(tail[i])) return tail[i].trim().slice(0, 200);
+  }
+  return null;
+}
+
 /** Where a single-reviewer run holds its siblings' directories (DECISIONS #025's manual procedure used the same place). */
 const heldDir = (dir) => `${dir}.held`;
 
@@ -353,17 +395,24 @@ function stepReview(ctx, t) {
   return withLock(ctx.root, () => {
     restoreHeld(ctx, dir, `${set}.${attempt}`); // the siblings are back before any reviewer's state is written
     let failed = 0;
+    const limited = [];
     for (const { x, code } of results) {
       const read = siblingReportsRead(dir, x.reviewer, trio.map((y) => y.reviewer));
       const ok = code === 0 && existsSync(join(dir, x.reviewer, "report.md")) && existsSync(join(dir, x.reviewer, "status.json")) && !read.length;
+      const limit = ok || read.length ? null : reviewerUsageLimit(join(dir, x.reviewer, "transcript.log"));
       if (ok) ctx.set(x.id, { status: "passed", finished_at: now(), integrated_sha: null }, "report ok");
       else if (read.length) { failed++; ctx.set(x.id, { status: "blocked", notes: `report refused: the transcript names a sibling's report of this attempt (${read.join(", ")}); DECISIONS #025` }, "reviewer read a sibling report"); }
+      else if (limit) { limited.push({ x, limit }); ctx.set(x.id, { status: "blocked", notes: `usage limit (reviewer exit ${code}): ${limit}` }, "reviewer usage limit"); }
       else { failed++; ctx.set(x.id, { status: "blocked", notes: `reviewer exit ${code}` }, "reviewer failed"); }
       const wt = ctx.worktree(`review-${x.reviewer}`);
       git(ctx.root, ["worktree", "remove", "--force", wt], { check: false }); rmrf(wt);
     }
     writeSummary(ctx);
+    // a usage limit is named apart from a generic failure: the remedy is waiting for the reset (a Grok 402 is
+    // Michael's call, #025/#027), then `retry` of that reviewer alone, which runs with its siblings held out
+    for (const { x, limit } of limited) emit(`USAGE-LIMIT ${set}.${attempt} ${x.reviewer} (${x.id}): ${limit} → after the reset: ralph.sh retry ${x.id}`);
     if (failed) { emit(`STUCK ${set}.${attempt} (${failed} reviewer(s) failed; ralph.sh retry <id>)`); return { signal: "STUCK" }; }
+    if (limited.length) return { signal: "USAGE-LIMIT" };
     return {};
   });
 }

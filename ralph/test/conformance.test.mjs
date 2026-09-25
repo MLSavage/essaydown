@@ -1,7 +1,8 @@
 // conformance.test.mjs — RUNNER-SPEC §12 scenarios against disposable fixture repositories.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { makeFixture, phaseTasks, prdFor, writeSpec, ralph, gate, control, ciScenario, fakeRuns, fakeRefs, state, plans, phasesJson, principalCommit, runPhaseGreen, cleanup } from "./harness.mjs";
@@ -975,6 +976,82 @@ test("Grok r0-only (Michael, Phase 2 boundary): an r1 set with only a and b runs
     assert.equal(r.stopped, "PRINCIPAL 0.9.r1d", r.error ?? r.log.slice(-1)[0]);
     for (const who of ["claude", "sol", "grok"]) assert.ok(existsSync(join(f.root, `.evidence/reviews/0/r1/${who}/report.md`)), who);
     assert.equal(state(f.root)["0.9.r1c"].status, "passed");
+    cleanup(f.root);
+  });
+});
+
+test("usage limits (DECISIONS #027; [review-1-r10, Sol usage-limit retry]): USAGE-LIMIT instead of a consumed attempt or a generic STUCK; one case per guard", async (t) => {
+  const { taskUsageLimit, reviewerUsageLimit } = await import("../lib/run.mjs");
+  const reviewCtl = (root, name, obj) => writeFileSync(join(root, ".fake", `review-0-${name}.json`), JSON.stringify(obj));
+  await t.test("task guard: a 429 result line stops the run with USAGE-LIMIT, the attempt is not counted and its transcript is kept", () => {
+    const f = makeFixture({ phases: onePhase() });
+    control(f.root, "0.1", { done: false, limit: true });
+    const out = ralph(f.root, ["run", "--phase", "0"]).out;
+    assert.match(out, /^USAGE-LIMIT 0\.1: You've hit your session limit · resets 2:30pm \(UTC\) → attempt 1 not counted/m);
+    assert.doesNotMatch(out, /^(NO-JOURNAL|STUCK)/m);
+    const s = state(f.root)["0.1"];
+    assert.equal(s.attempts, 0); assert.equal(s.status, "running"); assert.match(s.notes, /usage limit, attempt not counted/);
+    assert.ok(existsSync(join(f.root, ".evidence/tasks/0.1/1.usage-limit-1.log"))); assert.equal(existsSync(join(f.root, ".evidence/tasks/0.1/1.log")), false);
+    control(f.root, "0.1", { done: true });
+    ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } });
+    assert.equal(state(f.root)["0.1"].status, "passed", "the same run command after the reset");
+    assert.ok(existsSync(join(f.root, ".evidence/tasks/0.1/1.log")) && existsSync(join(f.root, ".evidence/tasks/0.1/1.usage-limit-1.log")), "both transcripts kept");
+    cleanup(f.root);
+  });
+  await t.test("task guard, absence: the limit text quoted in a tool_result with an ordinary result line is not a usage limit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ralph-limit-"));
+    const p = join(dir, "1.log");
+    writeFileSync(p, [JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", content: "#027: You've hit your session limit · api_error_status 429" }] } }), JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, result: "" })].join("\n") + "\n");
+    assert.equal(taskUsageLimit(p), null);
+    writeFileSync(p, JSON.stringify({ type: "result", is_error: true, api_error_status: 429, result: "You've hit your session limit · resets 9:50am (UTC)" }) + "\n");
+    assert.match(taskUsageLimit(p), /session limit/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  for (const [shape, who, id] of [["codex", "sol", "0.9.r0b"], ["grok", "grok", "0.9.r0c"], ["claude", "claude", "0.9.r0a"]]) {
+    await t.test(`reviewer guard (${shape} shape): a ${who} usage limit is USAGE-LIMIT, not STUCK; the reviewer is blocked with the line in its notes`, () => {
+      const f = makeFixture({ phases: onePhase() });
+      reviewCtl(f.root, "r0", { limit: { [who]: shape } });
+      const r = runPhaseGreen(f.root, "0", { until: "USAGE-LIMIT" });
+      assert.equal(r.stopped, "USAGE-LIMIT 0.9.r0", r.error ?? r.log.slice(-1)[0]);
+      const out = r.log.join("\n");
+      assert.match(out, new RegExp(`^USAGE-LIMIT 0\\.9\\.r0 ${who} \\(${id.replace(/\./g, "\\.")}\\): .+ → after the reset: ralph\\.sh retry ${id.replace(/\./g, "\\.")}$`, "m"));
+      assert.doesNotMatch(out, /^STUCK 0\.9\.r0 /m);
+      const s = state(f.root)[id];
+      assert.equal(s.status, "blocked"); assert.match(s.notes, /^usage limit \(reviewer exit 1\): /);
+      cleanup(f.root);
+    });
+  }
+  await t.test("reviewer guard, mixed: one usage limit and one other failure print USAGE-LIMIT for the one and STUCK for the other", () => {
+    const f = makeFixture({ phases: onePhase() });
+    reviewCtl(f.root, "r0", { limit: { sol: "codex" }, fail: ["claude"] });
+    const r = runPhaseGreen(f.root, "0", { until: "STUCK" });
+    const out = r.log.join("\n");
+    assert.match(out, /^USAGE-LIMIT 0\.9\.r0 sol /m); assert.match(out, /^STUCK 0\.9\.r0 \(1 reviewer\(s\) failed/m);
+    cleanup(f.root);
+  });
+  await t.test("reviewer guard, absence: a failed reviewer whose transcript tail has no limit shape stays a generic STUCK", () => {
+    assert.equal(reviewerUsageLimit("/nonexistent/transcript.log"), null);
+    const f = makeFixture({ phases: onePhase() });
+    reviewCtl(f.root, "r0", { fail: ["sol"] });
+    const r = runPhaseGreen(f.root, "0", { until: "STUCK" });
+    assert.doesNotMatch(r.log.join("\n"), /USAGE-LIMIT/);
+    assert.equal(state(f.root)["0.9.r0b"].notes, "reviewer exit 1");
+    cleanup(f.root);
+  });
+  await t.test("with two reviewers (Grok r0-only): an r1 usage limit, then retry runs the reviewer with its one sibling held out and d becomes eligible", () => {
+    const f = failR0WithR1(["a", "b"]);
+    reviewCtl(f.root, "r1", { limit: { sol: "codex" } });
+    let r = runPhaseGreen(f.root, "0", { until: "USAGE-LIMIT" });
+    assert.equal(r.stopped, "USAGE-LIMIT 0.9.r1", r.error ?? r.log.slice(-1)[0]);
+    reviewCtl(f.root, "r1", { read: ["sol"] });
+    ok(ralph(f.root, ["retry", "0.9.r1b"]));
+    r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL 0.9.r1d" });
+    assert.equal(r.stopped, "PRINCIPAL 0.9.r1d", r.error ?? r.log.slice(-1)[0]);
+    const r1 = join(f.root, ".evidence/reviews/0/r1");
+    assert.doesNotMatch(readFileSync(join(r1, "sol/seen.txt"), "utf8"), /claude/);
+    assert.ok(existsSync(join(r1, "sol/transcript.a1.log")), "the usage-limit transcript is kept");
+    assert.ok(existsSync(join(r1, "claude/report.md")));
+    assert.match(readFileSync(join(f.root, ".evidence/state/audit.log"), "utf8"), /review 0\.9\.r1 hold-out: claude moved to/);
     cleanup(f.root);
   });
 });

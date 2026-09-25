@@ -131,7 +131,7 @@ export function runPhaseGreen(root, n, { until = null } = {}) {
   for (let i = 0; i < 40; i++) {
     const r = ralph(root, ["run", "--phase", String(n)]);
     log.push(r.out);
-    const m = /^(HUMAN_GATE|PRINCIPAL|STUCK|CONFLICT|INTEGRATION-FAILED|DOCTOR|CLOSE-DRIFT|REPLAN|PLAN-GATE|NO-JOURNAL|NO-COMMIT|REVIEW-SHA-MISMATCH) (\S+)/m.exec(r.out);
+    const m = /^(HUMAN_GATE|PRINCIPAL|STUCK|CONFLICT|INTEGRATION-FAILED|DOCTOR|CLOSE-DRIFT|REPLAN|PLAN-GATE|NO-JOURNAL|NO-COMMIT|REVIEW-SHA-MISMATCH|USAGE-LIMIT) (\S+)/m.exec(r.out);
     if (/<promise>COMPLETE<\/promise>/.test(r.out)) return { done: true, log };
     if (!m) { if (r.status !== 0) return { done: false, log, error: r.out }; continue; }
     const [, sig, id] = m;

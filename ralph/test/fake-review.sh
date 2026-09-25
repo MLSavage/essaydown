@@ -16,6 +16,12 @@ ls "$REVIEW_DIR" > "$dir/seen.txt"
 : > "$dir/transcript.log"
 if in_list read; then for sib in claude sol grok; do [ "$sib" = "$who" ] && continue; if [ -f "$REVIEW_DIR/$sib/report.md" ]; then echo "{\"type\":\"tool_use\",\"input\":{\"command\":\"cat /logs/reviews/$phase/$attempt/$sib/report.md\"}}" >> "$dir/transcript.log"; fi; done; fi
 if in_list cite; then for sib in claude sol grok; do [ "$sib" = "$who" ] && continue; echo "{\"type\":\"tool_use\",\"input\":{\"file_path\":\"/logs/reviews/$phase/$attempt/$sib/report.md\"}}" >> "$dir/transcript.log"; done; fi
+if [ -f "$ctl" ]; then shape=$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write((c.limit||{})[process.argv[2]]||"")' "$ctl" "$who"); else shape=""; fi
+case "$shape" in # "limit": {"<reviewer>": "codex"|"grok"|"claude"} — the usage-limit tails on record, then exit 1
+  codex) printf '   Compiling tao v0.35.3\n\nERROR: You'"'"'ve hit your usage limit. Upgrade to Pro or try again at 12:28 PM.\ntokens used\n128,700\n' >> "$dir/transcript.log"; exit 1;;
+  grok) printf '{"type":"error","message":"Internal error"}\n{\n  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted",\n  "http_status": 402,\n  "promptUsage": {\n    "numTurns": 13\n  }\n}\n' >> "$dir/transcript.log"; exit 1;;
+  claude) printf '{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You'"'"'ve hit your session limit · resets 2:30pm (UTC)"}\n' >> "$dir/transcript.log"; exit 1;;
+esac
 if in_list fail; then echo "fake-review: $who fails"; exit 1; fi
 [ -d "$REVIEW_SNAPSHOT" ] || { echo "no snapshot"; exit 1; }
 impl=$(cat "$REVIEW_DIR/implementation_sha")
