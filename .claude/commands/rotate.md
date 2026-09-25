@@ -1,5 +1,5 @@
 ---
-description: Rotate the principal session — write the next handoff, refresh next-prompt.md, commit both under the runner lock, stop the watcher, print the relaunch lines.
+description: Rotate the principal session — write the next handoff, refresh next-prompt.md, commit both where step 5 says (never under a lock), stop the watcher, print the relaunch lines.
 ---
 
 You are the principal (docs/PRINCIPAL.md). Rotate this session now; the next session continues from the handoff you write. Do not touch the runner, the worktrees, DECISIONS.md or the journal.
