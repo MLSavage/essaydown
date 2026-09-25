@@ -174,6 +174,31 @@ test("CI gates: code-failed gate → .g1 repair; transient rerun a2; resume afte
     assert.equal(readFileSync(join(f.root, ".evidence/ci/0.verifyh/accepted/run.json"), "utf8").includes(`"run_id": "${acc.run_id}"`), true);
     assert.equal(plans(f.root)[0].status, "abandoned");
     assert.ok(acc.artifacts[0].sha256.length === 64);
+    // DECISIONS #023 guard 1: the rejected a1 of a gate passed through a2 is recorded — doctor is clean, run is not refused
+    assert.match(ralph(f.root, ["doctor"]).out, /^doctor: clean$/m, "a1 rejected + a2 accepted is not an incomplete attempt");
+    assert.equal(existsSync(join(f.root, ".evidence/ci/0.verifyh/a1/abandoned.json")), false, "no #023 manual abandon needed");
+    cleanup(f.root);
+  });
+  await t.test("DECISIONS #023 guard 2: --resume of an attempt superseded by a later accepted one is refused and changes nothing", () => {
+    const f = makeFixture({ phases: onePhase() });
+    ciScenario(f.root, "ci/0.verify/a1", { conclusion: "failure" });
+    runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });
+    gate(f.root, ["0.verifyh"]);
+    assert.match(gate(f.root, ["rerun", "0.verifyh"]).out, /ACCEPT 0\.verifyh a2/);
+    const before = JSON.stringify(state(f.root)["0.verifyh"]), plansBefore = plans(f.root).length;
+    const r = gate(f.root, ["0.verifyh", "--resume", "a1"]);
+    assert.notEqual(r.status, 0); assert.match(r.out, /a1 is superseded by a2; nothing to resume/);
+    assert.equal(JSON.stringify(state(f.root)["0.verifyh"]), before, "the a2 passed record is untouched");
+    assert.equal(plans(f.root).length, plansBefore, "no new plan request");
+    cleanup(f.root);
+  });
+  await t.test("DECISIONS #023 guard 3: --resume on a passed gate is refused (the accepted attempt itself included)", () => {
+    const f = makeFixture({ phases: onePhase() });
+    runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });
+    assert.match(gate(f.root, ["0.verifyh"]).out, /ACCEPT 0\.verifyh a1/);
+    const r = gate(f.root, ["0.verifyh", "--resume", "a1"]);
+    assert.notEqual(r.status, 0); assert.match(r.out, /the gate is passed \(a1\); nothing to resume/);
+    assert.equal(state(f.root)["0.verifyh"].status, "passed");
     cleanup(f.root);
   });
   await t.test("crash after run.json: doctor reports incomplete; --resume completes with the same run_id and no new run", () => {

@@ -89,7 +89,9 @@ export function doctor(ctx) {
     if (t.execution === "human" && t.gateKind === "ci") {
       for (const n of ctx.attempts(t.id)) {
         const st = ciAttemptStatus(ctx, t.id, n);
-        const recorded = (r.status === "passed" && r.accepted_gate_attempt === n) || (["blocked", "superseded"].includes(r.status) && r.attempts >= n) || st === "abandoned";
+        // a rejected attempt on a gate that passed through a later attempt is recorded: a transient rerun could only
+        // have started from its recorded failure (DECISIONS #023; instances #029, #042)
+        const recorded = (r.status === "passed" && r.accepted_gate_attempt === n) || (r.status === "passed" && st === "rejected" && r.attempts > n) || (["blocked", "superseded"].includes(r.status) && r.attempts >= n) || st === "abandoned";
         if (st === "incomplete" && !recorded) add(`incomplete ${t.id} a${n}`, `scripts/gate.sh ${t.id} --resume a${n}`);
         if (st === "accepted-unrecorded" && !recorded) add(`incomplete ${t.id} a${n} (workflow succeeded, state not transitioned)`, `scripts/gate.sh ${t.id} --resume a${n}`);
         if (st === "rejected" && !recorded && r.status !== "superseded") add(`incomplete ${t.id} a${n} (workflow failed, state not transitioned)`, `scripts/gate.sh ${t.id} --resume a${n}`);

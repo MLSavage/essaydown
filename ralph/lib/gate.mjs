@@ -70,6 +70,12 @@ function ciGate(ctx, t, { resume = null, rerun = false } = {}) {
   if (resume) {
     n = Number(/^a(\d+)$/.exec(resume)?.[1]);
     if (!n || !existsSync(join(dir, `a${n}`, "run.json"))) throw new RalphError(`${t.id}: no attempt ${resume} with run.json to resume`);
+    // a resume can never overwrite an accepted record (DECISIONS #023): refused once a later attempt is accepted
+    // or the gate is passed
+    const accPath = join(dir, "accepted.json");
+    const accAttempt = existsSync(accPath) ? readJson(accPath).attempt : null;
+    if (accAttempt !== null && accAttempt > n) throw new RalphError(`${t.id}: a${n} is superseded by a${accAttempt}; nothing to resume`);
+    if (ctx.rec(t.id).status === "passed") throw new RalphError(`${t.id}: the gate is passed (a${ctx.rec(t.id).accepted_gate_attempt ?? accAttempt}); nothing to resume`);
   } else {
     requireEligible(ctx, t);
     const prev = ctx.attempts(t.id);
