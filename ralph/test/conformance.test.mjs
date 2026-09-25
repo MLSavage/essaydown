@@ -192,6 +192,33 @@ test("CI gates: code-failed gate → .g1 repair; transient rerun a2; resume afte
     assert.equal(plans(f.root).length, plansBefore, "no new plan request");
     cleanup(f.root);
   });
+  await t.test("#review-1-r3 I7 guard 1: a failed run's artifacts are fetched into a<n>/ with digests in run.json; no accepted.json", () => {
+    const f = makeFixture({ phases: onePhase() });
+    ciScenario(f.root, "ci/0.verify/a1", { conclusion: "failure" });
+    runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });
+    const r = gate(f.root, ["0.verifyh"]);
+    assert.match(r.out, /GATE-FAILED 0\.verifyh a1: workflow ci\.yml concluded failure/);
+    const a1 = join(f.root, ".evidence/ci/0.verifyh/a1");
+    assert.ok(existsSync(join(a1, "test-logs/test-logs.txt")), "the failed run's artifact is on disk");
+    const run = JSON.parse(readFileSync(join(a1, "run.json"), "utf8"));
+    assert.deepEqual(run.artifacts.map((a) => a.name), ["test-logs"]);
+    assert.equal(run.artifacts[0].sha256, digestDir(join(a1, "test-logs")).sha256);
+    assert.equal(existsSync(join(f.root, ".evidence/ci/0.verifyh/accepted.json")), false, "never read as acceptance");
+    assert.equal(state(f.root)["0.verifyh"].status, "blocked");
+    cleanup(f.root);
+  });
+  await t.test("#review-1-r3 I7 guard 2: a failed run with an artifact missing stays GATE-FAILED for the workflow, the missing one noted in run.json", () => {
+    const f = makeFixture({ phases: onePhase() });
+    ciScenario(f.root, "ci/0.verify/a1", { conclusion: "failure", artifacts: {} });
+    runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });
+    const r = gate(f.root, ["0.verifyh"]);
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /GATE-FAILED 0\.verifyh a1: workflow ci\.yml concluded failure/);
+    const run = JSON.parse(readFileSync(join(f.root, ".evidence/ci/0.verifyh/a1/run.json"), "utf8"));
+    assert.deepEqual(run.artifacts, []); assert.match(run.artifacts_missing[0], /^test-logs: /);
+    assert.equal(plans(f.root).length, 1, "exactly one plan request");
+    cleanup(f.root);
+  });
   await t.test("DECISIONS #023 guard 3: --resume on a passed gate is refused (the accepted attempt itself included)", () => {
     const f = makeFixture({ phases: onePhase() });
     runPhaseGreen(f.root, "0", { until: "HUMAN_GATE 0.verifyh" });

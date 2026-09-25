@@ -111,17 +111,18 @@ function ciGate(ctx, t, { resume = null, rerun = false } = {}) {
     writeJsonAtomic(resultPath, result);
   }
   if (!existsSync(join(attemptDir, "workflow.log"))) ci.fetchLog(run.run_id, join(attemptDir, "workflow.log"));
+  // Artifacts are fetched whatever the conclusion (#review-1-r3 I7): on a failed run they are evidence for reading
+  // the failure (a Playwright trace, error-context.md), kept in a<n>/ beside the record; a missing one there is noted
+  // in run.json and never changes the outcome. Only a successful run's artifacts can ever reach accepted.json.
   const artifacts = [];
   let missing = [];
-  if (result.conclusion === "success") {
-    for (const name of t.ci.artifactNames) {
-      const dest = join(attemptDir, name);
-      if (!existsSync(dest) || readdirSync(dest).length === 0) { try { ci.downloadArtifact(run.run_id, name, dest); } catch (e) { missing.push(`${name}: ${e.message}`); continue; } }
-      const d = digestDir(dest);
-      artifacts.push({ name, sha256: d.sha256, bytes: d.bytes });
-    }
+  for (const name of t.ci.artifactNames) {
+    const dest = join(attemptDir, name);
+    if (!existsSync(dest) || readdirSync(dest).length === 0) { try { ci.downloadArtifact(run.run_id, name, dest); } catch (e) { missing.push(`${name}: ${e.message}`); continue; } }
+    const d = digestDir(dest);
+    artifacts.push({ name, sha256: d.sha256, bytes: d.bytes });
   }
-  run = { ...run, artifacts, conclusion: result.conclusion };
+  run = { ...run, artifacts, conclusion: result.conclusion, ...(result.conclusion !== "success" && missing.length ? { artifacts_missing: missing } : {}) };
   writeJsonAtomic(runJsonPath, run);
   const accepted = result.conclusion === "success" && missing.length === 0;
   const evidencePath = relative(ctx.root, attemptDir);
