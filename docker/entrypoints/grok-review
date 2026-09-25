@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# grok-review <phase> <attempt> — Grok reviewer, read-only role (PRD §4 "Reviewers", RUNNER-SPEC §5).
+# grok-review <phase> <attempt> — Grok reviewer, read-only role, drift lens, r0 only (Michael, Phase 2 boundary) (PRD §4 "Reviewers", RUNNER-SPEC §5).
 # `grok -p` single-turn with streaming-json output; Grok reads /snapshot and /logs only and cites
 # /logs/ci/<verifier_id>h/accepted/ (the gate id, DECISIONS #018) for the cold build. The entrypoint writes report.md from the
 # final assistant text if Grok did not write it itself; status.json likewise from a trailing JSON block.
@@ -8,7 +8,7 @@ source /usr/local/bin/essaydown-common.sh
 phase="${1:?usage: grok-review <phase> <attempt>}"; attempt="${2:?attempt (r<k>)}"
 dir="/logs/reviews/$phase/$attempt"
 impl=$(cat "$dir/implementation_sha") || die "no implementation_sha in $dir"
-prompt="$(review_prompt grok "$phase" "$attempt") You have no scratch copy: do not build or run tests; cite /logs/ci/$(cat "$dir/verifier_id" 2>/dev/null || echo "$phase.verify")h/accepted/ for the cold build. Put the complete report.md content in your final answer, followed by a line containing only STATUS-JSON and then the status.json object on one line."
+prompt="$(review_prompt grok "$phase" "$attempt") You have no scratch copy: do not build or run tests; cite /logs/ci/$(cat "$dir/verifier_id" 2>/dev/null || echo "$phase.verify")h/accepted/ for the cold build. Your lane is drift, which the two cold-build reviewers do not cover: check docs/PRD.md (§4 dependencies, §6 contracts, §8 task text and acceptance for this phase), docs/RUNNER-SPEC.md, docs/DECISIONS.md, CLAUDE.md, package.json/Cargo.toml manifests, docs/dependencies.json, .github/workflows/ and docker/versions.env against the code and against each other — a spec sentence the code does not implement, an acceptance sentence no test asserts, a stale reference, a dependency or tool version that disagrees between files, a script or path a document names that does not exist. Do not re-derive build, test or rendering findings; the cold-build reviewers own those. Put the complete report.md content in your final answer, followed by a line containing only STATUS-JSON and then the status.json object on one line."
 cd /snapshot
 grok -p "$prompt" --output-format streaming-json --cwd /snapshot --no-subagents --disable-web-search \
   --permission-mode bypassPermissions --max-turns "${RALPH_MAX_TURNS:-40}" 2>&1 | tee /report/transcript.log >/dev/null || true
