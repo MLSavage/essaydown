@@ -843,6 +843,15 @@ test("stale lock (DECISIONS #review-0-r1 G4): a command that needs the lock refu
   cleanup(f.root);
 });
 
+test("ci.yml: every artifact upload or merge step runs if: always() (#review-1-r8 N7, Claude r8 nit 3), so a failed run still carries its evidence", () => {
+  const yml = readFileSync(join(dirname(new URL(import.meta.url).pathname), "../../.github/workflows/ci.yml"), "utf8");
+  const steps = yml.split(/\n(?=\s*- name: )/);
+  const uploads = steps.filter((s) => /uses: actions\/upload-artifact(\/merge)?@/.test(s));
+  const names = uploads.map((s) => /- name: (.+)/.exec(s)[1].trim());
+  assert.ok(uploads.some((s) => /upload-artifact\/merge@/.test(s)) && uploads.some((s) => /upload-artifact@/.test(s)), `both kinds present: ${names.join(", ")}`);
+  for (const s of uploads) assert.match(s, /\n\s+if: always\(\)\n/, `step "${/- name: (.+)/.exec(s)[1].trim()}" lacks if: always()`);
+});
+
 test("transcriptHasDone reads only the assistant's own text (DECISIONS #review-1-r7 M3 (b)): one case per guard", async (t) => {
   const { transcriptHasDone } = await import("../lib/integrate.mjs");
   const { mkdtempSync } = await import("node:fs");

@@ -177,6 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Merge per-OS logs into one test-logs artifact
+        if: always()
         uses: actions/upload-artifact/merge@v4
         with:
           name: test-logs
@@ -185,6 +186,7 @@ jobs:
           delete-merged: true
 
       - name: playwright-report
+        if: always()
         uses: actions/upload-artifact/merge@v4
         with:
           name: playwright-report
