@@ -104,7 +104,7 @@ function stepLoop(ctx, t, r) {
   const before = { journal: journalCount(wt, t.id), head: revParse(repo, branch) };
   const logPath = join(ctx.taskLogDir(t.id), `${attempt}.log`);
   // recovery: a dirty tree from a crashed iteration is committed first
-  if (gitOut(repo, ["-C", wt, "status", "--porcelain"])) { git(repo, ["-C", wt, "add", "-A"]); git(repo, ["-C", wt, "commit", "-q", "-m", `wip(${t.id}): recovery of uncommitted changes`]); }
+  recoveryCommit(ctx, t, repo, wt);
   const maxTurns = SETUP_TASKS.includes(t.id) ? 30 : 80; // 50 → 80 at the Phase 2 boundary (DECISIONS: turn budget, Michael's yes)
   const cmd = process.env.RALPH_ITERATION_CMD ?? `docker compose run --rm claude-task`;
   const env = { ESSAYDOWN_ROOT: ctx.root, RALPH_ATTEMPT: String(attempt), RALPH_MODEL: t.model, RALPH_MAX_TURNS: String(maxTurns), RALPH_TASK_ID: t.id, RALPH_WORKTREE: wt, RALPH_LOG: logPath };
@@ -116,7 +116,7 @@ function stepLoop(ctx, t, r) {
   const commitOk = head !== base;
   const newCommit = head !== before.head || gitOut(repo, ["-C", wt, "status", "--porcelain"]) !== "";
   const done = transcriptHasDone(logPath, t.id);
-  if (gitOut(repo, ["-C", wt, "status", "--porcelain"])) { git(repo, ["-C", wt, "add", "-A"]); git(repo, ["-C", wt, "commit", "-q", "-m", `wip(${t.id}): recovery of uncommitted changes`]); }
+  recoveryCommit(ctx, t, repo, wt);
   // an attempt that ends without a journal entry or without a commit still counts toward the three attempts (§4.3)
   const stuckOr = (signal, patch, why) => withLock(ctx.root, () => {
     if (attempt >= MAX_ATTEMPTS) { ctx.set(t.id, { ...patch, status: "blocked", attempts: attempt, notes: `${why} after ${attempt} attempts` }, "STUCK"); emit(`STUCK ${t.id} (${why})`); return { signal: "STUCK", id: t.id }; }
@@ -148,6 +148,31 @@ function stepLoop(ctx, t, r) {
     ctx.set(t.id, { attempts: attempt, no_commit_streak: noCommitStreak, notes: reason }, `attempt ${attempt}: ${reason}`);
     return {};
   });
+}
+
+/**
+ * The runner's recovery commit (§4.2): a dirty tree is committed as `wip(<id>): recovery of uncommitted changes`.
+ * It sweeps whatever a capped attempt left, so it flags (WARN + audit line, never a stop) the two shapes that swept
+ * work the task did not intend (handoffs 028, 029; DECISIONS #review-1-r7 M3 (b)): a change under `packages/<pkg>/src/`
+ * on a task whose description says "test-only" (1.54's mid-mutation format.ts), and an added file whose name starts
+ * with `zz-` (1.59's throwaway probes). The principal checks the flagged paths before any `retry`.
+ */
+export function recoveryCommit(ctx, t, repo, wt) {
+  if (!gitOut(repo, ["-C", wt, "status", "--porcelain"])) return null;
+  git(repo, ["-C", wt, "add", "-A"]);
+  git(repo, ["-C", wt, "commit", "-q", "-m", `wip(${t.id}): recovery of uncommitted changes`]);
+  const sha = gitOut(repo, ["-C", wt, "rev-parse", "HEAD"]);
+  const changed = gitOut(repo, ["-C", wt, "diff-tree", "-r", "--root", "--no-commit-id", "--name-status", "HEAD"]).split("\n").filter(Boolean)
+    .map((l) => { const [st, ...p] = l.split("\t"); return { st, path: p[p.length - 1] }; });
+  const flags = [];
+  if (/\btest-only\b/i.test(t.description ?? "")) for (const c of changed) if (/^packages\/[^/]+\/src\//.test(c.path)) flags.push(`source change on a test-only task: ${c.path}`);
+  for (const c of changed) if (c.st.startsWith("A") && /^zz-/.test(c.path.split("/").pop())) flags.push(`probe file swept: ${c.path}`);
+  if (flags.length) {
+    const line = `${t.id}: recovery commit ${sha.slice(0, 7)} — ${flags.join("; ")}; check before any retry`;
+    emit(`WARN ${line}`);
+    ctx.audit(`recovery ${t.id}`, line);
+  }
+  return { sha, flags };
 }
 
 /** Steps after a successful integration that depend on the task kind. */

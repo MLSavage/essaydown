@@ -868,6 +868,43 @@ test("ralph/PROMPT.md's iteration steps 2–5 are CLAUDE.md's steps 2–5 verbat
   assert.match(wrapper[5], /print exactly: `<promise>DONE \{\{TASK_ID\}\}<\/promise>`/);
 });
 
+test("recovery-commit guard (handoffs 028, 029; #review-1-r7 M3 (b)): the runner's recovery commit flags a source change on a test-only task and a swept zz-* probe; one case per guard", async (t) => {
+  const fixture = (description) => {
+    const tasks = phaseTasks("0", { next: "1" });
+    tasks[0].description = description;
+    return makeFixture({ phases: [{ n: "0", tasks }] });
+  };
+  const attempt = (f, files) => {
+    control(f.root, "0.1", { done: false, commit: false, files });
+    const out = ralph(f.root, ["run", "--phase", "0"], { env: { RALPH_MAX_ITERATIONS: "1" } }).out;
+    const subjects = gitOut(f.root, ["log", "--format=%s", "task/0.1"]);
+    assert.match(subjects, /^wip\(0\.1\): recovery of uncommitted changes$/m, "the runner made the recovery commit");
+    return { out, audit: readFileSync(join(f.root, ".evidence/state/audit.log"), "utf8") };
+  };
+  await t.test("guard 1: a change under packages/<pkg>/src on a test-only task is flagged (WARN + audit)", () => {
+    const f = fixture("Phase 0 review fix, test-only: fake");
+    const { out, audit } = attempt(f, { "packages/core/src/format.ts": "mutated\n", "packages/core/test/format.test.ts": "ok\n" });
+    assert.match(out, /^WARN 0\.1: recovery commit [0-9a-f]{7} — source change on a test-only task: packages\/core\/src\/format\.ts; check before any retry$/m);
+    assert.doesNotMatch(out, /format\.test\.ts/, "a test file is not flagged");
+    assert.match(audit, /recovery 0\.1 0\.1: recovery commit .*packages\/core\/src\/format\.ts/);
+    cleanup(f.root);
+  });
+  await t.test("guard 1, absence: the same source change on a task that is not test-only is not flagged", () => {
+    const f = fixture("Task 0.1: fake work");
+    const { out, audit } = attempt(f, { "packages/core/src/format.ts": "changed\n" });
+    assert.doesNotMatch(out, /^WARN/m); assert.doesNotMatch(audit, /recovery 0\.1/);
+    cleanup(f.root);
+  });
+  await t.test("guard 2: an added zz-* probe file is flagged on any task", () => {
+    const f = fixture("Task 0.1: fake work");
+    const { out } = attempt(f, { "e2e/web/zz-diag3.spec.ts": "probe\n", "packages/editor/test/zz-d.test.ts": "probe\n", "e2e/web/real.spec.ts": "keep\n" });
+    assert.match(out, /probe file swept: e2e\/web\/zz-diag3\.spec\.ts/);
+    assert.match(out, /probe file swept: packages\/editor\/test\/zz-d\.test\.ts/);
+    assert.doesNotMatch(out, /real\.spec\.ts/);
+    cleanup(f.root);
+  });
+});
+
 test("transcriptHasDone reads only the assistant's own text (DECISIONS #review-1-r7 M3 (b)): one case per guard", async (t) => {
   const { transcriptHasDone } = await import("../lib/integrate.mjs");
   const { mkdtempSync } = await import("node:fs");
