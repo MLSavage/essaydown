@@ -171,12 +171,14 @@ jobs:
             ralph-test.log
           if-no-files-found: ignore
 
-  # e2e-shell (task 2.1) — the Tauri shell itself, via WebdriverIO + @wdio/tauri-service
-  # (e2e/shell). Ubuntu and Windows drive the app through the cargo-installed tauri-driver
-  # against WebKitWebDriver / msedgedriver (`driverProvider: 'external'`, e2e/shell/wdio.conf.ts);
-  # macOS has no external WebDriver for WKWebView, so it runs the embedded provider instead
-  # (tauri-plugin-wdio-webdriver, registered under #[cfg(debug_assertions)] in
-  # apps/desktop/src-tauri/src/lib.rs, PRD §4) and is continue-on-error until Phase 6 (PRD §8 2.1).
+  # e2e-shell (task 2.1, provider routing repaired at 2.1.g1) — the Tauri shell itself, via
+  # WebdriverIO + @wdio/tauri-service (e2e/shell). Ubuntu drives the app through the
+  # cargo-installed tauri-driver against WebKitWebDriver under xvfb (e2e/shell/provider.ts);
+  # macOS has no external WebDriver for WKWebView, and Windows' tauri-driver -> msedgedriver route
+  # cannot create a session on this image's WebView2 (actions/runner-images#14738), so both run the
+  # embedded provider instead (tauri-plugin-wdio-webdriver, registered under
+  # #[cfg(debug_assertions)] in apps/desktop/src-tauri/src/lib.rs, PRD §4); macOS is
+  # continue-on-error until Phase 6 (PRD §8 2.1).
   e2e-shell:
     strategy:
       fail-fast: false
@@ -246,10 +248,10 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
             webkit2gtk-driver xvfb xauth
 
-      # macOS's embedded provider needs no external driver; Windows' msedgedriver is auto-managed
-      # by @wdio/tauri-service (autoDownloadEdgeDriver, e2e/shell/wdio.conf.ts).
-      - name: Install tauri-driver ${{ env.TAURI_DRIVER_VERSION }} (Linux, Windows)
-        if: runner.os != 'macOS'
+      # Only Linux drives the app through tauri-driver (e2e/shell/provider.ts); macOS and Windows
+      # both run the embedded provider now and need no external driver install.
+      - name: Install tauri-driver ${{ env.TAURI_DRIVER_VERSION }} (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: cargo install tauri-driver --version "${TAURI_DRIVER_VERSION}" --locked
 
@@ -276,6 +278,20 @@ jobs:
         if: runner.os != 'Linux'
         shell: bash
         run: pnpm --filter @essaydown/e2e-shell test 2>&1 | tee e2e-shell.log
+
+      # A second failure on the embedded provider needs to say whether the app lived and whether
+      # the plugin's WebDriver server bound, not just repeat "DevToolsActivePort" from a route this
+      # job no longer takes.
+      - name: Diagnose a failed embedded provider (Windows)
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          {
+            echo "--- tasklist | findstr desktop.exe msedgewebview2.exe ---"
+            tasklist | findstr /I "desktop.exe msedgewebview2.exe" || echo "(no matching process)"
+            echo "--- netstat -ano | findstr :4445 ---"
+            netstat -ano | findstr :4445 || echo "(nothing bound on 4445)"
+          } >> e2e-shell.log
 
       - name: Upload logs
         if: always()
