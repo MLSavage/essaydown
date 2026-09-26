@@ -60,6 +60,8 @@
     "serde_json": "PRD §4 Rust crates row",
     "tauri": "PRD §4 Rust crates row",
     "tauri-build": "PRD §4 Shell row",
+    "tauri-plugin-fs": "PRD §4 Rust crates row",
+    "tauri-plugin-persisted-scope": "PRD §4 Rust crates row",
     "tauri-plugin-wdio-webdriver": "PRD §4 Rust crates row"
   },
   "majors": {
