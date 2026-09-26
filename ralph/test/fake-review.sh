@@ -3,6 +3,7 @@
 # Verdict from $RALPH_ROOT/.fake/review-<phase>-<attempt>.json {"verdict":"PASS","fail":["sol"]} (fail = reviewers that exit 1).
 # Further lists of reviewers (DECISIONS #025 tests): "read" — cats every sibling report.md present in the attempt directory
 # (its path lands in transcript.log); "cite" — names every sibling's report path in transcript.log whether present or not;
+# "mention" — a tool_result quoting ralph/tasks.json rows whose acceptance names each sibling's report path (#044);
 # "failAfterReport" — writes report.md/status.json/transcript.log, then exits 1. Every run writes seen.txt (ls of the attempt dir).
 set -euo pipefail
 who="$1"; phase="$2"; attempt="$3"; dir="$REVIEW_DIR/$who"; root="$RALPH_ROOT"
@@ -15,6 +16,7 @@ mkdir -p "$dir"
 ls "$REVIEW_DIR" > "$dir/seen.txt"
 : > "$dir/transcript.log"
 if in_list read; then for sib in claude sol grok; do [ "$sib" = "$who" ] && continue; if [ -f "$REVIEW_DIR/$sib/report.md" ]; then echo "{\"type\":\"tool_use\",\"input\":{\"command\":\"cat /logs/reviews/$phase/$attempt/$sib/report.md\"}}" >> "$dir/transcript.log"; fi; done; fi
+if in_list mention; then for sib in claude sol grok; do [ "$sib" = "$who" ] && continue; echo "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"  \\\"acceptance\\\": \\\"/logs/reviews/$phase/$attempt/$sib/report.md and status.json exist and pass the template check\\\",\"}]}}" >> "$dir/transcript.log"; done; fi
 if in_list cite; then for sib in claude sol grok; do [ "$sib" = "$who" ] && continue; echo "{\"type\":\"tool_use\",\"input\":{\"file_path\":\"/logs/reviews/$phase/$attempt/$sib/report.md\"}}" >> "$dir/transcript.log"; done; fi
 if [ -f "$ctl" ]; then shape=$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write((c.limit||{})[process.argv[2]]||"")' "$ctl" "$who"); else shape=""; fi
 case "$shape" in # "limit": {"<reviewer>": "codex"|"grok"|"claude"} — the usage-limit tails on record, then exit 1

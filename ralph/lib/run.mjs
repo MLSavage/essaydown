@@ -306,9 +306,12 @@ function restoreHeld(ctx, dir, label) {
 }
 
 /**
- * DECISIONS #025's second guard: a report is refused when the reviewer's own transcript names a sibling's report of
- * the same attempt (`reviews/<phase>/<attempt>[.held]/<sibling>/report.md`, container or host path). Earlier
- * attempts' reports and the reviewer's own are not matched.
+ * DECISIONS #025's second guard, a flag and never a refusal (#044): the reviewer's own transcript names a sibling's
+ * report of the same attempt (`reviews/<phase>/<attempt>[.held]/<sibling>/report.md`, container or host path). Earlier
+ * attempts' reports and the reviewer's own are not matched. A path in a transcript is not a read: every reviewer that
+ * reads ralph/tasks.json meets its siblings' report paths in their rows' acceptance field (replayed over Phase 1: 11 of
+ * 11 attempts matched, one true read, #044). The report stands; a WARN line and the row's notes quote up to three
+ * matching excerpts per sibling, so the reconciliation tells a read from a mention and decides derivation.
  */
 function siblingReportsRead(dir, who, reviewers) {
   const tr = join(dir, who, "transcript.log");
@@ -316,7 +319,19 @@ function siblingReportsRead(dir, who, reviewers) {
   const [attempt, phase] = dir.split("/").reverse();
   const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const text = readFileSync(tr, "utf8");
-  return reviewers.filter((r) => r !== who && new RegExp(`reviews/${esc(phase)}/${esc(attempt)}(\\.held)?/${esc(r)}/report\\.md`).test(text));
+  const out = [];
+  for (const r of reviewers) {
+    if (r === who) continue;
+    const re = new RegExp(`reviews/${esc(phase)}/${esc(attempt)}(\\.held)?/${esc(r)}/report\\.md`, "g");
+    const quotes = [];
+    let m, n = 0;
+    while ((m = re.exec(text))) {
+      n++;
+      if (quotes.length < 3) quotes.push(text.slice(Math.max(0, m.index - 120), m.index + m[0].length + 40).replace(/\s+/g, " "));
+    }
+    if (n) out.push({ sibling: r, count: n, quotes });
+  }
+  return out;
 }
 
 /** Review attempt r<k>: record metadata (§5.1), the attempt's reviewers in parallel from one snapshot (§5.2). */
@@ -398,10 +413,12 @@ function stepReview(ctx, t) {
     const limited = [];
     for (const { x, code } of results) {
       const read = siblingReportsRead(dir, x.reviewer, trio.map((y) => y.reviewer));
-      const ok = code === 0 && existsSync(join(dir, x.reviewer, "report.md")) && existsSync(join(dir, x.reviewer, "status.json")) && !read.length;
-      const limit = ok || read.length ? null : reviewerUsageLimit(join(dir, x.reviewer, "transcript.log"));
-      if (ok) ctx.set(x.id, { status: "passed", finished_at: now(), integrated_sha: null }, "report ok");
-      else if (read.length) { failed++; ctx.set(x.id, { status: "blocked", notes: `report refused: the transcript names a sibling's report of this attempt (${read.join(", ")}); DECISIONS #025` }, "reviewer read a sibling report"); }
+      const ok = code === 0 && existsSync(join(dir, x.reviewer, "report.md")) && existsSync(join(dir, x.reviewer, "status.json"));
+      const limit = ok ? null : reviewerUsageLimit(join(dir, x.reviewer, "transcript.log"));
+      const flag = read.length
+        ? `transcript names a sibling's report of this attempt (${read.map((h) => `${h.sibling} ×${h.count}`).join(", ")}); the reconciliation decides read or mention (DECISIONS #025, #044): ${read.map((h) => h.quotes.map((q) => `[${h.sibling}] …${q}…`).join(" | ")).join(" | ")}`
+        : null;
+      if (ok) { ctx.set(x.id, { status: "passed", finished_at: now(), integrated_sha: null, ...(flag ? { notes: flag } : {}) }, "report ok"); if (flag) emit(`WARN ${x.id}: ${flag}`); }
       else if (limit) { limited.push({ x, limit }); ctx.set(x.id, { status: "blocked", notes: `usage limit (reviewer exit ${code}): ${limit}` }, "reviewer usage limit"); }
       else { failed++; ctx.set(x.id, { status: "blocked", notes: `reviewer exit ${code}` }, "reviewer failed"); }
       const wt = ctx.worktree(`review-${x.reviewer}`);

@@ -43,7 +43,7 @@ The principal session runs on Opus 5.5: `claude --model claude-opus-5-5 --remote
 
 - Grok reviews a phase's `r0` only, with the drift prompt (`docker/entrypoints/grok-review`). A planning commit that writes `r1`+ rows writes `a`, `b` and `d` (with `d` depending on `a` and `b`), never `c`. Changing this is a boundary decision, never inside a set.
 - `USAGE-LIMIT <id>` (a task attempt ended by a 429) is not counted: after the reset, the same `ralph/ralph.sh run`. `USAGE-LIMIT <set>.<attempt> <reviewer> (<id>)`: Sol's Codex limit waits for its reset, then `ralph/ralph.sh retry <id>` of that reviewer alone; the runner holds its siblings out and moves its own earlier output aside. A Grok 402 is Michael's call before any retry, and nobody pays for Grok.
-- A reviewer row blocked with "the transcript names a sibling's report" is #025's refusal. The reconciliation reads the transcript and decides whether the report was derived.
+- A `WARN <id>: transcript names a sibling's report …` line (and the row's notes) quotes the matching excerpts; it is a flag, never a refusal (#044). Nearly every reviewer meets its siblings' paths in `tasks.json` acceptance rows, so the reconciliation reads each excerpt: a `read_file`/`cat` of the path is a read (the report is derived, #025); an acceptance-row quote is a mention.
 
 ## Principal lessons, Phase 1 r4–r10 (`docs/lessons.md` `[1.10.r4d]`–`[1.10.r10d]`, #028, #038)
 

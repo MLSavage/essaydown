@@ -915,15 +915,30 @@ test("DECISIONS #025: a single-reviewer retry runs with its siblings held out; o
     for (const who of ["claude", "sol", "grok"]) for (const sib of ["claude", "sol", "grok"]) assert.match(readFileSync(join(R0(f.root), who, "seen.txt"), "utf8"), new RegExp(`^${sib}$`, "m"));
     cleanup(f.root);
   });
-  await t.test("guard 2: a report whose transcript names a sibling's report of the same attempt is refused (blocked, STUCK)", () => {
+  await t.test("guard 2: a transcript that reads a sibling's report of the same attempt passes flagged — WARN + notes quoting the read, no stop (#044)", () => {
     const f = makeFixture({ phases: onePhase() });
     reviewCtl(f.root, { cite: ["grok"] });
-    const r = runPhaseGreen(f.root, "0", { until: "STUCK" });
-    assert.equal(r.stopped, "STUCK 0.9.r0");
+    const r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL" });
+    assert.equal(r.stopped, "PRINCIPAL 0.9.r0d", "the set completes and reaches its reconciliation");
+    assert.ok(!r.log.join("\n").includes("STUCK 0.9.r0"), "no refusal");
+    assert.match(r.log.join("\n"), /^WARN 0\.9\.r0c: transcript names a sibling's report of this attempt \(claude ×1, sol ×1\)/m);
     const s = state(f.root);
-    assert.equal(s["0.9.r0c"].status, "blocked");
-    assert.match(s["0.9.r0c"].notes, /report refused: the transcript names a sibling's report of this attempt \(claude, sol\)/);
+    assert.equal(s["0.9.r0c"].status, "passed");
+    assert.match(s["0.9.r0c"].notes, /\[claude\] …[^|]*"file_path":"\/logs\/reviews\/0\/r0\/claude\/report\.md"/, "the note quotes the read itself");
     assert.equal(s["0.9.r0a"].status, "passed"); assert.equal(s["0.9.r0b"].status, "passed");
+    assert.ok(!/sibling/.test(s["0.9.r0a"].notes ?? ""), "an unflagged report carries no flag");
+    cleanup(f.root);
+  });
+  await t.test("guard 2b: a transcript quoting ralph/tasks.json acceptance rows that name the siblings' report paths warns and does not refuse (#044)", () => {
+    const f = makeFixture({ phases: onePhase() });
+    reviewCtl(f.root, { mention: ["sol"] });
+    const r = runPhaseGreen(f.root, "0", { until: "PRINCIPAL" });
+    assert.equal(r.stopped, "PRINCIPAL 0.9.r0d");
+    assert.ok(!r.log.join("\n").includes("STUCK 0.9.r0"), "a mention never refuses");
+    assert.match(r.log.join("\n"), /^WARN 0\.9\.r0b: transcript names a sibling's report of this attempt \(claude ×1, grok ×1\)/m);
+    const s = state(f.root);
+    assert.equal(s["0.9.r0b"].status, "passed");
+    assert.match(s["0.9.r0b"].notes, /\[grok\] …[^|]*acceptance[^|]*\/logs\/reviews\/0\/r0\/grok\/report\.md and status\.json exist/, "the note quotes the acceptance row, so the reconciliation reads it as a mention");
     cleanup(f.root);
   });
   await t.test("guard 4: the retried reviewer's own earlier output is moved aside with its attempt suffix, and a stale report cannot pass the retry", () => {
