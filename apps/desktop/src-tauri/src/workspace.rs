@@ -135,8 +135,11 @@ fn sibling_temp_path(target: &Path) -> Option<PathBuf> {
 /// Writes `contents` to `target` via a temp file in the same directory, preserving `target`'s
 /// existing file mode (if any) before the atomic rename. No temp file remains after success or
 /// failure: a failed write never created one, and a failed set-permissions/rename is cleaned up.
-fn atomic_write(target: &Path, contents: &[u8]) -> Result<(), WorkspaceError> {
-    let tmp_path = sibling_temp_path(target).ok_or(WorkspaceError::InvalidPath)?;
+/// Plain `io::Result` (not `WorkspaceError`) because `settings.rs` writes to the platform config
+/// dir, which is never a workspace-relative path and so never carries a `WorkspaceError`.
+pub(crate) fn atomic_write(target: &Path, contents: &[u8]) -> io::Result<()> {
+    let tmp_path = sibling_temp_path(target)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "target has no parent directory"))?;
     let result = (|| -> io::Result<()> {
         std::fs::write(&tmp_path, contents)?;
         if let Ok(meta) = std::fs::metadata(target) {
@@ -145,11 +148,10 @@ fn atomic_write(target: &Path, contents: &[u8]) -> Result<(), WorkspaceError> {
         std::fs::rename(&tmp_path, target)?;
         Ok(())
     })();
-    if let Err(ref e) = result {
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp_path);
-        let _ = e; // kind is carried out below
     }
-    result.map_err(WorkspaceError::from)
+    result
 }
 
 /// One `.md` file found by `list_tree_at`, workspace-relative with `/` separators regardless of
@@ -224,7 +226,7 @@ pub fn read_doc_at(root: &Path, relative: &str) -> Result<String, WorkspaceError
 /// `write_doc`: temp file + atomic rename, preserving the target's existing mode.
 pub fn write_doc_at(root: &Path, relative: &str, contents: &str) -> Result<(), WorkspaceError> {
     let path = resolve_workspace_path(root, relative, false)?;
-    atomic_write(&path, contents.as_bytes())
+    atomic_write(&path, contents.as_bytes()).map_err(WorkspaceError::from)
 }
 
 /// `read_sidecar`: `None` when the sidecar file does not exist (the sidecar is optional, PRD §6.2),
@@ -241,7 +243,7 @@ pub fn read_sidecar_at(root: &Path, relative: &str) -> Result<Option<String>, Wo
 /// `write_sidecar`: same atomic-write contract as `write_doc`.
 pub fn write_sidecar_at(root: &Path, relative: &str, contents: &str) -> Result<(), WorkspaceError> {
     let path = resolve_workspace_path(root, relative, false)?;
-    atomic_write(&path, contents.as_bytes())
+    atomic_write(&path, contents.as_bytes()).map_err(WorkspaceError::from)
 }
 
 /// The document's file stem (`a.md` -> `a`), the name `new_file`/`rename_file`/`delete_to_trash`

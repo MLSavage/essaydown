@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
+import SettingsDialog from "./settings/SettingsDialog";
+import type { HasCoachKeyResult, SettingsIO } from "./settings/settings-sync";
 import ConfirmDelete from "./workspace/ConfirmDelete";
 import ContextMenu, { type ContextMenuTarget } from "./workspace/ContextMenu";
 import DocumentPane, { loadDocument, type DocumentPaneHandle, type LoadedDocument } from "./workspace/DocumentPane";
@@ -48,6 +50,30 @@ function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const settingsIO: SettingsIO = useMemo(
+    () => ({
+      getSettings: () => invoke<string | null>("get_settings"),
+      setSettings: (contents) => invoke("set_settings", { contents }),
+      hasCoachKey: () => invoke<HasCoachKeyResult>("has_coach_key"),
+      log: (message) => console.warn(message),
+    }),
+    [],
+  );
+
+  // The settings dialog's own trigger (task 2.7's description: Cmd/Ctrl+,), global so it opens
+  // regardless of which pane has focus.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault();
+        setSettingsOpen(true);
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   // `openFolderDialog` (the "Open Folder" button) and the launch-restore effect both open a folder
   // this same way; the restore effect also opens the last file afterwards, which this alone does
@@ -292,6 +318,7 @@ function App() {
           {error}
         </div>
       )}
+      {settingsOpen && <SettingsDialog io={settingsIO} onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

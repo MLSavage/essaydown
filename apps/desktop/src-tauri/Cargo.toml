@@ -48,6 +48,10 @@ tauri-plugin-dialog = "2"
 trash = "5"
 # `watch_folder`'s filesystem watcher (PRD §4 Rust crates row, §6.4: notify → event `fs:changed`).
 notify = "8"
+# The coach credential's OS-keyring backend (PRD §4 Secrets row, §6.4 `set_coach_key`/
+# `has_coach_key`/`clear_coach_key`); default features cover macOS Keychain, Windows Credential
+# Manager and Linux secret-service. `cargo test` uses an in-memory fake instead (`coach_key.rs`).
+keyring = "4"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

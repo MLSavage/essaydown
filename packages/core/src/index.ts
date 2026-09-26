@@ -144,6 +144,18 @@ export {
   type PushOptions,
 } from "./undo.js";
 
+export {
+  THEME_VALUES,
+  coachSettingsSchema,
+  settingsSchema,
+  DEFAULT_SETTINGS,
+  parseSettings,
+  serializeSettings,
+  type CoachSettings,
+  type Settings,
+  type ParsedSettings,
+} from "./settings.js";
+
 export function placeholder(): string {
   return "core";
 }

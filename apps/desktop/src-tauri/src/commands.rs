@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 use tauri_plugin_fs::FsExt;
 
+use crate::coach_key::{has_coach_key_with, BackendStatus, CoachKeyState, HasCoachKeyResult, ENV_VAR};
+use crate::settings::{read_settings_at, write_settings_at, SettingsError};
 use crate::workspace::{
     self, delete_to_trash_at, read_doc_at, read_sidecar_at, save_image_at, write_doc_at,
     write_sidecar_at, SystemTrash, TreeEntry, WorkspaceError,
@@ -137,6 +139,51 @@ pub fn save_image(
     extension: String,
 ) -> Result<String, WorkspaceError> {
     save_image_at(&current_root(&state)?, &doc_path, &bytes, &extension)
+}
+
+/// The one `settings.json` path, resolved fresh on every call (PRD §6.4: `get_settings`/
+/// `set_settings` take no path argument — there is exactly one settings file, unrelated to any
+/// open workspace).
+fn settings_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, SettingsError> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join("settings.json"))
+        .map_err(|_| SettingsError::ConfigDirUnavailable)
+}
+
+/// `get_settings` (PRD §6.4): the raw file contents, or `None` on first launch. Rust does no
+/// parsing — `packages/core`'s `parseSettings` (zod) applies the schema, defaults and the
+/// corrupt-file-plus-warning fallback, the same split `read_sidecar`/`sidecar.ts` already use.
+#[tauri::command]
+pub fn get_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<Option<String>, SettingsError> {
+    read_settings_at(&settings_path(&app)?)
+}
+
+/// `set_settings` (PRD §6.4): atomic write of the frontend's already-validated JSON.
+#[tauri::command]
+pub fn set_settings<R: tauri::Runtime>(app: tauri::AppHandle<R>, contents: String) -> Result<(), SettingsError> {
+    write_settings_at(&settings_path(&app)?, &contents)
+}
+
+/// `set_coach_key` (PRD §6.4, §9): stores the secret in the OS credential store. Never touches
+/// `settings.json`; the secret never appears in this command's `Ok(())` response.
+#[tauri::command]
+pub fn set_coach_key(state: tauri::State<CoachKeyState>, key: String) -> Result<(), BackendStatus> {
+    state.0.set(&key)
+}
+
+/// `clear_coach_key` (PRD §6.4): deletes the stored secret, if any.
+#[tauri::command]
+pub fn clear_coach_key(state: tauri::State<CoachKeyState>) -> Result<(), BackendStatus> {
+    state.0.clear()
+}
+
+/// `has_coach_key` (PRD §6.4, §9): `{present, backend}` only — the secret itself never crosses
+/// IPC. `ESSAYDOWN_COACH_KEY` (read here, the one real call site) wins over the store.
+#[tauri::command]
+pub fn has_coach_key(state: tauri::State<CoachKeyState>) -> HasCoachKeyResult {
+    let env_value = std::env::var(ENV_VAR).ok();
+    has_coach_key_with(state.0.as_ref(), env_value.as_deref())
 }
 
 #[tauri::command]
@@ -296,5 +343,93 @@ mod tests {
 
         tauri::test::get_ipc_response(&webview, invoke_request("watch_folder", serde_json::json!({ "path": "" })))
             .expect("watch_folder must be allowed by the app's capabilities");
+    }
+
+    /// "no IPC response ever contains the value (asserted on the recorded IPC log)": every raw
+    /// response body this test receives for `set_coach_key`/`has_coach_key`/`clear_coach_key` is
+    /// collected into `log` before being asserted on, so the substring check below reads as a
+    /// check of the recorded log, not of one response picked in isolation. Runs against the real
+    /// `configure()` wiring (`CoachKeyState` holds `InMemoryBackend` under `cfg(test)`), so this
+    /// also proves `has_coach_key`/`set_coach_key` are reachable through actual IPC.
+    #[test]
+    fn coach_key_value_never_crosses_ipc() {
+        let (_app, webview) = test_app();
+        const SECRET: &str = "sk-super-secret-coach-key-value";
+        let mut log: Vec<String> = Vec::new();
+        let mut record = |label: &str, body: tauri::ipc::InvokeResponseBody| -> String {
+            let text = match &body {
+                tauri::ipc::InvokeResponseBody::Json(s) => s.clone(),
+                tauri::ipc::InvokeResponseBody::Raw(b) => format!("{b:?}"),
+            };
+            log.push(format!("{label}: {text}"));
+            text
+        };
+
+        let set_response = tauri::test::get_ipc_response(
+            &webview,
+            invoke_request("set_coach_key", serde_json::json!({ "key": SECRET })),
+        )
+        .expect("set_coach_key must be allowed by the app's capabilities");
+        record("set_coach_key", set_response);
+
+        let has_response = tauri::test::get_ipc_response(&webview, invoke_request("has_coach_key", serde_json::json!({})))
+            .expect("has_coach_key must be allowed by the app's capabilities");
+        let has_text = record("has_coach_key", has_response);
+        assert_eq!(
+            serde_json::from_str::<crate::coach_key::HasCoachKeyResult>(&has_text).unwrap(),
+            crate::coach_key::HasCoachKeyResult {
+                present: true,
+                backend: crate::coach_key::BackendStatus::Available,
+            }
+        );
+
+        let clear_response = tauri::test::get_ipc_response(&webview, invoke_request("clear_coach_key", serde_json::json!({})))
+            .expect("clear_coach_key must be allowed by the app's capabilities");
+        record("clear_coach_key", clear_response);
+
+        assert!(
+            log.iter().all(|entry| !entry.contains(SECRET)),
+            "the recorded IPC log must never contain the coach key value: {log:?}"
+        );
+    }
+
+    /// `get_settings`/`set_settings` round-trip over real IPC, and "after `set_coach_key` the
+    /// settings JSON on disk contains no key material (grep for the value returns nothing)":
+    /// `set_settings` and `set_coach_key` go through two entirely separate stores (the platform
+    /// config dir vs. the OS credential store, `CoachKeyState`'s `InMemoryBackend` here), so the
+    /// grep is expected to find nothing — asserted on the real `settings.json` this test writes,
+    /// not a stand-in file, then removed so the test leaves no state behind.
+    #[test]
+    fn set_coach_key_never_reaches_the_settings_file_on_disk() {
+        let (app, webview) = test_app();
+        const SECRET: &str = "sk-another-secret-never-in-settings-json";
+        let settings_path = tauri::Manager::path(&app).app_config_dir().unwrap().join("settings.json");
+        let _ = std::fs::remove_file(&settings_path);
+
+        let contents = r#"{"theme":"system","typewriterScroll":true,"coach":{"provider":null,"baseUrl":"","model":""}}"#;
+        tauri::test::get_ipc_response(
+            &webview,
+            invoke_request("set_settings", serde_json::json!({ "contents": contents })),
+        )
+        .expect("set_settings must be allowed by the app's capabilities");
+        assert_eq!(std::fs::read_to_string(&settings_path).unwrap(), contents);
+
+        tauri::test::get_ipc_response(
+            &webview,
+            invoke_request("set_coach_key", serde_json::json!({ "key": SECRET })),
+        )
+        .expect("set_coach_key must be allowed by the app's capabilities");
+
+        let on_disk = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(!on_disk.contains(SECRET), "settings.json must never contain the coach key value");
+        assert_eq!(on_disk, contents, "set_coach_key must not touch settings.json at all");
+
+        let read_back = tauri::test::get_ipc_response(&webview, invoke_request("get_settings", serde_json::json!({})))
+            .expect("get_settings must be allowed by the app's capabilities")
+            .deserialize::<Option<String>>()
+            .unwrap();
+        assert_eq!(read_back, Some(contents.to_string()));
+
+        let _ = std::fs::remove_file(&settings_path);
     }
 }

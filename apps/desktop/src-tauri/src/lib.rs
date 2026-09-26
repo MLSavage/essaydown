@@ -1,7 +1,10 @@
+mod coach_key;
 mod commands;
+mod settings;
 mod watch;
 mod workspace;
 
+use coach_key::CoachKeyState;
 use commands::{WatchState, WorkspaceState};
 
 /// Plugin registration and the IPC surface, shared by `run()` (a real runtime) and the `commands`
@@ -26,6 +29,17 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
         .plugin(tauri_plugin_dialog::init())
         .manage(WorkspaceState::default())
         .manage(WatchState::default())
+        // `SystemKeyring` in production; `cargo test` compiles this crate with `cfg(test)` set
+        // (it is the same `configure()` `run()` and the `commands`/`coach_key` test modules both
+        // call, task 2.7's description: "an in-memory backend under test"), so `cargo test` never
+        // touches a real OS credential store.
+        .manage(CoachKeyState({
+            #[cfg(test)]
+            let backend: Box<dyn coach_key::CoachKeyBackend> = Box::new(coach_key::InMemoryBackend::default());
+            #[cfg(not(test))]
+            let backend: Box<dyn coach_key::CoachKeyBackend> = Box::new(coach_key::SystemKeyring);
+            backend
+        }))
         .invoke_handler(tauri::generate_handler![
             commands::open_folder,
             commands::list_tree,
@@ -39,6 +53,11 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::reveal_in_folder,
             commands::watch_folder,
             commands::save_image,
+            commands::get_settings,
+            commands::set_settings,
+            commands::set_coach_key,
+            commands::has_coach_key,
+            commands::clear_coach_key,
         ])
 }
 

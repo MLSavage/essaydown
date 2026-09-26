@@ -66,7 +66,8 @@
     "tauri-plugin-fs": "PRD §4 Rust crates row",
     "tauri-plugin-persisted-scope": "PRD §4 Rust crates row",
     "tauri-plugin-wdio-webdriver": "PRD §4 Rust crates row",
-    "trash": "PRD §4 Rust crates row"
+    "trash": "PRD §4 Rust crates row",
+    "keyring": "PRD §4 Secrets row"
   },
   "majors": {
     "_note": "Package → the product name whose major PRD §4 pins in the row the npm entry cites (\"React 19\" in the Frontend row); check-deps fails on a range with another major (DECISIONS #043).",
