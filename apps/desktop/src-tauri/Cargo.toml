@@ -42,6 +42,8 @@ serde_json = "1"
 tauri-plugin-wdio-webdriver = "1"
 tauri-plugin-fs = "2"
 tauri-plugin-persisted-scope = { version = "2", features = ["protocol-asset"] }
+# `delete_to_trash`'s real `TrashBackend` impl (PRD §4, §6.4); tests inject a recording fake instead.
+trash = "5"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

@@ -1,15 +1,17 @@
-//! The IPC surface (PRD §6.4) built at this task: `open_folder`, `list_tree`, `read_doc`,
-//! `write_doc`, `read_sidecar`, `write_sidecar`. Each is a thin adapter over `workspace`'s pure
-//! path-resolution and file-I/O functions, which carry all the logic cargo tests exercise directly.
+//! The IPC surface (PRD §6.4) built across 2.2 and 2.3: `open_folder`, `list_tree`, `read_doc`,
+//! `write_doc`, `read_sidecar`, `write_sidecar`, `new_file`, `rename_file`, `delete_to_trash`,
+//! `reveal_in_folder`. Each is a thin adapter over `workspace`'s pure path-resolution and file-I/O
+//! functions, which carry all the logic cargo tests exercise directly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use tauri::Manager;
 use tauri_plugin_fs::FsExt;
 
 use crate::workspace::{
-    self, read_doc_at, read_sidecar_at, write_doc_at, write_sidecar_at, TreeEntry, WorkspaceError,
+    self, delete_to_trash_at, read_doc_at, read_sidecar_at, write_doc_at, write_sidecar_at,
+    SystemTrash, TreeEntry, WorkspaceError,
 };
 
 /// The single `WorkspaceRoot` (PRD §6.4): `None` until `open_folder` succeeds.
@@ -77,6 +79,62 @@ pub fn write_sidecar(
     contents: String,
 ) -> Result<(), WorkspaceError> {
     write_sidecar_at(&current_root(&state)?, &path, &contents)
+}
+
+#[tauri::command]
+pub fn new_file(state: tauri::State<WorkspaceState>) -> Result<String, WorkspaceError> {
+    workspace::new_file_at(&current_root(&state)?)
+}
+
+#[tauri::command]
+pub fn rename_file(
+    state: tauri::State<WorkspaceState>,
+    old_path: String,
+    new_path: String,
+) -> Result<(), WorkspaceError> {
+    workspace::rename_file_at(&current_root(&state)?, &old_path, &new_path)
+}
+
+#[tauri::command]
+pub fn delete_to_trash(
+    state: tauri::State<WorkspaceState>,
+    path: String,
+) -> Result<(), WorkspaceError> {
+    delete_to_trash_at(&current_root(&state)?, &path, &SystemTrash)
+}
+
+#[tauri::command]
+pub fn reveal_in_folder(
+    state: tauri::State<WorkspaceState>,
+    path: String,
+) -> Result<(), WorkspaceError> {
+    let resolved = workspace::resolve_for_reveal(&current_root(&state)?, &path)?;
+    reveal(&resolved)
+}
+
+/// Reveals `path` in the OS file manager: `open -R` selects the file on macOS, `explorer /select,`
+/// selects it on Windows. There is no cross-desktop-environment equivalent on Linux, so `xdg-open`
+/// on the containing directory is the honest substitute here — it opens the folder without
+/// selecting the file, recorded rather than silently claimed as a full reveal.
+#[cfg(target_os = "macos")]
+fn reveal(path: &Path) -> Result<(), WorkspaceError> {
+    std::process::Command::new("open").arg("-R").arg(path).spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal(path: &Path) -> Result<(), WorkspaceError> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn reveal(path: &Path) -> Result<(), WorkspaceError> {
+    let parent = path.parent().unwrap_or(path);
+    std::process::Command::new("xdg-open").arg(parent).spawn()?;
+    Ok(())
 }
 
 #[cfg(test)]

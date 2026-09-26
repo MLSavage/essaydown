@@ -244,6 +244,162 @@ pub fn write_sidecar_at(root: &Path, relative: &str, contents: &str) -> Result<(
     atomic_write(&path, contents.as_bytes())
 }
 
+/// The document's file stem (`a.md` -> `a`), the name `new_file`/`rename_file`/`delete_to_trash`
+/// derive the sidecar and assets-directory names from.
+fn file_stem_of(relative: &str) -> Option<String> {
+    Path::new(relative)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+}
+
+/// The workspace-relative sidecar path for a document: `<stem>.essaydown.json` in the document's own
+/// directory (PRD §6 Identifiers).
+fn sidecar_relative_for(relative: &str) -> Option<String> {
+    let path = Path::new(relative);
+    let stem = file_stem_of(relative)?;
+    let dir = path.parent().unwrap_or(Path::new(""));
+    Some(to_posix(&dir.join(format!("{stem}.essaydown.json"))))
+}
+
+/// The workspace-relative assets directory for a document: `assets/<stem>` in the document's own
+/// directory, matching how the rendered view resolves an image's relative `src` against `docDir`
+/// (PRD §6.4).
+fn assets_relative_for(relative: &str) -> Option<String> {
+    let path = Path::new(relative);
+    let stem = file_stem_of(relative)?;
+    let dir = path.parent().unwrap_or(Path::new(""));
+    Some(to_posix(&dir.join("assets").join(stem)))
+}
+
+/// `new_file`: the next unused `Untitled-N.md` (N starts at 1, computed from the highest existing
+/// `Untitled-N.md` at the workspace root, never reused after a gap) with `# Untitled-N` as its only
+/// content. Returns the new file's workspace-relative path.
+pub fn new_file_at(root: &Path) -> Result<String, WorkspaceError> {
+    let base = resolve_workspace_path(root, "", true)?;
+    let mut max_n: u64 = 0;
+    for entry in std::fs::read_dir(&base)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if let Some(rest) = name_str.strip_prefix("Untitled-") {
+            if let Some(digits) = rest.strip_suffix(".md") {
+                if let Ok(n) = digits.parse::<u64>() {
+                    max_n = max_n.max(n);
+                }
+            }
+        }
+    }
+    let n = max_n + 1;
+    let relative = format!("Untitled-{n}.md");
+    let path = resolve_workspace_path(root, &relative, false)?;
+    atomic_write(&path, format!("# Untitled-{n}\n").as_bytes())?;
+    Ok(relative)
+}
+
+/// `rename_file`: renames the document, its sidecar (if present) and its `assets/<stem>` directory
+/// (if present) together, then rewrites every relative image URL in the moved document that points
+/// into `assets/<oldstem>/` to `assets/<newstem>/`. The target document already existing is
+/// `AlreadyExists` and changes nothing; a failure renaming the sidecar or the assets directory rolls
+/// back everything renamed so far, so a caller never observes a half-renamed document.
+pub fn rename_file_at(
+    root: &Path,
+    old_relative: &str,
+    new_relative: &str,
+) -> Result<(), WorkspaceError> {
+    let old_doc = resolve_workspace_path(root, old_relative, false)?;
+    let new_doc = resolve_workspace_path(root, new_relative, false)?;
+
+    if new_doc.exists() {
+        return Err(WorkspaceError::Io(io::ErrorKind::AlreadyExists));
+    }
+
+    let old_stem = file_stem_of(old_relative).ok_or(WorkspaceError::InvalidPath)?;
+    let new_stem = file_stem_of(new_relative).ok_or(WorkspaceError::InvalidPath)?;
+
+    let old_sidecar_rel = sidecar_relative_for(old_relative).ok_or(WorkspaceError::InvalidPath)?;
+    let new_sidecar_rel = sidecar_relative_for(new_relative).ok_or(WorkspaceError::InvalidPath)?;
+    let old_assets_rel = assets_relative_for(old_relative).ok_or(WorkspaceError::InvalidPath)?;
+    let new_assets_rel = assets_relative_for(new_relative).ok_or(WorkspaceError::InvalidPath)?;
+
+    let old_sidecar = resolve_workspace_path(root, &old_sidecar_rel, false)?;
+    let new_sidecar = resolve_workspace_path(root, &new_sidecar_rel, false)?;
+    let old_assets = resolve_workspace_path(root, &old_assets_rel, false)?;
+    let new_assets = resolve_workspace_path(root, &new_assets_rel, false)?;
+
+    std::fs::rename(&old_doc, &new_doc)?;
+
+    let sidecar_existed = old_sidecar.exists();
+    if sidecar_existed {
+        if let Err(e) = std::fs::rename(&old_sidecar, &new_sidecar) {
+            let _ = std::fs::rename(&new_doc, &old_doc);
+            return Err(e.into());
+        }
+    }
+
+    let assets_existed = old_assets.exists();
+    if assets_existed {
+        if let Err(e) = std::fs::rename(&old_assets, &new_assets) {
+            if sidecar_existed {
+                let _ = std::fs::rename(&new_sidecar, &old_sidecar);
+            }
+            let _ = std::fs::rename(&new_doc, &old_doc);
+            return Err(e.into());
+        }
+    }
+
+    let content = std::fs::read_to_string(&new_doc)?;
+    let old_needle = format!("assets/{old_stem}/");
+    if content.contains(&old_needle) {
+        let rewritten = content.replace(&old_needle, &format!("assets/{new_stem}/"));
+        atomic_write(&new_doc, rewritten.as_bytes())?;
+    }
+
+    Ok(())
+}
+
+/// Real deletions route through the OS trash (the `trash` crate, PRD §4); a test build injects a
+/// recording fake instead so `cargo test` never touches a real trash can.
+pub trait TrashBackend {
+    fn trash(&self, path: &Path) -> Result<(), WorkspaceError>;
+}
+
+/// The production `TrashBackend`.
+pub struct SystemTrash;
+
+impl TrashBackend for SystemTrash {
+    fn trash(&self, path: &Path) -> Result<(), WorkspaceError> {
+        trash::delete(path).map_err(|_| WorkspaceError::Io(io::ErrorKind::Other))
+    }
+}
+
+/// `delete_to_trash`: trashes the document, its sidecar and its `assets/<stem>` directory together,
+/// calling `backend` once per item that exists on disk — a missing sidecar or assets directory is
+/// skipped, never trashed.
+pub fn delete_to_trash_at<T: TrashBackend>(
+    root: &Path,
+    relative: &str,
+    backend: &T,
+) -> Result<(), WorkspaceError> {
+    let doc = resolve_workspace_path(root, relative, false)?;
+    let sidecar_rel = sidecar_relative_for(relative).ok_or(WorkspaceError::InvalidPath)?;
+    let assets_rel = assets_relative_for(relative).ok_or(WorkspaceError::InvalidPath)?;
+    let sidecar = resolve_workspace_path(root, &sidecar_rel, false)?;
+    let assets = resolve_workspace_path(root, &assets_rel, false)?;
+
+    for path in [doc, sidecar, assets] {
+        if path.exists() {
+            backend.trash(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// `reveal_in_folder`: resolves `relative` through the `WorkspaceRoot` contract, the same as every
+/// other path-taking command.
+pub fn resolve_for_reveal(root: &Path, relative: &str) -> Result<PathBuf, WorkspaceError> {
+    resolve_workspace_path(root, relative, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +724,149 @@ mod tests {
         let mut sorted = entries.clone();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(entries, sorted);
+    }
+
+    // --- new_file ---
+
+    #[test]
+    fn new_file_creates_untitled_1_with_matching_heading() {
+        let root = scratch_dir();
+        let relative = new_file_at(&root).unwrap();
+        assert_eq!(relative, "Untitled-1.md");
+        assert_eq!(
+            std::fs::read_to_string(root.join("Untitled-1.md")).unwrap(),
+            "# Untitled-1\n"
+        );
+    }
+
+    #[test]
+    fn new_file_numbers_past_the_highest_existing_untitled_ignoring_gaps() {
+        let root = scratch_dir();
+        std::fs::write(root.join("Untitled-1.md"), "# Untitled-1\n").unwrap();
+        std::fs::write(root.join("Untitled-5.md"), "# Untitled-5\n").unwrap();
+        let relative = new_file_at(&root).unwrap();
+        assert_eq!(relative, "Untitled-6.md");
+    }
+
+    // --- rename_file ---
+
+    #[test]
+    fn rename_moves_doc_sidecar_and_assets_and_rewrites_image_urls() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "See ![x](assets/a/x.png) and ![y](assets/a/y.png).")
+            .unwrap();
+        std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
+        std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
+        std::fs::write(root.join("assets").join("a").join("x.png"), "img").unwrap();
+
+        rename_file_at(&root, "a.md", "b.md").unwrap();
+
+        assert!(!root.join("a.md").exists());
+        assert!(!root.join("a.essaydown.json").exists());
+        assert!(!root.join("assets").join("a").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.essaydown.json")).unwrap(),
+            "{\"version\":1}"
+        );
+        assert!(root.join("assets").join("b").join("x.png").exists());
+        let doc = std::fs::read_to_string(root.join("b.md")).unwrap();
+        assert_eq!(doc, "See ![x](assets/b/x.png) and ![y](assets/b/y.png).");
+    }
+
+    #[test]
+    fn rename_with_no_sidecar_or_assets_renames_only_the_doc() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "no images here").unwrap();
+
+        rename_file_at(&root, "a.md", "b.md").unwrap();
+
+        assert!(!root.join("a.md").exists());
+        assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), "no images here");
+        assert!(!root.join("b.essaydown.json").exists());
+        assert!(!root.join("assets").exists());
+    }
+
+    #[test]
+    fn rename_onto_an_existing_target_is_already_exists_and_changes_nothing() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "old").unwrap();
+        std::fs::write(root.join("b.md"), "existing").unwrap();
+
+        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "old");
+        assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), "existing");
+    }
+
+    #[test]
+    fn rename_rolls_back_doc_and_sidecar_when_moving_assets_fails() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "![x](assets/a/x.png)").unwrap();
+        std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
+        std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
+        // A plain file already sitting at the assets destination blocks the directory rename with
+        // a real I/O failure (the "simulated failure" the acceptance names).
+        std::fs::write(root.join("assets").join("b"), "blocker").unwrap();
+
+        let result = rename_file_at(&root, "a.md", "b.md");
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/a/x.png)");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.essaydown.json")).unwrap(),
+            "{\"version\":1}"
+        );
+        assert!(!root.join("b.md").exists());
+        assert!(!root.join("b.essaydown.json").exists());
+        assert!(root.join("assets").join("a").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("assets").join("b")).unwrap(),
+            "blocker"
+        );
+    }
+
+    // --- delete_to_trash ---
+
+    #[derive(Default)]
+    struct RecordingTrash {
+        calls: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl TrashBackend for RecordingTrash {
+        fn trash(&self, path: &Path) -> Result<(), WorkspaceError> {
+            self.calls.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn delete_to_trash_calls_the_fake_once_per_existing_item() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "x").unwrap();
+        std::fs::write(root.join("a.essaydown.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
+
+        let backend = RecordingTrash::default();
+        delete_to_trash_at(&root, "a.md", &backend).unwrap();
+
+        let calls = backend.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.contains(&root.join("a.md")));
+        assert!(calls.contains(&root.join("a.essaydown.json")));
+        assert!(calls.contains(&root.join("assets").join("a")));
+    }
+
+    #[test]
+    fn delete_to_trash_skips_a_missing_sidecar_and_assets_dir() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "x").unwrap();
+
+        let backend = RecordingTrash::default();
+        delete_to_trash_at(&root, "a.md", &backend).unwrap();
+
+        let calls = backend.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], root.join("a.md"));
     }
 }

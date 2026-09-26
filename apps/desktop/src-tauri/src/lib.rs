@@ -30,6 +30,10 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::write_doc,
             commands::read_sidecar,
             commands::write_sidecar,
+            commands::new_file,
+            commands::rename_file,
+            commands::delete_to_trash,
+            commands::reveal_in_folder,
         ])
 }
 
