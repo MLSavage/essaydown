@@ -14,6 +14,8 @@ import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
 import { createDocumentSync, type DocumentSync } from "./document-sync";
+import { createImageNodeView } from "./image-view";
+import { imagePastePlugin } from "./image-paste";
 import { sidecarPathFor } from "./paths";
 
 /** What `loadDocument` read for one path: the file's bytes and its sidecar. */
@@ -54,6 +56,9 @@ export interface DocumentPaneHandle {
 }
 
 interface Props {
+  /** The canonical absolute folder `open_folder` returned, for resolving an image's relative `src`
+   * against the document's directory (PRD §6.4). */
+  readonly root: string;
   /** Workspace-relative; changes in place on a rename, without a remount. */
   readonly path: string;
   readonly initial: LoadedDocument;
@@ -87,7 +92,7 @@ function describe(error: unknown): string {
  * `current-content` (hidden) holds the text the pane believes is on disk — what it last read or
  * wrote — so the shell e2e can compare it with the file byte for byte (DECISIONS #022).
  */
-export default function DocumentPane({ path, initial, onUndoOpen, onError, ref }: Props) {
+export default function DocumentPane({ root, path, initial, onUndoOpen, onError, ref }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const [store, setStore] = useState(() => storeFor(initial.text, initial.sidecar));
   // What the sync's I/O reads at call time: a rename moves `path` without a remount, and a reload
@@ -169,8 +174,14 @@ export default function DocumentPane({ path, initial, onUndoOpen, onError, ref }
   useEffect(() => {
     const element = host.current;
     if (element === null) return;
+    const saveImage = async (bytes: Uint8Array, extension: string): Promise<string> =>
+      invoke<string>("save_image", { docPath: pathRef.current, bytes: Array.from(bytes), extension });
     const view = new EditorView(element, {
-      state: EditorState.create({ schema, plugins: [...storePlugins(store), ...editorPlugins()] }),
+      state: EditorState.create({
+        schema,
+        plugins: [...storePlugins(store), ...editorPlugins(), imagePastePlugin(saveImage)],
+      }),
+      nodeViews: { image: createImageNodeView(root, () => pathRef.current) },
     });
     // The same two-line wiring as /dev/editor: the binding needs the view, and the view's
     // `dispatchTransaction` needs the binding.
@@ -180,7 +191,7 @@ export default function DocumentPane({ path, initial, onUndoOpen, onError, ref }
       binding.destroy();
       view.destroy();
     };
-  }, [store]);
+  }, [store, root]);
 
   return (
     <div className="document-pane" data-testid="document" data-reloads={reloads}>

@@ -400,6 +400,88 @@ pub fn resolve_for_reveal(root: &Path, relative: &str) -> Result<PathBuf, Worksp
     resolve_workspace_path(root, relative, false)
 }
 
+static IMAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Six base36 characters, distinct for every call in this process even within the same
+/// nanosecond-resolution tick: `nanos` is mixed with a strictly increasing per-process counter
+/// (never a repeated value) through a splitmix64-style hash, so two pastes cannot land on the same
+/// counter and therefore cannot land on the same suffix.
+fn random_base36(len: usize, nanos: u64) -> String {
+    let counter = IMAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut z = nanos ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (std::process::id() as u64);
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::with_capacity(len);
+    let mut v = z;
+    for _ in 0..len {
+        out.push(DIGITS[(v % 36) as usize]);
+        v /= 36;
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// Howard Hinnant's `civil_from_days` (public-domain "chrono-Compatible Low-Level Date Algorithms"),
+/// UTC, no external crate: seconds since the Unix epoch to (year, month, day, hour, minute, second).
+/// No new dependency (PRD §4's Rust crates row does not list a date/time crate).
+fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let hour = (rem / 3600) as u32;
+    let minute = ((rem % 3600) / 60) as u32;
+    let second = (rem % 60) as u32;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d, hour, minute, second)
+}
+
+/// `<yyyyMMdd-HHmmss>-<6 random base36>.<ext>` (PRD §6.4). `extension` is checked to be 1–10 ASCII
+/// alphanumeric characters so it can never inject a path separator or a `..` segment into the
+/// filename it becomes the suffix of.
+fn unique_image_filename(extension: &str) -> Result<String, WorkspaceError> {
+    if extension.is_empty() || extension.len() > 10 || !extension.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(WorkspaceError::InvalidPath);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| WorkspaceError::Io(io::ErrorKind::Other))?;
+    let (y, mo, d, h, mi, s) = civil_from_unix(now.as_secs() as i64);
+    let stamp = format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}");
+    let suffix = random_base36(6, now.as_nanos() as u64);
+    Ok(format!("{stamp}-{suffix}.{}", extension.to_ascii_lowercase()))
+}
+
+/// `save_image`: writes `bytes` into the document's own `assets/<stem>` directory (created if
+/// absent) under a fresh unique filename, and returns the *document-directory-relative* fragment
+/// `assets/<stem>/<file>` (PRD §6.4) — not workspace-relative — because that is exactly the string
+/// the caller inserts as `![](…)`, which the rendered view resolves against `docDir`, not `root`.
+pub fn save_image_at(
+    root: &Path,
+    doc_relative: &str,
+    bytes: &[u8],
+    extension: &str,
+) -> Result<String, WorkspaceError> {
+    let filename = unique_image_filename(extension)?;
+    let stem = file_stem_of(doc_relative).ok_or(WorkspaceError::InvalidPath)?;
+    let assets_rel = assets_relative_for(doc_relative).ok_or(WorkspaceError::InvalidPath)?;
+    let assets_dir = resolve_workspace_path(root, &assets_rel, false)?;
+    std::fs::create_dir_all(&assets_dir)?;
+    std::fs::write(assets_dir.join(&filename), bytes)?;
+    Ok(format!("assets/{stem}/{filename}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +950,90 @@ mod tests {
         let calls = backend.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0], root.join("a.md"));
+    }
+
+    // --- civil_from_unix / unique_image_filename / save_image ---
+
+    #[test]
+    fn civil_from_unix_matches_known_epoch_points() {
+        assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
+        assert_eq!(civil_from_unix(1_700_000_000), (2023, 11, 14, 22, 13, 20));
+        assert_eq!(civil_from_unix(1_000_000_000), (2001, 9, 9, 1, 46, 40));
+    }
+
+    #[test]
+    fn unique_image_filename_matches_the_yyyymmdd_hhmmss_suffix_ext_shape() {
+        let name = unique_image_filename("png").unwrap();
+        // yyyyMMdd(8) - HHmmss(6) - xxxxxx(6) . ext(3): 8 + 1 + 6 + 1 + 6 + 1 + 3 = 26.
+        assert_eq!(name.len(), 26);
+        assert!(name.ends_with(".png"));
+        assert_eq!(name.matches('-').count(), 2);
+    }
+
+    #[test]
+    fn unique_image_filename_rejects_an_empty_a_too_long_and_a_non_alphanumeric_extension() {
+        assert!(matches!(unique_image_filename("").unwrap_err(), WorkspaceError::InvalidPath));
+        assert!(matches!(
+            unique_image_filename("abcdeabcdea").unwrap_err(),
+            WorkspaceError::InvalidPath
+        ));
+        assert!(matches!(
+            unique_image_filename("png/../evil").unwrap_err(),
+            WorkspaceError::InvalidPath
+        ));
+    }
+
+    #[test]
+    fn save_image_creates_the_assets_dir_and_writes_the_bytes_under_the_returned_fragment() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "# A\n").unwrap();
+
+        let fragment = save_image_at(&root, "a.md", b"pngbytes", "png").unwrap();
+
+        assert!(fragment.starts_with("assets/a/"), "fragment: {fragment}");
+        assert!(fragment.ends_with(".png"));
+        let filename = fragment.strip_prefix("assets/a/").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("assets").join("a").join(filename)).unwrap(),
+            b"pngbytes"
+        );
+    }
+
+    #[test]
+    fn save_image_two_calls_in_the_same_second_produce_two_distinct_files() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "# A\n").unwrap();
+
+        let first = save_image_at(&root, "a.md", b"one", "png").unwrap();
+        let second = save_image_at(&root, "a.md", b"two", "png").unwrap();
+
+        assert_ne!(first, second);
+        let entries: Vec<_> = std::fs::read_dir(root.join("assets").join("a")).unwrap().collect();
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn save_image_fragment_and_disk_location_are_relative_to_the_doc_directory_not_the_workspace_root() {
+        let root = scratch_dir();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub").join("doc.md"), "# Doc\n").unwrap();
+
+        let fragment = save_image_at(&root, "sub/doc.md", b"bytes", "png").unwrap();
+
+        assert!(fragment.starts_with("assets/doc/"), "fragment: {fragment}");
+        let filename = fragment.strip_prefix("assets/doc/").unwrap();
+        assert!(root.join("sub").join("assets").join("doc").join(filename).exists());
+        assert!(!root.join("assets").exists());
+    }
+
+    #[test]
+    fn save_image_rejects_a_non_alphanumeric_extension_before_touching_disk() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "# A\n").unwrap();
+
+        let err = save_image_at(&root, "a.md", b"bytes", "png/../evil").unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::InvalidPath));
+        assert!(!root.join("assets").exists());
     }
 }

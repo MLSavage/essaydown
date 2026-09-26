@@ -251,7 +251,7 @@ function App() {
         )}
       </aside>
       <main className="workspace-main" data-testid="main">
-        {openPath === null || openDoc === null ? (
+        {openPath === null || openDoc === null || root === null ? (
           <p className="workspace-empty" data-testid="workspace-empty">
             No file open
           </p>
@@ -259,6 +259,7 @@ function App() {
           <DocumentPane
             key={openDoc.id}
             ref={pane}
+            root={root}
             path={openPath}
             initial={openDoc.loaded}
             onUndoOpen={undoOpen}

@@ -65,6 +65,9 @@ importers:
       '@tauri-apps/plugin-dialog':
         specifier: ^2
         version: 2.7.3
+      prosemirror-model:
+        specifier: ^1.25.11
+        version: 1.25.11
       prosemirror-state:
         specifier: ^1.4.4
         version: 1.4.4

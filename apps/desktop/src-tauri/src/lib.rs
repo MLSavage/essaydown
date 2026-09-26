@@ -38,6 +38,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::delete_to_trash,
             commands::reveal_in_folder,
             commands::watch_folder,
+            commands::save_image,
         ])
 }
 

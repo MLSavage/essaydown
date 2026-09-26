@@ -37,3 +37,30 @@ export function sidecarPathFor(relative: string): string {
 export function assetsPathFor(relative: string): string {
   return joinRelative(dirnameOf(relative), `assets/${stemOf(relative)}`);
 }
+
+/** Resolves a `/`-separated relative path's `.` and `..` segments against nothing but itself (no
+ * filesystem access): `a/../b` and `./b` both become `b`, and a leading `..` past the top is
+ * dropped rather than going negative — the rendered view relies on Tauri's own asset-protocol
+ * scope, not this function, to keep an image's resolved path inside the workspace (PRD §6.4). */
+function normalizeRelative(path: string): string {
+  const out: string[] = [];
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") out.pop();
+    else out.push(segment);
+  }
+  return out.join("/");
+}
+
+/** The OS-native absolute path to an image node's `src`, resolved against the document's own
+ * directory (PRD §6.4: `absolutePath = resolve(docDir, relativeSrc)`), ready for
+ * `convertFileSrc`. `root` is the canonical absolute workspace root `open_folder` returned; its own
+ * spelling (`/` or `\`) decides which separator this join uses, since `docPath`/`relativeSrc` are
+ * always the `/`-separated workspace-relative form (`TreeEntry.path`'s own shape) regardless of OS. */
+export function imageAbsolutePathFor(root: string, docPath: string, relativeSrc: string): string {
+  const combined = joinRelative(dirnameOf(docPath), relativeSrc);
+  const normalized = normalizeRelative(combined);
+  const sep = root.includes("\\") ? "\\" : "/";
+  const trimmedRoot = root.endsWith(sep) ? root.slice(0, -sep.length) : root;
+  return `${trimmedRoot}${sep}${normalized.split("/").join(sep)}`;
+}

@@ -10,8 +10,8 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_fs::FsExt;
 
 use crate::workspace::{
-    self, delete_to_trash_at, read_doc_at, read_sidecar_at, write_doc_at, write_sidecar_at,
-    SystemTrash, TreeEntry, WorkspaceError,
+    self, delete_to_trash_at, read_doc_at, read_sidecar_at, save_image_at, write_doc_at,
+    write_sidecar_at, SystemTrash, TreeEntry, WorkspaceError,
 };
 use crate::watch::{watch_folder_at, FsChanged, FS_CHANGED};
 
@@ -124,6 +124,19 @@ pub fn delete_to_trash(
     path: String,
 ) -> Result<(), WorkspaceError> {
     delete_to_trash_at(&current_root(&state)?, &path, &SystemTrash)
+}
+
+/// `save_image` (PRD §6.4): writes a pasted/dropped image's bytes into the open document's own
+/// `assets/<stem>` directory and returns the document-directory-relative fragment the frontend
+/// inserts as `![](…)`.
+#[tauri::command]
+pub fn save_image(
+    state: tauri::State<WorkspaceState>,
+    doc_path: String,
+    bytes: Vec<u8>,
+    extension: String,
+) -> Result<String, WorkspaceError> {
+    save_image_at(&current_root(&state)?, &doc_path, &bytes, &extension)
 }
 
 #[tauri::command]

@@ -207,6 +207,17 @@ button:disabled {
   outline: none;
 }
 
+/* Task 2.6: a broken image's labelled placeholder ("Image not found: <relative path>"). */
+.image-placeholder {
+  display: inline-block;
+  padding: 2px 6px;
+  background-color: #ffe9e9;
+  border: 1px solid #e0806b;
+  border-radius: 4px;
+  color: #7a2a1a;
+  font-size: 0.9em;
+}
+
 .confirm-delete-overlay {
   position: fixed;
   inset: 0;
