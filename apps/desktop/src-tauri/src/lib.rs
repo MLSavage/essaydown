@@ -1,7 +1,8 @@
 mod commands;
+mod watch;
 mod workspace;
 
-use commands::WorkspaceState;
+use commands::{WatchState, WorkspaceState};
 
 /// Plugin registration and the IPC surface, shared by `run()` (a real runtime) and the `commands`
 /// integration test (`tauri::test`'s `MockRuntime`), so the test exercises the exact wiring `run()`
@@ -24,6 +25,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(WorkspaceState::default())
+        .manage(WatchState::default())
         .invoke_handler(tauri::generate_handler![
             commands::open_folder,
             commands::list_tree,
@@ -35,6 +37,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::rename_file,
             commands::delete_to_trash,
             commands::reveal_in_folder,
+            commands::watch_folder,
         ])
 }
 

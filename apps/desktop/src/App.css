@@ -181,6 +181,32 @@ button:disabled {
   font-family: inherit;
 }
 
+/* Task 2.5: the one-line document banners (§6.1 non-canonical, 'Changed on disk'). */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 6px 10px;
+  background-color: #fff6d6;
+  border: 1px solid #e0c96b;
+  border-radius: 4px;
+}
+
+.banner span {
+  flex: 1;
+}
+
+.banner-conflict {
+  background-color: #ffe9d6;
+  border-color: #e09a6b;
+}
+
+.document-editor .ProseMirror {
+  min-height: 60vh;
+  outline: none;
+}
+
 .confirm-delete-overlay {
   position: fixed;
   inset: 0;

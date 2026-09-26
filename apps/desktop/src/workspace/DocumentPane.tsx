@@ -1,0 +1,232 @@
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { attach, emptySidecar, format, parse, parseSidecar, refresh, type Sidecar } from "@essaydown/core";
+import {
+  bindProseMirror,
+  createDocumentStore,
+  editorPlugins,
+  schema,
+  storePlugins,
+  type DocumentStore,
+} from "@essaydown/editor";
+import { EditorState } from "prosemirror-state";
+import { EditorView } from "prosemirror-view";
+import "prosemirror-view/style/prosemirror.css";
+import { createDocumentSync, type DocumentSync } from "./document-sync";
+import { sidecarPathFor } from "./paths";
+
+/** What `loadDocument` read for one path: the file's bytes and its sidecar. */
+export interface LoadedDocument {
+  readonly text: string;
+  readonly sidecar: Sidecar;
+  /**
+   * False when a sidecar file exists but does not validate: saving would replace it with the
+   * empty one this document was opened with, so the pane never writes it (§6.2: the sidecar is
+   * optional, and a missing one loses questions — an unreadable one is not ours to discard).
+   */
+  readonly sidecarWritable: boolean;
+}
+
+/** `read_doc` + `read_sidecar` for a workspace-relative document path. */
+export async function loadDocument(path: string): Promise<LoadedDocument> {
+  const text = await invoke<string>("read_doc", { path });
+  const raw = await invoke<string | null>("read_sidecar", { path: sidecarPathFor(path) });
+  if (raw === null) return { text, sidecar: emptySidecar(), sidecarWritable: true };
+  try {
+    return { text, sidecar: parseSidecar(JSON.parse(raw)), sidecarWritable: true };
+  } catch {
+    return { text, sidecar: emptySidecar(), sidecarWritable: false };
+  }
+}
+
+/** The one-line §6.1 banner text. */
+export const NON_CANONICAL_MESSAGE = "This file will be saved in Essay Down's Markdown style";
+
+function storeFor(text: string, sidecar: Sidecar): DocumentStore {
+  const root = parse(text);
+  return createDocumentStore(root, attach(sidecar, root).sidecar);
+}
+
+export interface DocumentPaneHandle {
+  /** Save a pending edit now (before a rename, a switch or a delete moves the file). */
+  flush(): Promise<void>;
+}
+
+interface Props {
+  /** Workspace-relative; changes in place on a rename, without a remount. */
+  readonly path: string;
+  readonly initial: LoadedDocument;
+  /** §6.1's Undo-open: the user declined the first open of a non-canonical file. */
+  readonly onUndoOpen: () => void;
+  readonly onError: (message: string) => void;
+  readonly ref?: Ref<DocumentPaneHandle>;
+}
+
+function describe(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/**
+ * The open document (task 2.5): the rendered editor over a document store, autosaved through
+ * `document-sync.ts`, reloaded on `fs:changed` for its own path, with the 'Changed on disk' banner
+ * (Reload / Keep mine) when the file changes under an edit and §6.1's non-canonical banner on
+ * open.
+ *
+ * **Readers of the store.** The save's `serialize` is the one reader here that is not an editing
+ * surface. The pane mounts the rendered view only, which commits every transaction as it is
+ * dispatched (`bindProseMirror`), so there is no pending source burst to settle before it reads
+ * (CLAUDE.md's rule binds a reader beside the source view, which this page does not mount).
+ *
+ * **A reload is a new store**, not a commit onto the old one: the external text is not an edit
+ * the user made, so it is not an undo step, and an Undo that took it back would autosave the old
+ * text over the file that was just changed on disk.
+ *
+ * `current-content` (hidden) holds the text the pane believes is on disk — what it last read or
+ * wrote — so the shell e2e can compare it with the file byte for byte (DECISIONS #022).
+ */
+export default function DocumentPane({ path, initial, onUndoOpen, onError, ref }: Props) {
+  const host = useRef<HTMLDivElement>(null);
+  const [store, setStore] = useState(() => storeFor(initial.text, initial.sidecar));
+  // What the sync's I/O reads at call time: a rename moves `path` without a remount, and a reload
+  // replaces `store`.
+  const pathRef = useRef(path);
+  const errorRef = useRef(onError);
+  const storeRef = useRef(store);
+  useLayoutEffect(() => {
+    pathRef.current = path;
+    errorRef.current = onError;
+    storeRef.current = store;
+  });
+  const [known, setKnown] = useState(initial.text);
+  const [conflict, setConflict] = useState(false);
+  const [reloads, setReloads] = useState(0);
+  const [nonCanonical, setNonCanonical] = useState(() => format(parse(initial.text)) !== initial.text);
+  const syncRef = useRef<DocumentSync | null>(null);
+
+  useEffect(() => {
+    const sidecarWritable = initial.sidecarWritable;
+    const sync = createDocumentSync(
+      initial.text,
+      {
+        read: () => invoke<string>("read_doc", { path: pathRef.current }),
+        write: async (text) => {
+          const at = pathRef.current;
+          await invoke("write_doc", { path: at, contents: text });
+          if (!sidecarWritable) return;
+          const { root, sidecar } = storeRef.current.getState().document;
+          await invoke("write_sidecar", {
+            path: sidecarPathFor(at),
+            contents: `${JSON.stringify(refresh(sidecar, root), null, 2)}\n`,
+          });
+        },
+      },
+      {
+        serialize: () => format(storeRef.current.getState().document.root),
+        reloaded: (text) => {
+          const { sidecar } = storeRef.current.getState().document;
+          setStore(storeFor(text, sidecar));
+          setConflict(false);
+          setReloads((n) => n + 1);
+        },
+        conflicted: () => setConflict(true),
+        knownChanged: (text) => {
+          setKnown(text);
+          // Written in canonical form: the §6.1 banner has said what it had to say.
+          if (format(parse(text)) === text) setNonCanonical(false);
+        },
+        failed: (error) => errorRef.current(describe(error)),
+      },
+      {
+        setTimeout: (callback, ms) => window.setTimeout(callback, ms),
+        clearTimeout: (handle) => window.clearTimeout(handle as number),
+        now: () => Date.now(),
+      },
+    );
+    syncRef.current = sync;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void listen<{ path: string }>("fs:changed", (event) => {
+      if (event.payload.path === pathRef.current) sync.changed();
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      sync.dispose();
+      syncRef.current = null;
+    };
+  }, [initial]);
+
+  useEffect(() => store.subscribe(() => syncRef.current?.edited()), [store]);
+
+  useImperativeHandle(ref, () => ({ flush: async () => syncRef.current?.flush() }), []);
+
+  useEffect(() => {
+    const element = host.current;
+    if (element === null) return;
+    const view = new EditorView(element, {
+      state: EditorState.create({ schema, plugins: [...storePlugins(store), ...editorPlugins()] }),
+    });
+    // The same two-line wiring as /dev/editor: the binding needs the view, and the view's
+    // `dispatchTransaction` needs the binding.
+    const binding = bindProseMirror(store, view);
+    view.setProps({ dispatchTransaction: (transaction) => binding.dispatch(transaction) });
+    return () => {
+      binding.destroy();
+      view.destroy();
+    };
+  }, [store]);
+
+  return (
+    <div className="document-pane" data-testid="document" data-reloads={reloads}>
+      <div className="workspace-current-file" data-testid="current-file">
+        {path}
+      </div>
+      {nonCanonical && (
+        <div className="banner" role="status" data-testid="non-canonical-banner">
+          <span>{NON_CANONICAL_MESSAGE}</span>
+          <button type="button" data-testid="undo-open" onClick={onUndoOpen}>
+            Undo open
+          </button>
+          <button type="button" data-testid="dismiss-non-canonical" onClick={() => setNonCanonical(false)}>
+            OK
+          </button>
+        </div>
+      )}
+      {conflict && (
+        <div className="banner banner-conflict" role="alert" data-testid="conflict-banner">
+          <span>Changed on disk</span>
+          <button
+            type="button"
+            data-testid="conflict-reload"
+            onClick={() => {
+              void syncRef.current?.reload();
+            }}
+          >
+            Reload
+          </button>
+          <button
+            type="button"
+            data-testid="conflict-keep-mine"
+            onClick={() => {
+              void syncRef.current?.keepMine().then(() => {
+                if (syncRef.current?.conflict === false) setConflict(false);
+              });
+            }}
+          >
+            Keep mine
+          </button>
+        </div>
+      )}
+      <div className="document-editor" data-testid="editor" ref={host} />
+      <pre className="workspace-content" data-testid="current-content" hidden>
+        {known}
+      </pre>
+    </div>
+  );
+}

@@ -57,6 +57,7 @@
     "zustand": "PRD §4 State & undo row"
   },
   "cargo": {
+    "notify": "PRD §4 Rust crates row",
     "serde": "PRD §4 Rust crates row",
     "serde_json": "PRD §4 Rust crates row",
     "tauri": "PRD §4 Rust crates row",

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import ConfirmDelete from "./workspace/ConfirmDelete";
 import ContextMenu, { type ContextMenuTarget } from "./workspace/ContextMenu";
+import DocumentPane, { loadDocument, type DocumentPaneHandle, type LoadedDocument } from "./workspace/DocumentPane";
 import FileTree from "./workspace/FileTree";
 import { basenameOf, dirnameOf, joinRelative } from "./workspace/paths";
 import { readLastWorkspace, writeLastWorkspace } from "./workspace/storage";
@@ -19,9 +20,9 @@ function describeError(error: unknown): string {
  * The real `/` page (task 2.4; DECISIONS #review-1-r0 F11 names this as the first Phase 2 task to
  * replace the Vite scaffold). A left file tree sidebar over the IPC surface tasks 2.2/2.3 built
  * (`open_folder`, `list_tree`, `read_doc`, `new_file`, `rename_file`, `delete_to_trash`,
- * `reveal_in_folder`), and a minimal main pane that shows the currently open document's raw text —
- * wiring the real rendered/source editor onto this page is later Phase 2 work (autosave, 2.5),
- * not this task's scope.
+ * `reveal_in_folder`), and a main pane holding the open document. Since task 2.5 that pane is the
+ * rendered editor with autosave and external-change handling (`./workspace/DocumentPane.tsx`), and
+ * every folder the app opens is watched (`watch_folder`, `fs:changed`).
  *
  * "Last folder and file restored on launch" (the description's own words) is `localStorage`
  * (`./workspace/storage.ts`): the IPC surface has no persistence command for it and does not need
@@ -31,7 +32,16 @@ function App() {
   const [root, setRoot] = useState<string | null>(null);
   const [entries, setEntries] = useState<readonly TreeEntry[]>([]);
   const [openPath, setOpenPath] = useState<string | null>(null);
-  const [openContent, setOpenContent] = useState("");
+  // One value per open, numbered so the pane remounts on every open and never on a rename, which
+  // changes `openPath` alone.
+  const [openDoc, setOpenDoc] = useState<{ id: number; loaded: LoadedDocument } | null>(null);
+  const opens = useRef(0);
+  const showDocument = useCallback((path: string, loaded: LoadedDocument): void => {
+    opens.current += 1;
+    setOpenPath(path);
+    setOpenDoc({ id: opens.current, loaded });
+  }, []);
+  const pane = useRef<DocumentPaneHandle>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [tooltipPath, setTooltipPath] = useState<string | null>(null);
@@ -46,6 +56,7 @@ function App() {
     try {
       const canonical = await invoke<string>("open_folder", { path });
       setRoot(canonical);
+      await invoke("watch_folder", { path: "" });
       const tree = await invoke<TreeEntry[]>("list_tree");
       setEntries(tree);
       setError(null);
@@ -59,16 +70,15 @@ function App() {
   const openFile = useCallback(
     async (path: string): Promise<void> => {
       try {
-        const contents = await invoke<string>("read_doc", { path });
-        setOpenPath(path);
-        setOpenContent(contents);
+        await pane.current?.flush();
+        showDocument(path, await loadDocument(path));
         setError(null);
         if (root !== null) writeLastWorkspace({ folder: root, file: path });
       } catch (readError) {
         setError(describeError(readError));
       }
     },
-    [root],
+    [root, showDocument],
   );
 
   // Restore the last folder and file on launch (task 2.4's description). A StrictMode double
@@ -83,15 +93,15 @@ function App() {
         const canonical = await invoke<string>("open_folder", { path: last.folder });
         if (cancelled) return;
         setRoot(canonical);
+        await invoke("watch_folder", { path: "" });
         const tree = await invoke<TreeEntry[]>("list_tree");
         if (cancelled) return;
         setEntries(tree);
         const openable = last.file !== null && tree.some((e) => e.path === last.file && !e.cloudOnly);
         if (openable && last.file !== null) {
-          const contents = await invoke<string>("read_doc", { path: last.file });
+          const loaded = await loadDocument(last.file);
           if (cancelled) return;
-          setOpenPath(last.file);
-          setOpenContent(contents);
+          showDocument(last.file, loaded);
         }
       } catch (restoreError) {
         if (!cancelled) setError(describeError(restoreError));
@@ -100,7 +110,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [showDocument]);
 
   const refreshTree = useCallback(async (): Promise<TreeEntry[]> => {
     const tree = await invoke<TreeEntry[]>("list_tree");
@@ -111,11 +121,12 @@ function App() {
   const openFolderDialog = useCallback(async (): Promise<void> => {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected !== "string") return; // the user cancelled the native dialog
+    await pane.current?.flush();
     const canonical = await setWorkspace(selected);
     if (canonical === null) return;
     writeLastWorkspace({ folder: canonical, file: null });
     setOpenPath(null);
-    setOpenContent("");
+    setOpenDoc(null);
   }, [setWorkspace]);
 
   const createNewFile = useCallback(async (): Promise<void> => {
@@ -135,6 +146,8 @@ function App() {
       if (trimmed === "" || trimmed === basenameOf(oldPath)) return;
       const newPath = joinRelative(dirnameOf(oldPath), trimmed);
       try {
+        // A save still pending under the old name would recreate that file after the rename.
+        if (openPath === oldPath) await pane.current?.flush();
         await invoke("rename_file", { oldPath, newPath });
         await refreshTree();
         setError(null);
@@ -159,7 +172,7 @@ function App() {
         setError(null);
         if (openPath === path) {
           setOpenPath(null);
-          setOpenContent("");
+          setOpenDoc(null);
           if (root !== null) writeLastWorkspace({ folder: root, file: null });
         }
       } catch (deleteError) {
@@ -168,6 +181,14 @@ function App() {
     },
     [openPath, refreshTree, root],
   );
+
+  // §6.1's Undo-open: close the non-canonical file without saving it, and forget it as the file to
+  // restore on launch, so declining the rewrite never leads to one.
+  const undoOpen = useCallback((): void => {
+    setOpenPath(null);
+    setOpenDoc(null);
+    if (root !== null) writeLastWorkspace({ folder: root, file: null });
+  }, [root]);
 
   const revealInFolder = useCallback(async (path: string): Promise<void> => {
     try {
@@ -230,19 +251,19 @@ function App() {
         )}
       </aside>
       <main className="workspace-main" data-testid="main">
-        {openPath === null ? (
+        {openPath === null || openDoc === null ? (
           <p className="workspace-empty" data-testid="workspace-empty">
             No file open
           </p>
         ) : (
-          <>
-            <div className="workspace-current-file" data-testid="current-file">
-              {openPath}
-            </div>
-            <pre className="workspace-content" data-testid="current-content">
-              {openContent}
-            </pre>
-          </>
+          <DocumentPane
+            key={openDoc.id}
+            ref={pane}
+            path={openPath}
+            initial={openDoc.loaded}
+            onUndoOpen={undoOpen}
+            onError={setError}
+          />
         )}
       </main>
       {contextMenu !== null && (

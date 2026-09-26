@@ -1,22 +1,27 @@
 //! The IPC surface (PRD §6.4) built across 2.2 and 2.3: `open_folder`, `list_tree`, `read_doc`,
 //! `write_doc`, `read_sidecar`, `write_sidecar`, `new_file`, `rename_file`, `delete_to_trash`,
-//! `reveal_in_folder`. Each is a thin adapter over `workspace`'s pure path-resolution and file-I/O
+//! `reveal_in_folder`, and 2.5's `watch_folder`. Each is a thin adapter over `workspace`'s pure path-resolution and file-I/O
 //! functions, which carry all the logic cargo tests exercise directly.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_fs::FsExt;
 
 use crate::workspace::{
     self, delete_to_trash_at, read_doc_at, read_sidecar_at, write_doc_at, write_sidecar_at,
     SystemTrash, TreeEntry, WorkspaceError,
 };
+use crate::watch::{watch_folder_at, FsChanged, FS_CHANGED};
 
 /// The single `WorkspaceRoot` (PRD §6.4): `None` until `open_folder` succeeds.
 #[derive(Default)]
 pub struct WorkspaceState(pub Mutex<Option<PathBuf>>);
+
+/// The one live folder watcher (`watch_folder`); a new call replaces, and so stops, the previous one.
+#[derive(Default)]
+pub struct WatchState(pub Mutex<Option<notify::RecommendedWatcher>>);
 
 fn current_root(state: &tauri::State<WorkspaceState>) -> Result<PathBuf, WorkspaceError> {
     state.0.lock().unwrap().clone().ok_or(WorkspaceError::NoWorkspace)
@@ -79,6 +84,24 @@ pub fn write_sidecar(
     contents: String,
 ) -> Result<(), WorkspaceError> {
     write_sidecar_at(&current_root(&state)?, &path, &contents)
+}
+
+/// `watch_folder` (PRD §6.4): emits `fs:changed` with `{ path }` for every document under
+/// `path` (workspace-relative; the empty path is the root) whose bytes change, until the next call.
+#[tauri::command]
+pub fn watch_folder<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<WorkspaceState>,
+    watch: tauri::State<WatchState>,
+    path: String,
+) -> Result<(), WorkspaceError> {
+    let emitter = app.clone();
+    let watcher = watch_folder_at(&current_root(&state)?, &path, move |changed| {
+        // An emit fails only when the app is shutting down; there is no one left to tell.
+        let _ = emitter.emit(FS_CHANGED, FsChanged { path: changed });
+    })?;
+    *watch.0.lock().unwrap() = Some(watcher);
+    Ok(())
 }
 
 #[tauri::command]
@@ -257,5 +280,8 @@ mod tests {
         )
         .expect("write_doc must be allowed by the app's capabilities");
         assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), "new");
+
+        tauri::test::get_ipc_response(&webview, invoke_request("watch_folder", serde_json::json!({ "path": "" })))
+            .expect("watch_folder must be allowed by the app's capabilities");
     }
 }
