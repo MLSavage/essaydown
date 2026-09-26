@@ -3412,12 +3412,68 @@
   ]
  },
  {
+  "id": "2.1.g1",
+  "model": "sonnet",
+  "description": "Shell e2e harness, repair 1 of 2.1 after the 2.1h GATE-FAILED (RUNNER-SPEC §2 rewrite rule (a); ci.yml run 36214688284 at d23a9bc, ref ci/2.1/a1; ubuntu and macOS green, windows-latest red: four `POST /session` each fail after exactly 60 s with `session not created: DevToolsActivePort file doesn't exist`; the log is /logs/ci/2.1h/a1/e2e-shell/e2e-shell-windows-latest/e2e-shell.log; route chosen by Michael 2026-09-26, PRD §4 amended in this task's planning commit). Principal reading, to be confirmed from that log before anything changes: msedgedriver 153.0.4234.48 matched WebView2 153.0.4234.48, tauri-driver came up on 4444/4445, the app was launched and was still alive when each 60 s wait expired (the driver's `is no longer running` wrapper is absent), and the runner image is windows-2025-vs2026 20260922.246.2 (/logs/ci/2.1h/a1/workflow.log, the job's `Set up job` group). This matches actions/runner-images #14738: on that image's WebView2 ≥ 152 the browser process no longer takes `--remote-debugging-port` from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` when the app sets `AdditionalBrowserArguments` through the API, which wry always does, so the tauri-driver → msedgedriver route cannot create a session on windows-latest. Not the relative `appBinaryPath` (a path that does not resolve fails at once, not after 60 s; macOS spawns the same relative shape and passes) and not tauri-plugin-wdio-webdriver's presence (ubuntu loads it too and passes). Fix, config only: e2e/shell/wdio.conf.ts selects the provider from a pure function in e2e/shell/provider.ts (new, no imports) — `linux` → `external` (tauri-driver + WebKitWebDriver under xvfb, unchanged, CLAUDE.md), `win32` and `darwin` → `embedded` (tauri-plugin-wdio-webdriver, registered under `#[cfg(debug_assertions)]` in apps/desktop/src-tauri/src/lib.rs; the service spawns the binary with `TAURI_WEBDRIVER_PORT`, no msedgedriver, no WebView2 remote debugging) — and honours exactly one override, `ESSAYDOWN_E2E_DRIVER=embedded|external`, so the container can run the embedded leg; `autoDownloadEdgeDriver` stays `true` (the service's Edge check runs on win32 whatever the provider and fails on a missing driver when auto-download is off); `captureBackendLogs: true` so the app's stderr reaches e2e-shell.log. .github/workflows/ci.yml: the `Install tauri-driver` step becomes `if: runner.os == 'Linux'`; the comments that say Windows uses msedgedriver are corrected; one new step `if: failure() && runner.os == 'Windows'`, `shell: bash`, before `Upload logs`, appends `tasklist` filtered to desktop.exe and msedgewebview2.exe and `netstat -ano | findstr :4445` to e2e-shell.log, so a second failure says whether the app lived and whether the plugin's server bound; no other step changes, `push` to `ci/**` only, versions from docker/versions.env. The lib.rs and Cargo.toml comments that say ubuntu and windows never load the plugin are corrected (comment lines only; the `#[cfg(debug_assertions)]` and the dependency line stay). No Rust or app source change, no manifest or lockfile change, zero new dependencies (PRD §4). Scope: e2e/shell/wdio.conf.ts, e2e/shell/provider.ts, tests/e2e-shell-provider.test.ts (new), .github/workflows/ci.yml, the two comment edits, docs/lessons.md, docs/progress/journal-main.md. These are files of passed task 2.1, not its record (DECISIONS #016); this task authorises the repair.",
+  "acceptance": "Reproduction first, recorded in the journal: the Windows log above read and two facts quoted from the logs (the 60 s between each `POST /session` and its failure, and the `Embedded provider mode` line present in /logs/ci/2.1h/a1/e2e-shell/e2e-shell-macos-latest/e2e-shell.log and absent from the Windows one). tests/e2e-shell-provider.test.ts asserts the function with presence and absence cases: `linux` → `external`, `win32` → `embedded`, `darwin` → `embedded`, the override wins on every platform for both values, and an override value outside `embedded|external` throws; wdio.conf.ts takes its provider from that function only (`grep -cE \"[\\\"'](embedded|external)[\\\"']\" e2e/shell/wdio.conf.ts` is 0). In this container, from the repo root after `pnpm --filter @essaydown/desktop build` and `cargo build -p desktop --features custom-protocol`: `xvfb-run -a pnpm --filter @essaydown/e2e-shell test` is green on the Linux route (the smoke spec passes; the log names tauri-driver), recorded in the journal. `ESSAYDOWN_E2E_DRIVER=embedded xvfb-run -a pnpm --filter @essaydown/e2e-shell test` is run once and its outcome recorded in the journal (the `Embedded provider mode` line and the spec result, or the first error line if red); it exercises the plugin's Linux executor, not WebView2, so a red result is recorded, not repaired, and does not block the task. The workflow parses: `node -e` with the `yaml` package already under node_modules/.pnpm (state the exact command in the journal, 1.12's shape) prints the `e2e-shell` job's step names; the tauri-driver step's `if` is `runner.os == 'Linux'`; the diagnostic step's `if` is `failure() && runner.os == 'Windows'` and it precedes `Upload logs`; actionlint passes. `git diff --stat` against the branch base touches only the files the description lists; the apps/desktop/src-tauri diff adds or removes no line that is not a comment; `git diff --stat -- pnpm-lock.yaml Cargo.lock e2e/shell/package.json` is empty. `pnpm lint && pnpm test && cargo test` green (`scripts/check`). Honest statement: this container is Linux; the only Windows proof is the `2.1.g1h` gate, which this task cannot observe and must not claim; if that gate fails, the Windows e2e-shell.log carries the app's stderr and the process/port diagnostic, and the next repair's first candidates are `runs-on: windows-2022` (read the image line in the job's `Set up job` group first) and the attach flow (the app opens the port via `additionalBrowserArgs`, msedgedriver with `debuggerAddress`).",
+  "dependencies": [
+   "2.1h"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.1.g1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "The smoke spec passes on the ubuntu runner via tauri-driver and on the windows runner via the embedded provider (the e2e-shell artifact's windows log shows `Embedded provider mode` and the spec passing); the macOS result is recorded in the job summary; logs in /logs/ci/2.1.g1h/accepted/ (the gate id, DECISIONS #018).",
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.1.g1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "2.1.g1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.1.g1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "description": "CI gate for 2.1.g1: scripts/gate.sh 2.1.g1h pushes integrated_sha of 2.1.g1 to ci/2.1.g1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\"] into /logs/ci/2.1.g1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "The smoke spec passes on the ubuntu runner via tauri-driver and on the windows runner via the embedded provider (the e2e-shell artifact's windows log shows `Embedded provider mode` and the spec passing); the macOS result is recorded in the job summary; logs in /logs/ci/2.1.g1h/accepted/ (the gate id, DECISIONS #018).",
+  "dependencies": [
+   "2.1.g1"
+  ]
+ },
+ {
   "id": "2.2",
   "model": "sonnet",
   "description": "Rust commands open_folder, list_tree (recursive, `.md` only, ignores dotfiles, node_modules, and `.icloud` placeholders which are listed as `{cloudOnly:true}`), read_doc, write_doc (temp + atomic rename, preserves mode), read_sidecar, write_sidecar. Capability file grants fs and asset-protocol scope only to the chosen folder, persisted with tauri-plugin-persisted-scope; CSP per §6.4; `WorkspaceRoot` authority per §6.4 enforced by every path-taking command.",
   "acceptance": "cargo test: write_doc to a permission-denied dir returns io::ErrorKind::PermissionDenied (Windows variant uses an ACL-denied temp dir under #[cfg(windows)]); no temp file remains after success or failure; list_tree on fixtures/markdown returns exactly the number of `.md` files counted by the test itself, sorted by name; a `x.md.icloud` file is reported cloudOnly; the §6.4 path suite: relative-inside → Ok; `..` escape, symlink-out, parent-symlink, Windows junction, case-folded escape on case-insensitive filesystems, export output outside → PathOutsideWorkspace; any absolute path → InvalidPath; the empty path (the root itself) → Ok for list_tree and watch_folder and InvalidPath for every other command. Capability file contains no `**` scope. A test asserts the plugin registration order in main.rs has tauri-plugin-fs before tauri-plugin-persisted-scope.",
   "dependencies": [
-   "2.1h"
+   "2.1.g1h"
   ],
   "phase": "2",
   "execution": "loop",
