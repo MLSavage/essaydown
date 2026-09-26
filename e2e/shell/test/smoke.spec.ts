@@ -16,10 +16,14 @@ describe("the shell smoke spec", () => {
   });
 
   it("loads the React bundle, not a static shell", async () => {
-    await browser.waitUntil(async () => (await browser.$("#greet-input")).isExisting(), {
+    // The Vite scaffold's `#greet-input` is gone since task 2.4 gave `/` a real page (DECISIONS
+    // #review-1-r0 F11); `data-testid="open-folder"` (the file tree sidebar's toolbar button) is
+    // this route's own evidence that the real bundle, not a static shell, loaded.
+    const openFolder = await browser.$('[data-testid="open-folder"]');
+    await browser.waitUntil(async () => openFolder.isExisting(), {
       timeout: 15000,
-      timeoutMsg: "#greet-input never appeared",
+      timeoutMsg: '[data-testid="open-folder"] never appeared',
     });
-    assert.equal(await (await browser.$("#greet-input")).isExisting(), true);
+    assert.equal(await openFolder.isExisting(), true);
   });
 });

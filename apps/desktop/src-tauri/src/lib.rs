@@ -22,6 +22,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
     builder
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(WorkspaceState::default())
         .invoke_handler(tauri::generate_handler![
             commands::open_folder,

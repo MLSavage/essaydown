@@ -5,6 +5,7 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "wdio-webdriver:default"
+    "wdio-webdriver:default",
+    "dialog:default"
   ]
 }
