@@ -268,7 +268,7 @@ mod tests {
         tauri::WebviewWindow<tauri::test::MockRuntime>,
     ) {
         let app = crate::configure(tauri::test::mock_builder())
-            .build(tauri::generate_context!())
+            .build(crate::context())
             .expect("failed to build test app");
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()

@@ -529,6 +529,7 @@ mod tests {
         assert!(matches!(err, WorkspaceError::PathOutsideWorkspace));
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_out_is_path_outside_workspace() {
         let root = scratch_dir();
@@ -539,6 +540,7 @@ mod tests {
         assert!(matches!(err, WorkspaceError::PathOutsideWorkspace));
     }
 
+    #[cfg(unix)]
     #[test]
     fn parent_symlink_with_nonexistent_target_is_path_outside_workspace() {
         let root = scratch_dir();
@@ -583,6 +585,7 @@ mod tests {
         assert!(matches!(err, WorkspaceError::InvalidPath));
     }
 
+    #[cfg(unix)]
     #[test]
     fn export_style_output_path_outside_workspace_is_rejected() {
         // Export (Phase 4) is not implemented yet, but it will resolve its output path through
@@ -643,6 +646,7 @@ mod tests {
         assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_doc_preserves_existing_mode() {
         use std::os::unix::fs::PermissionsExt;

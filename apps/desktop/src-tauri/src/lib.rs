@@ -61,9 +61,17 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
         ])
 }
 
+/// The single place in this crate that invokes Tauri's context-generating macro, generic over the
+/// runtime so `run()` (the real `Wry` runtime) and `commands::tests::test_app()` (`tauri::test`'s
+/// `MockRuntime`) share it — two separate invocations each embed a `#[no_mangle]` `_EMBED_INFO_PLIST`
+/// static on macOS, which the linker then rejects as a duplicate symbol (task 2.11).
+pub(crate) fn context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     configure(tauri::Builder::default())
-        .run(tauri::generate_context!())
+        .run(context())
         .expect("error while running tauri application");
 }
