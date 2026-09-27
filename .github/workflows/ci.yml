@@ -301,6 +301,78 @@ jobs:
           path: e2e-shell.log
           if-no-files-found: ignore
 
+  # macos-debug-dmg (task 2.13, repair 3 of the 2.verifyh GATE-FAILED at a1, ci.yml run
+  # 36292723305 at 5c086c6, ref ci/2.verify/a1, evidence /logs/ci/2.verifyh/a1/) — gate.mjs
+  # requires a macos-debug-dmg artifact and no job produced one (run.json's artifacts_missing).
+  # Builds the actual debug Tauri app natively on macos-latest (Apple silicon, aarch64) and
+  # bundles it as a .dmg so the artifact exists. No continue-on-error: a failed build fails the
+  # gate, matching this job's acceptance.
+  macos-debug-dmg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load pinned tool versions (docker/versions.env)
+        shell: bash
+        run: grep -E '^[A-Z_]+=' docker/versions.env >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm ${{ env.PNPM_VERSION }}
+        shell: bash
+        run: npm install -g "pnpm@${PNPM_VERSION}"
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust toolchain ${{ env.RUST_TOOLCHAIN }}
+        shell: bash
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --no-self-update
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            apps/desktop/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Build the debug .dmg (tauri build --debug --bundles dmg)
+        shell: bash
+        run: pnpm --filter @essaydown/desktop exec tauri build --debug --bundles dmg
+
+      - name: Rename the .dmg to EssayDown-debug-${GITHUB_SHA}.dmg
+        shell: bash
+        run: cp target/debug/bundle/dmg/*.dmg "EssayDown-debug-${GITHUB_SHA}.dmg"
+
+      - name: Upload macos-debug-dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-debug-dmg
+          path: EssayDown-debug-${{ github.sha }}.dmg
+
   merge-logs:
     needs: [test, e2e-shell]
     if: always()
