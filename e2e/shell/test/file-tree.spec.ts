@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { reloadPage, setRenameField } from "./routes.js";
 
 // The file tree sidebar (task 2.4): open folder, new file, rename (F2 / context menu), delete to
 // trash, click to open, cloudOnly entries greyed with a tooltip, last folder and file restored on
@@ -64,7 +65,7 @@ function entrySelector(path: string): string {
 }
 
 async function reload(): Promise<void> {
-  await browser.execute(() => location.reload());
+  await reloadPage();
   // The reload is a same-origin navigation of the embedded asset-protocol page, not a new Tauri
   // process; the window's own React root remounts, so waiting for the toolbar (present before any
   // IPC call resolves) proves the page actually came back before the next step polls for the tree.
@@ -73,7 +74,7 @@ async function reload(): Promise<void> {
 
 // The acceptance's "relaunch" is a new Tauri process, not a same-process navigation:
 // `reloadSession()` ends the app process on `DELETE /session` and starts a fresh one on
-// `POST /session`, while `location.reload()` only proves the frontend path (docs/lessons.md
+// `POST /session`, while a page reload only proves the frontend path (docs/lessons.md
 // [2.4]'s attempt-3 lesson). The webview's on-disk storage (the persisted-restore key included)
 // survives the process restart the same way a real relaunch's would.
 async function relaunch(): Promise<void> {
@@ -81,7 +82,7 @@ async function relaunch(): Promise<void> {
     await browser.reloadSession();
   } catch (error) {
     console.warn(
-      `reloadSession() failed (${(error as Error).message}); falling back to location.reload() — ` +
+      `reloadSession() failed (${(error as Error).message}); falling back to a page reload — ` +
         "this only re-proves the frontend path, not a real process restart",
     );
     await reload();
@@ -132,7 +133,7 @@ describe("the file tree sidebar", () => {
     await browser.keys(["F2"]);
 
     await waitForSelector('[data-testid="rename-input"]', "rename-input never appeared");
-    await browser.keys("b.md");
+    await setRenameField("b.md");
     await browser.keys(["Enter"]);
 
     await waitForSelector(entrySelector("b.md"), "tree-entry:b.md never appeared");

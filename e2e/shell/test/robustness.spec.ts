@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { caretToEndOf, clickCentreOf, reloadPage, setRenameField, typeText } from "./routes.js";
 
 // Scripted robustness session (task 2.8): a folder holding `.icloud` placeholders and a Syncthing
 // `.stfolder`, exercised through open/edit/rename/external-change/image-paste in a loop, webview
@@ -63,35 +64,12 @@ async function openThroughRestore(folder: string, file: string): Promise<void> {
     STORAGE_KEY,
     JSON.stringify({ folder, file }),
   );
-  await browser.execute(() => location.reload());
+  await reloadPage();
   await waitFor(
     async () => (await textContentOf('[data-testid="current-file"]')) === file && (await exists(EDITOR)),
     15000,
     `${file} never opened in the editor`,
   );
-}
-
-/** A real mouse click at the centre of `selector`'s bounding rect (e2e/shell/test/autosave.spec.ts's
- * "click at a computed point" route — never a hooked `$().click()`, CLAUDE.md, DECISIONS #022). */
-async function clickCentreOf(selector: string): Promise<void> {
-  const centre = await browser.execute((sel) => {
-    const rect = document.querySelector(sel)?.getBoundingClientRect();
-    return rect === undefined ? null : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  }, selector);
-  assert.ok(centre !== null, `${selector} is not on the page`);
-  await browser
-    .action("pointer", { parameters: { pointerType: "mouse" } })
-    .move({ x: Math.round(centre.x), y: Math.round(centre.y), origin: "viewport" })
-    .down({ button: 0 })
-    .up({ button: 0 })
-    .perform();
-}
-
-/** Click into `selector` and move the caret to the end of that one-line block (arrow keys reach a
- * one-line block's edges on every OS, DECISIONS #022 — never Home/End in a contenteditable). */
-async function caretToEndOf(selector: string): Promise<void> {
-  await clickCentreOf(selector);
-  await browser.keys(["ArrowDown"]);
 }
 
 /** Dispatches a `paste` event carrying one image `File` directly on the editor's own DOM element
@@ -120,13 +98,14 @@ async function pasteImage(base64: string, mime: string): Promise<void> {
  * route: `RenameInput`'s own mount effect already selected its text, so typing replaces it),
  * retrying a fresh select-all + retype up to 5 times if a dropped keystroke — this container's
  * WebKitGTK occasionally drops one character of a run this long, confirmed by instrumenting the
- * input's own `value` mid-round — left the value short of `name`. Never a value set on the DOM
- * directly: every character still goes through a real `browser.keys` call. */
+ * input's own `value` mid-round — left the value short of `name`. The field is set through
+ * `setRenameField` (e2e/shell/test/routes.ts): native keys on the external leg, WebDriver
+ * set-value on the embedded one. */
 async function typeRenameTo(name: string): Promise<void> {
   const RENAME_INPUT = '[data-testid="rename-input"]';
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     await browser.execute((sel) => (document.querySelector(sel) as HTMLInputElement | null)?.select(), RENAME_INPUT);
-    await browser.keys(name);
+    await setRenameField(name);
     const value = await browser.execute(
       (sel) => (document.querySelector(sel) as HTMLInputElement | null)?.value ?? null,
       RENAME_INPUT,
@@ -205,9 +184,9 @@ describe("shell robustness: .icloud/.stfolder noise, looped open/edit/rename/ext
       );
 
       // edit
-      await caretToEndOf(`${EDITOR} p:last-child`);
+      await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
       const marker = `R${round}`;
-      await browser.keys(marker);
+      await typeText(EDITOR, marker);
       await browser.pause(700); // past the 500 ms autosave debounce (task 2.5)
       assert.ok(readFileSync(sessionADoc, "utf8").includes(marker), `${label}: edit "${marker}" never reached disk`);
 

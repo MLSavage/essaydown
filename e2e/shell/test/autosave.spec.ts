@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { caretToEndOf, clickCentreOf, deleteBackward, reloadPage, typeText } from "./routes.js";
 
 // Autosave and external-change handling (task 2.5): an edit reaches the disk as canonical Markdown
 // 500 ms later; the watcher (`watch_folder` → `fs:changed`) reloads a clean document silently and
@@ -15,8 +16,9 @@ import { join } from "node:path";
 // pointer action (`performActions`, not hooked) at the centre of the element's rect read through
 // `browser.execute` — "a click at a computed point" (CLAUDE.md). The workspace is seeded through
 // the persisted-restore key and a reload, since the native folder dialog cannot be automated. The
-// caret is placed by that click and `ArrowDown`, which reaches the end of a one-line last block on
-// every OS (DECISIONS #022); every file comparison is byte-exact.
+// caret, typing and deletion go through e2e/shell/test/routes.ts (a click and `ArrowDown` on the
+// external leg, DECISIONS #022; the DOM Selection API on the embedded one); every file comparison
+// is byte-exact.
 const STORAGE_KEY = "essaydown:lastWorkspace";
 const EDITOR = '[data-testid="editor"] .ProseMirror';
 const CONFLICT = '[data-testid="conflict-banner"]';
@@ -54,33 +56,12 @@ async function openThroughRestore(folder: string, file: string): Promise<void> {
     STORAGE_KEY,
     JSON.stringify({ folder, file }),
   );
-  await browser.execute(() => location.reload());
+  await reloadPage();
   await waitFor(
     async () => (await textContentOf('[data-testid="current-file"]')) === file && (await exists(EDITOR)),
     15000,
     `${file} never opened in the editor`,
   );
-}
-
-/** A real mouse click at the centre of `selector`'s bounding rect. */
-async function clickCentreOf(selector: string): Promise<void> {
-  const centre = await browser.execute((sel) => {
-    const rect = document.querySelector(sel)?.getBoundingClientRect();
-    return rect === undefined ? null : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  }, selector);
-  assert.ok(centre !== null, `${selector} is not on the page`);
-  await browser
-    .action("pointer", { parameters: { pointerType: "mouse" } })
-    .move({ x: Math.round(centre.x), y: Math.round(centre.y), origin: "viewport" })
-    .down({ button: 0 })
-    .up({ button: 0 })
-    .perform();
-}
-
-/** Click into `selector` and move the caret to the end of that one-line block. */
-async function caretToEndOf(selector: string): Promise<void> {
-  await clickCentreOf(selector);
-  await browser.keys(["ArrowDown"]);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -103,8 +84,8 @@ describe("autosave and external changes", () => {
 
   it("an edit is on disk as canonical Markdown 600 ms later, with its sidecar", async () => {
     assert.equal(await exists(NON_CANONICAL), false);
-    await caretToEndOf(`${EDITOR} p`);
-    await browser.keys("X");
+    await caretToEndOf(EDITOR, `${EDITOR} p`);
+    await typeText(EDITOR, "X");
     await browser.pause(600);
     assert.equal(readFileSync(doc, "utf8"), "HelloX\n");
     const sidecar = JSON.parse(readFileSync(join(workspace, "a.essaydown.json"), "utf8")) as { version: number };
@@ -128,8 +109,8 @@ describe("autosave and external changes", () => {
   });
 
   it("an external change under an edit raises 'Changed on disk'; Keep mine overwrites it", async () => {
-    await caretToEndOf(`${EDITOR} p:last-child`);
-    await browser.keys("Y");
+    await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
+    await typeText(EDITOR, "Y");
     appendFileSync(doc, "\nThird paragraph.\n");
     await waitFor(async () => exists(CONFLICT), 3000, "the 'Changed on disk' banner never appeared");
     assert.equal(await textContentOf(`${CONFLICT} span`), "Changed on disk");
@@ -147,8 +128,8 @@ describe("autosave and external changes", () => {
   });
 
   it("an external change under an edit, then Reload, discards the edit", async () => {
-    await caretToEndOf(`${EDITOR} p:last-child`);
-    await browser.keys("Z");
+    await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
+    await typeText(EDITOR, "Z");
     appendFileSync(doc, "\nFourth paragraph.\n");
     await waitFor(async () => exists(CONFLICT), 3000, "the 'Changed on disk' banner never appeared");
 
@@ -195,9 +176,9 @@ describe("autosave and external changes", () => {
     assert.deepEqual(readFileSync(crlf), readFileSync(CRLF_FIXTURE));
 
     // An edit that nets to nothing: the save writes the document's canonical form.
-    await caretToEndOf(`${EDITOR} p`);
-    await browser.keys("X");
-    await browser.keys(["Backspace"]);
+    await caretToEndOf(EDITOR, `${EDITOR} p`);
+    await typeText(EDITOR, "X");
+    await deleteBackward(EDITOR);
     await browser.pause(600);
     assert.deepEqual(readFileSync(crlf), readFileSync(CRLF_CANONICAL));
     assert.equal(await count(NON_CANONICAL), 0);
@@ -211,8 +192,8 @@ describe("autosave and external changes", () => {
 
   it("opening another file saves a pending edit first instead of dropping it", async () => {
     await openThroughRestore(workspace, "a.md");
-    await caretToEndOf(`${EDITOR} p:last-child`);
-    await browser.keys("Q");
+    await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
+    await typeText(EDITOR, "Q");
     // At once, inside the 500 ms window: the pane for a.md unmounts, and its timer with it.
     await clickCentreOf('[data-testid="tree-entry:crlf.md"]');
     await waitFor(

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { reloadPage } from "./routes.js";
 
 // Images (task 2.6, PRD §6.4): paste/drag -> save_image -> `![](assets/<docstem>/<file>)`; the
 // rendered view resolves a relative `src` against the document's own directory and renders it
@@ -64,7 +65,7 @@ async function openThroughRestore(folder: string, file: string): Promise<void> {
     STORAGE_KEY,
     JSON.stringify({ folder, file }),
   );
-  await browser.execute(() => location.reload());
+  await reloadPage();
   await waitFor(
     async () => (await textContentOf('[data-testid="current-file"]')) === file && (await exists(EDITOR)),
     15000,

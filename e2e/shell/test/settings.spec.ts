@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { reloadPage } from "./routes.js";
 
 // The minimal settings dialog (task 2.7): opened with Ctrl+, (Cmd/Ctrl+, — this container is
 // Linux, so Ctrl), showing only the typewriterScroll toggle and, per the description, an optional
@@ -40,10 +41,10 @@ async function relaunch(): Promise<void> {
     await browser.reloadSession();
   } catch (error) {
     console.warn(
-      `reloadSession() failed (${(error as Error).message}); falling back to location.reload() — ` +
+      `reloadSession() failed (${(error as Error).message}); falling back to a page reload — ` +
         "this only re-proves the frontend path, not a real process restart",
     );
-    await browser.execute(() => location.reload());
+    await reloadPage();
   }
   await waitForSelector('[data-testid="open-folder"]', '[data-testid="open-folder"] never reappeared after relaunch');
 }
