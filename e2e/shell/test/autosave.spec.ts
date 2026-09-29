@@ -93,6 +93,22 @@ describe("autosave and external changes", () => {
     assert.equal(sidecar.version, 1);
   });
 
+  it("an externally written sidecar survives the next autosave (DECISIONS #review-2-r0 U5)", async () => {
+    const sidecarPath = join(workspace, "a.essaydown.json");
+    const before = JSON.parse(readFileSync(sidecarPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(
+      sidecarPath,
+      `${JSON.stringify({ ...before, title: "Synced title", topicQuestion: "Synced question" }, null, 2)}\n`,
+    );
+    await caretToEndOf(EDITOR, `${EDITOR} p`);
+    await typeText(EDITOR, "V");
+    await browser.pause(600);
+    const after = JSON.parse(readFileSync(sidecarPath, "utf8")) as { title: string; topicQuestion: string };
+    assert.equal(after.title, "Synced title");
+    assert.equal(after.topicQuestion, "Synced question");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n");
+  });
+
   it("an external append to the clean document is visible within 1 s and is not saved back", async () => {
     const before = await reloads();
     appendFileSync(doc, "\nAppended by another app.\n");
@@ -106,7 +122,7 @@ describe("autosave and external changes", () => {
     assert.equal(await reloads(), before + 1);
     assert.equal(await exists(CONFLICT), false);
     await browser.pause(700);
-    assert.equal(readFileSync(doc, "utf8"), "HelloX\n\nAppended by another app.\n");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n\nAppended by another app.\n");
   });
 
   it("an external change under an edit raises 'Changed on disk'; Keep mine overwrites it", async () => {
@@ -117,10 +133,10 @@ describe("autosave and external changes", () => {
     assert.equal(await textContentOf(`${CONFLICT} span`), "Changed on disk");
     // Saving is suspended while the banner is up: the external text is still the file.
     await browser.pause(700);
-    assert.equal(readFileSync(doc, "utf8"), "HelloX\n\nAppended by another app.\n\nThird paragraph.\n");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n\nAppended by another app.\n\nThird paragraph.\n");
 
     await clickCentreOf('[data-testid="conflict-keep-mine"]');
-    const mine = "HelloX\n\nAppended by another app.Y\n";
+    const mine = "HelloXV\n\nAppended by another app.Y\n";
     await waitFor(async () => readFileSync(doc, "utf8") === mine, 3000, "Keep mine did not overwrite the file");
     await waitFor(async () => !(await exists(CONFLICT)), 3000, "the banner stayed after Keep mine");
     assert.equal((await textContentOf(EDITOR)).includes("Third paragraph."), false);
@@ -143,7 +159,7 @@ describe("autosave and external changes", () => {
     assert.equal(await exists(CONFLICT), false);
     assert.equal((await textContentOf(EDITOR)).includes("Z"), false);
     await browser.pause(700);
-    assert.equal(readFileSync(doc, "utf8"), "HelloX\n\nAppended by another app.Y\n\nFourth paragraph.\n");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n\nAppended by another app.Y\n\nFourth paragraph.\n");
   });
 
   it("a truncate then a rewrite 300 ms later is one reload, not two", async () => {
