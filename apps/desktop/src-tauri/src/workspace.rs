@@ -300,9 +300,10 @@ pub fn new_file_at(root: &Path) -> Result<String, WorkspaceError> {
 
 /// `rename_file`: renames the document, its sidecar (if present) and its `assets/<stem>` directory
 /// (if present) together, then rewrites every relative image URL in the moved document that points
-/// into `assets/<oldstem>/` to `assets/<newstem>/`. The target document already existing is
-/// `AlreadyExists` and changes nothing; a failure renaming the sidecar or the assets directory rolls
-/// back everything renamed so far, so a caller never observes a half-renamed document.
+/// into `assets/<oldstem>/` to `assets/<newstem>/`. The target document, sidecar or assets directory
+/// already existing is `AlreadyExists` and changes nothing; a failure renaming the sidecar or the
+/// assets directory rolls back everything renamed so far, so a caller never observes a half-renamed
+/// document.
 pub fn rename_file_at(
     root: &Path,
     old_relative: &str,
@@ -310,10 +311,6 @@ pub fn rename_file_at(
 ) -> Result<(), WorkspaceError> {
     let old_doc = resolve_workspace_path(root, old_relative, false)?;
     let new_doc = resolve_workspace_path(root, new_relative, false)?;
-
-    if new_doc.exists() {
-        return Err(WorkspaceError::Io(io::ErrorKind::AlreadyExists));
-    }
 
     let old_stem = file_stem_of(old_relative).ok_or(WorkspaceError::InvalidPath)?;
     let new_stem = file_stem_of(new_relative).ok_or(WorkspaceError::InvalidPath)?;
@@ -327,6 +324,10 @@ pub fn rename_file_at(
     let new_sidecar = resolve_workspace_path(root, &new_sidecar_rel, false)?;
     let old_assets = resolve_workspace_path(root, &old_assets_rel, false)?;
     let new_assets = resolve_workspace_path(root, &new_assets_rel, false)?;
+
+    if new_doc.exists() || new_sidecar.exists() || new_assets.exists() {
+        return Err(WorkspaceError::Io(io::ErrorKind::AlreadyExists));
+    }
 
     std::fs::rename(&old_doc, &new_doc)?;
 
@@ -888,18 +889,18 @@ mod tests {
     }
 
     #[test]
-    fn rename_rolls_back_doc_and_sidecar_when_moving_assets_fails() {
+    fn rename_onto_an_existing_assets_file_is_already_exists_and_changes_nothing() {
         let root = scratch_dir();
         std::fs::write(root.join("a.md"), "![x](assets/a/x.png)").unwrap();
         std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
         std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
-        // A plain file already sitting at the assets destination blocks the directory rename with
-        // a real I/O failure (the "simulated failure" the acceptance names).
+        std::fs::write(root.join("assets").join("a").join("x.png"), "img").unwrap();
+        // A plain file already sitting at the assets destination.
         std::fs::write(root.join("assets").join("b"), "blocker").unwrap();
 
-        let result = rename_file_at(&root, "a.md", "b.md");
+        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
 
-        assert!(result.is_err());
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
         assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/a/x.png)");
         assert_eq!(
             std::fs::read_to_string(root.join("a.essaydown.json")).unwrap(),
@@ -907,11 +908,118 @@ mod tests {
         );
         assert!(!root.join("b.md").exists());
         assert!(!root.join("b.essaydown.json").exists());
-        assert!(root.join("assets").join("a").exists());
         assert_eq!(
-            std::fs::read_to_string(root.join("assets").join("b")).unwrap(),
-            "blocker"
+            std::fs::read_to_string(root.join("assets").join("a").join("x.png")).unwrap(),
+            "img"
         );
+        assert_eq!(std::fs::read_to_string(root.join("assets").join("b")).unwrap(), "blocker");
+    }
+
+    #[test]
+    fn rename_onto_an_existing_empty_assets_dir_is_already_exists_and_changes_nothing() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "![x](assets/a/x.png)").unwrap();
+        std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
+        std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
+        std::fs::write(root.join("assets").join("a").join("x.png"), "img").unwrap();
+        // An empty directory already sitting at the assets destination — the case a POSIX
+        // file-over-directory rename would otherwise swallow silently.
+        std::fs::create_dir_all(root.join("assets").join("b")).unwrap();
+
+        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/a/x.png)");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.essaydown.json")).unwrap(),
+            "{\"version\":1}"
+        );
+        assert!(!root.join("b.md").exists());
+        assert!(!root.join("b.essaydown.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("assets").join("a").join("x.png")).unwrap(),
+            "img"
+        );
+        assert!(root.join("assets").join("b").is_dir());
+    }
+
+    #[test]
+    fn rename_onto_an_existing_sidecar_is_already_exists_and_changes_nothing() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "old").unwrap();
+        std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
+        // A pre-existing sidecar already sitting at the target, with no target document.
+        std::fs::write(root.join("b.essaydown.json"), "{\"version\":2}").unwrap();
+
+        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
+        assert!(root.join("a.md").exists());
+        assert!(!root.join("b.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.essaydown.json")).unwrap(),
+            "{\"version\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("b.essaydown.json")).unwrap(),
+            "{\"version\":2}"
+        );
+    }
+
+    #[test]
+    fn rename_rolls_back_doc_and_sidecar_when_moving_assets_fails() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "![x](assets/a/x.png)").unwrap();
+        std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
+        std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
+        std::fs::write(root.join("assets").join("a").join("x.png"), "img").unwrap();
+
+        // Inject a real assets-rename failure. On Unix, removing write access on the shared
+        // `assets` parent directory blocks the rename(2) that would remove entry "a" and add "b"
+        // (twin of `write_doc_to_permission_denied_dir_returns_permission_denied`'s chmod). On
+        // Windows, `std::fs::rename`'s `FileRenameInfoEx` fallback (library/std/src/sys/fs/windows.rs)
+        // refuses to rename a directory while any file beneath it has an open handle, which
+        // `MoveFileExW` and the fallback both report as access denied.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &root.join("assets"),
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+        }
+        #[cfg(windows)]
+        let held = std::fs::File::open(root.join("assets").join("a").join("x.png")).unwrap();
+
+        let result = rename_file_at(&root, "a.md", "b.md");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &root.join("assets"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        #[cfg(windows)]
+        drop(held);
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::PermissionDenied)));
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/a/x.png)");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.essaydown.json")).unwrap(),
+            "{\"version\":1}"
+        );
+        assert!(!root.join("b.md").exists());
+        assert!(!root.join("b.essaydown.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("assets").join("a").join("x.png")).unwrap(),
+            "img"
+        );
+        assert!(!root.join("assets").join("b").exists());
     }
 
     // --- delete_to_trash ---
