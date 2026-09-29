@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import SettingsDialog from "./settings/SettingsDialog";
 import type { HasCoachKeyResult, SettingsIO } from "./settings/settings-sync";
 import ConfirmDelete from "./workspace/ConfirmDelete";
+import { decideClose } from "./workspace/close-guard";
 import ContextMenu, { type ContextMenuTarget } from "./workspace/ContextMenu";
 import DocumentPane, { loadDocument, type DocumentPaneHandle, type LoadedDocument } from "./workspace/DocumentPane";
 import type { FlushResult } from "./workspace/document-sync";
@@ -87,6 +89,39 @@ function App() {
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // The close barrier (DECISIONS #review-2-r0 U2): a close request (the title bar, Alt+F4, Cmd+W)
+  // waits for the pending save instead of dropping the keystrokes inside the autosave debounce.
+  // `onCloseRequested` destroys the window after the handler unless it is prevented, and the Rust
+  // side prevents the native close whenever this listener exists, so the handler always prevents
+  // and destroys only once the disk holds the editor's document (`core:window:allow-destroy`).
+  useEffect(() => {
+    const appWindow = getCurrentWindow();
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void appWindow
+      .onCloseRequested(async (event) => {
+        event.preventDefault();
+        try {
+          const decision = decideClose((await pane.current?.flush()) ?? "clean");
+          if (decision.action === "destroy") {
+            await appWindow.destroy();
+            return;
+          }
+          setWaiting(decision.waits);
+        } catch (closeError) {
+          setError(describeError(closeError));
+        }
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // `openFolderDialog` (the "Open Folder" button) and the launch-restore effect both open a folder
