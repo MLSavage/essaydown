@@ -3558,10 +3558,10 @@
   "id": "2.9",
   "model": "opus",
   "execution": "human",
-  "description": "HUMAN GATE: Michael installs the macOS debug build fetched by the 2.verify.g2 CI gate (/logs/ci/2.verify.g2h/accepted/macos-debug-dmg/EssayDown-debug-<sha>.dmg, SHA named in .evidence/human/2.9/a<n>.md (accepted.json on ACCEPT)), opens his real synced folder on the MacBook Pro, edits a document, edits the same document in Typora, and confirms both directions survive.",
+  "description": "HUMAN GATE: Michael installs the macOS debug build fetched by the 2.verify.g3 CI gate (/logs/ci/2.verify.g3h/accepted/macos-debug-dmg/EssayDown-debug-<sha>.dmg, SHA named in .evidence/human/2.9/a<n>.md (accepted.json on ACCEPT)), opens his real synced folder on the MacBook Pro, edits a document, edits the same document in Typora, and confirms both directions survive.",
   "acceptance": "scripts/gate.sh 2.9 records the artifact SHA and the result in .evidence/human/2.9/a<n>.md (accepted.json on ACCEPT).",
   "dependencies": [
-   "2.verify.g2h"
+   "2.verify.g3h"
   ],
   "blockedOnHuman": true,
   "gateKind": "observation",
@@ -3792,6 +3792,76 @@
   ]
  },
  {
+  "id": "2.15",
+  "model": "sonnet",
+  "description": "Windows rename rollback test and assets/sidecar collision guard, repair 1 of the 2.verify.g2h GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a); ci.yml run 36324256194 at 40c9be2, ref ci/2.verify.g2/a1; evidence /logs/ci/2.verify.g2h/a1/). Every job is green except `test (windows-latest)` → Cargo test: 55 tests, 54 pass, one fails: `workspace::tests::rename_rolls_back_doc_and_sidecar_when_moving_assets_fails` panics at apps/desktop/src-tauri/src/workspace.rs:902 `assertion failed: result.is_err()` (test-logs/test-logs-windows-latest/cargo-test.log lines 663–685); Linux and macOS pass it. Cause: the test injects the failure by placing a plain FILE at `assets/b` and expecting `std::fs::rename(assets/a, assets/b)` to fail. On Unix that is `rename(2)` directory-over-file = ENOTDIR. On Windows, Rust 1.98.1 `std::fs::rename` (library/std/src/sys/fs/windows.rs `pub fn rename`) calls `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` and on ERROR_ACCESS_DENIED retries through `SetFileInformationByHandle(FileRenameInfoEx)` with `FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS`; the NT rename rules refuse a replace only when the target is a directory, read-only or executing, so a directory source replaces a plain file and the rename succeeds — the injection never fires, and in production a user file sitting at `assets/<newstem>` is silently destroyed on Windows (an empty directory there is silently swallowed on every OS; an existing `<newstem>.essaydown.json` is silently overwritten on every OS by the file→file rename). Fix, two parts, in apps/desktop/src-tauri/src/workspace.rs only. (1) `rename_file_at`: resolve `new_sidecar` and `new_assets` before the existing `new_doc.exists()` check and return `Err(WorkspaceError::Io(io::ErrorKind::AlreadyExists))` when any of `new_doc`, `new_sidecar`, `new_assets` exists, before the first `std::fs::rename`; update the fn doc comment to say the target document, sidecar or assets directory already existing is `AlreadyExists` and changes nothing. Rollback logic is unchanged. (2) Tests in `mod tests`: (a) add `rename_onto_an_existing_assets_file_is_already_exists_and_changes_nothing` — a.md with `![x](assets/a/x.png)`, sidecar, `assets/a/x.png` = \"img\", plain file `assets/b` = \"blocker\"; asserts `matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists))`, a.md and a.essaydown.json byte-unchanged, b.md and b.essaydown.json absent, `assets/a/x.png` reads \"img\", `assets/b` reads \"blocker\". (b) add `rename_onto_an_existing_empty_assets_dir_is_already_exists_and_changes_nothing` — same setup with an empty directory `assets/b` instead; same assertions plus `assets/b` still a directory (the case POSIX rename would otherwise swallow). (c) add `rename_onto_an_existing_sidecar_is_already_exists_and_changes_nothing` — a.md, a.essaydown.json = `{\"version\":1}`, pre-existing b.essaydown.json = `{\"version\":2}`; asserts AlreadyExists, a.md present, b.md absent, both sidecars byte-unchanged. (d) rewrite `rename_rolls_back_doc_and_sidecar_when_moving_assets_fails`: setup a.md `![x](assets/a/x.png)`, sidecar `{\"version\":1}`, `assets/a/x.png` = \"img\", NO `assets/b`; injection before the call: `#[cfg(unix)]` set `assets` to `Permissions::from_mode(0o555)` (twin of `write_doc_to_permission_denied_dir_returns_permission_denied`), `#[cfg(windows)]` `let held = std::fs::File::open(root.join(\"assets\").join(\"a\").join(\"x.png\")).unwrap();` kept alive across the call (FILE_RENAME_INFORMATION rules: a directory cannot be renamed while any file beneath it has an open handle; MoveFileExW reports ERROR_ACCESS_DENIED and std's FileRenameInfoEx fallback returns that same error); after the call, `#[cfg(unix)]` restore 0o755 and `#[cfg(windows)]` `drop(held)` before any assertion; then assert `matches!(err, WorkspaceError::Io(io::ErrorKind::PermissionDenied))` (replacing `result.is_err()`), a.md and a.essaydown.json byte-unchanged, b.md and b.essaydown.json absent, `assets/a/x.png` reads \"img\", `assets/b` absent. Do not gate the test itself with `#[cfg(unix)]`; only the injection and its cleanup are cfg-gated. Zero new dependencies; nothing else changes.",
+  "acceptance": "`git diff --name-only \"$(git merge-base HEAD phase/2)\" HEAD` lists only apps/desktop/src-tauri/src/workspace.rs, docs/progress/journal-main.md and docs/lessons.md. In `rename_file_at` the three `.exists()` checks on `new_doc`, `new_sidecar` and `new_assets` all precede the first `std::fs::rename` (line numbers from `grep -n`, quoted in the journal). `cargo test -- --list` lists `rename_onto_an_existing_assets_file_is_already_exists_and_changes_nothing`, `rename_onto_an_existing_empty_assets_dir_is_already_exists_and_changes_nothing`, `rename_onto_an_existing_sidecar_is_already_exists_and_changes_nothing` and `rename_rolls_back_doc_and_sidecar_when_moving_assets_fails` on Linux (no `#[cfg(unix)]`/`#[cfg(windows)]` attribute on any of the four `#[test]` fns; `grep -c '#\\[cfg(windows)\\]' apps/desktop/src-tauri/src/workspace.rs` grew by exactly 2 and `#\\[cfg(unix)\\]` by exactly 2, all four inside the rollback test body). The rollback test asserts `io::ErrorKind::PermissionDenied` and contains no `is_err()`; its assertions on a.md, a.essaydown.json, b.md and b.essaydown.json are unchanged from 40c9be2. Removing the production guard alone makes tests (a) and (c) fail on Linux — remove it in the working tree (save it first with `git diff > ` a file under /tmp and `git apply -R`, never `git stash`, whose stack is shared across worktrees), run, record both failing test names in the journal, restore with `git apply`, confirm `git diff` is back. scripts/check green. The journal quotes the failing cargo-test.log line (`assertion failed: result.is_err()` at workspace.rs:902), names the std path (`MoveFileExW(MOVEFILE_REPLACE_EXISTING)` then `FileRenameInfoEx` with `REPLACE_IF_EXISTS|POSIX_SEMANTICS`, library/std/src/sys/fs/windows.rs) as why a directory replaced a plain file on Windows, names which test discharges each guard clause (doc: the existing `rename_onto_an_existing_target_is_already_exists_and_changes_nothing`; sidecar: (c); assets: (a) and (b)) and which injection discharges rollback per OS, and states that only the `test (windows-latest)` leg of the 2.verify.g3h CI gate proves the Windows injection: `rename_rolls_back_doc_and_sidecar_when_moving_assets_fails ... ok` in test-logs-windows-latest/cargo-test.log with 0 failures. If that leg instead reports another kind or Ok, the next repair swaps the `#[cfg(windows)]` injection to the existing icacls helpers `deny_write_access(&root.join(\"assets\"))`/`allow_write_access` and never weakens the rollback assertions.",
+  "dependencies": [
+   "2.verify.g2h"
+  ],
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.verify.g3",
+  "model": "sonnet",
+  "description": "Phase 2 verification, repair 3 of 2.verify after the 2.verify.g2h GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a)): freeze dependencies (no lockfile change allowed), run the full suite in the container after 2.15, and confirm the phase head is ready for the three-OS CI run that the CI gate performs.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against 2.verify's integrated commit shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "2.15"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.verify.g3/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "macos-debug-dmg"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite green on ubuntu, macOS and windows; every spec file under e2e/shell/test/ green on ubuntu and windows (macOS recorded) at the implementation SHA; a macOS debug .dmg built by the workflow at that SHA is fetched to /logs/ci/2.verify.g3h/accepted/macos-debug-dmg/EssayDown-debug-<sha>.dmg.",
+  "phase": "2",
+  "execution": "loop",
+  "targetBranch": "phase/2"
+ },
+ {
+  "id": "2.verify.g3h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "2.verify.g3",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/2.verify.g3/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "macos-debug-dmg"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "2",
+  "targetBranch": "phase/2",
+  "description": "CI gate for 2.verify.g3: scripts/gate.sh 2.verify.g3h pushes integrated_sha of 2.verify.g3 to ci/2.verify.g3/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\",\"macos-debug-dmg\"] into /logs/ci/2.verify.g3/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite green on ubuntu, macOS and windows; every spec file under e2e/shell/test/ green on ubuntu and windows (macOS recorded) at the implementation SHA; a macOS debug .dmg built by the workflow at that SHA is fetched to /logs/ci/2.verify.g3h/accepted/macos-debug-dmg/EssayDown-debug-<sha>.dmg.",
+  "dependencies": [
+   "2.verify.g3"
+  ]
+ },
+ {
   "id": "2.10.r0a",
   "model": "claude-opus",
   "execution": "reviewer",
@@ -3799,7 +3869,7 @@
   "description": "Review attempt r0, claude reviewer, for review set 2.10 (phase 2). Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean.",
   "acceptance": "/logs/reviews/2/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "2.verify.g2h",
+   "2.verify.g3h",
    "2.9"
   ],
   "phase": "2",
@@ -3816,7 +3886,7 @@
   "description": "Review attempt r0, sol reviewer, for review set 2.10 (phase 2). Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean.",
   "acceptance": "/logs/reviews/2/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "2.verify.g2h",
+   "2.verify.g3h",
    "2.9"
   ],
   "phase": "2",
@@ -3833,7 +3903,7 @@
   "description": "Review attempt r0, grok reviewer, for review set 2.10 (phase 2). Review set for Phase 2. Phase checks: WorkspaceRoot path-escape suite present and green; robustness log clean.",
   "acceptance": "/logs/reviews/2/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "2.verify.g2h",
+   "2.verify.g3h",
    "2.9"
   ],
   "phase": "2",
