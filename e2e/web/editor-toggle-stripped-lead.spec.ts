@@ -50,6 +50,7 @@ async function openRendered(page: Page): Promise<void> {
     };
   });
   await page.goto("/dev/editor");
+  await page.getByTestId("editor").waitFor();
   await page.locator(".ProseMirror").click();
   await expect.poll(() => markdown(page)).toBe("");
   // The dev bar's selection readout is what every caret assertion below reads; it is written on

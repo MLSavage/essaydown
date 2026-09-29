@@ -346,6 +346,7 @@ function show(value: number | null): string {
 /** One measured configuration, printed and attached, and returned for the ratio assertion. */
 async function measure(page: Page, view: View, words: number): Promise<Samples> {
   await page.goto("/dev/editor");
+  await page.getByTestId("editor").waitFor();
   await page.locator(".ProseMirror").waitFor();
   await load(page, `latency-${words}.md`, prose(words, words));
   await putCaretMidDocument(page, view);

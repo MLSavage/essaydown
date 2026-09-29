@@ -79,6 +79,7 @@ async function copyPasteOverSelection(page: Page): Promise<{ html: string; text:
 test.describe("the editor's own copy → paste over the corpus", () => {
   test("every fixture in index.json is byte-identical before and after", async ({ page }) => {
     await page.goto("/dev/editor");
+    await page.getByTestId("editor").waitFor();
     const mismatches: string[] = [];
     // Collects what the loop actually loaded, so the coverage assertion after it is a claim about
     // the loop's own execution, not `checked === names.length` — which held for any for-of loop
@@ -125,6 +126,7 @@ test.describe("the structures the finding named survive their own copy → paste
   for (const [name, source, selectors] of cases) {
     test(`${name} round-trips through the clipboard`, async ({ page }) => {
       await page.goto("/dev/editor");
+      await page.getByTestId("editor").waitFor();
       await load(page, `${name.replace(/\W+/g, "-")}.md`, source);
       // The pane's own canonical string, not the input: `format` re-lays-out a table's columns,
       // and the acceptance is "byte-identical before and after", not "equal to what I typed".
@@ -143,6 +145,7 @@ test.describe("the structures the finding named survive their own copy → paste
 
   test("the heading case is the finding's own reproduction, to the byte", async ({ page }) => {
     await page.goto("/dev/editor");
+    await page.getByTestId("editor").waitFor();
     await load(page, "sol-report-paste.md", "# Heading\n\n**bold**\n");
     await expect.poll(() => markdown(page)).toBe("# Heading\n\n**bold**\n");
     await selectAll(page);
@@ -162,6 +165,7 @@ test.describe("an opaque raw node comes back by its value, and its text stays te
     page,
   }) => {
     await page.goto("/dev/editor");
+    await page.getByTestId("editor").waitFor();
     await load(page, "raw-block.md", `${value}\n`);
     const box = page.locator(".ProseMirror div.essaydown-raw");
     await expect(box).toHaveCount(1);
@@ -188,6 +192,7 @@ test.describe("plain text pasted from outside the editor stays plain", () => {
   }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.goto("/dev/editor");
+    await page.getByTestId("editor").waitFor();
     await load(page, "plain-target.md", "ab\n");
     await page.locator(".ProseMirror p").click();
     await page.keyboard.press("ControlOrMeta+a");
@@ -259,6 +264,7 @@ async function installWriteTextSpy(page: Page): Promise<void> {
 async function openEditor(page: Page): Promise<void> {
   await installWriteTextSpy(page);
   await page.goto("/dev/editor");
+  await page.getByTestId("editor").waitFor();
   await page.locator(".ProseMirror").click();
   await expect.poll(() => markdown(page)).toBe("");
 }
@@ -270,6 +276,7 @@ async function openEditor(page: Page): Promise<void> {
 async function openEditorWithRealClipboard(page: Page, context: BrowserContext): Promise<void> {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/dev/editor");
+  await page.getByTestId("editor").waitFor();
   await page.locator(".ProseMirror").click();
   await expect.poll(() => markdown(page)).toBe("");
 }

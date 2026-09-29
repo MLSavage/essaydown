@@ -81,6 +81,7 @@ function markdown(page: Page): Promise<string | null> {
 
 async function openEditor(page: Page): Promise<void> {
   await page.goto("/dev/editor");
+  await page.getByTestId("editor").waitFor();
   await page.locator(".ProseMirror").click();
   await expect.poll(() => markdown(page)).toBe("");
 }

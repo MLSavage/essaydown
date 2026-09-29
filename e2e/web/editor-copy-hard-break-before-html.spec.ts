@@ -51,6 +51,7 @@ async function openRendered(page: Page): Promise<void> {
     };
   });
   await page.goto("/dev/editor");
+  await page.getByTestId("editor").waitFor();
   await expect.poll(() => markdown(page)).toBe("");
 }
 
