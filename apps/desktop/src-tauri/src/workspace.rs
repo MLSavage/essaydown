@@ -276,6 +276,15 @@ fn assets_relative_for(relative: &str) -> Option<String> {
 /// `new_file`: the next unused `Untitled-N.md` (N starts at 1, computed from the highest existing
 /// `Untitled-N.md` at the workspace root, never reused after a gap) with `# Untitled-N` as its only
 /// content. Returns the new file's workspace-relative path.
+///
+/// The scan matches `Untitled-` and `.md` case-insensitively (`eq_ignore_ascii_case` on bytes, so a
+/// non-UTF-8-boundary-safe slice never panics), because a case-insensitive filesystem (the macOS and
+/// Windows defaults) treats `untitled-1.md` and `Untitled-1.md` as the same name; a scan that missed
+/// the lower-case form would recompute `n = 1` and then silently overwrite it. The candidate name is
+/// opened with `create_new` (fails with `AlreadyExists` rather than replacing) and the loop steps to
+/// the next `n` on that error, so a file created by another process between the scan and the write is
+/// never replaced either. `max_n`'s increment is `checked_add`: `None` (an absurd existing name like
+/// `Untitled-18446744073709551615.md`) is an `Io` error, never a panic.
 pub fn new_file_at(root: &Path) -> Result<String, WorkspaceError> {
     let base = resolve_workspace_path(root, "", true)?;
     let mut max_n: u64 = 0;
@@ -283,19 +292,48 @@ pub fn new_file_at(root: &Path) -> Result<String, WorkspaceError> {
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if let Some(rest) = name_str.strip_prefix("Untitled-") {
-            if let Some(digits) = rest.strip_suffix(".md") {
-                if let Ok(n) = digits.parse::<u64>() {
-                    max_n = max_n.max(n);
-                }
+        let bytes = name_str.as_bytes();
+        let prefix = b"untitled-";
+        let suffix = b".md";
+        if bytes.len() < prefix.len() + suffix.len() {
+            continue;
+        }
+        let head = &bytes[..prefix.len()];
+        let tail = &bytes[bytes.len() - suffix.len()..];
+        if !head.eq_ignore_ascii_case(prefix) || !tail.eq_ignore_ascii_case(suffix) {
+            continue;
+        }
+        let digits = &bytes[prefix.len()..bytes.len() - suffix.len()];
+        if let Ok(digits_str) = std::str::from_utf8(digits) {
+            if let Ok(n) = digits_str.parse::<u64>() {
+                max_n = max_n.max(n);
             }
         }
     }
-    let n = max_n + 1;
-    let relative = format!("Untitled-{n}.md");
-    let path = resolve_workspace_path(root, &relative, false)?;
-    atomic_write(&path, format!("# Untitled-{n}\n").as_bytes())?;
-    Ok(relative)
+    let mut n = max_n
+        .checked_add(1)
+        .ok_or(WorkspaceError::Io(io::ErrorKind::Other))?;
+    loop {
+        let relative = format!("Untitled-{n}.md");
+        let path = resolve_workspace_path(root, &relative, false)?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                file.write_all(format!("# Untitled-{n}\n").as_bytes())?;
+                return Ok(relative);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                n = n
+                    .checked_add(1)
+                    .ok_or(WorkspaceError::Io(io::ErrorKind::Other))?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 }
 
 /// `rename_file`: renames the document, its sidecar (if present) and its `assets/<stem>` directory
@@ -877,6 +915,47 @@ mod tests {
         std::fs::write(root.join("Untitled-5.md"), "# Untitled-5\n").unwrap();
         let relative = new_file_at(&root).unwrap();
         assert_eq!(relative, "Untitled-6.md");
+    }
+
+    // Runs on ext4 too, because the scan is case-insensitive regardless of the filesystem's own
+    // case sensitivity: a lower-case `untitled-1.md` (as would exist on a case-insensitive
+    // filesystem alongside a request for the canonically-cased name) is counted, and the new file
+    // is never written over it, since `new_file_at` no longer scans `Untitled-` case-sensitively.
+    #[test]
+    fn new_file_scans_case_insensitively_and_leaves_the_existing_file_untouched() {
+        let root = scratch_dir();
+        std::fs::write(root.join("untitled-1.md"), "sentinel").unwrap();
+        let relative = new_file_at(&root).unwrap();
+        assert_eq!(relative, "Untitled-2.md");
+        assert_eq!(
+            std::fs::read_to_string(root.join("untitled-1.md")).unwrap(),
+            "sentinel"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("Untitled-2.md")).unwrap(),
+            "# Untitled-2\n"
+        );
+    }
+
+    #[test]
+    fn new_file_numbers_past_consecutive_existing_untitled_files() {
+        let root = scratch_dir();
+        std::fs::write(root.join("Untitled-1.md"), "# Untitled-1\n").unwrap();
+        std::fs::write(root.join("Untitled-2.md"), "# Untitled-2\n").unwrap();
+        let relative = new_file_at(&root).unwrap();
+        assert_eq!(relative, "Untitled-3.md");
+    }
+
+    #[test]
+    fn new_file_on_u64_max_existing_name_is_io_error_not_panic() {
+        let root = scratch_dir();
+        std::fs::write(
+            format!("{}/Untitled-{}.md", root.display(), u64::MAX),
+            "# absurd\n",
+        )
+        .unwrap();
+        let err = new_file_at(&root).unwrap_err();
+        assert!(matches!(err, WorkspaceError::Io(_)));
     }
 
     // --- rename_file ---
