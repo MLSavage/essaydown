@@ -19,12 +19,28 @@
  * - A conflict shows the 'Changed on disk' banner and suspends saving until the user picks
  *   {@link DocumentSync.keepMine} (write the editor's text over the disk) or
  *   {@link DocumentSync.reload} (take the disk's text, dropping the edit).
+ *
+ * **One operation at a time** (DECISIONS #review-2-r0 U1, U6). Every save, Keep mine, watcher
+ * check and post-rename read runs on one chain: the closure holds the in-flight promise, and each
+ * operation awaits its predecessor before it touches the disk. So a {@link DocumentSync.flush}
+ * during a write waits for it instead of re-reading the pre-write bytes (a spurious conflict), and
+ * a watcher report during a write reads the file only after the write landed, where its own echo
+ * equals `known`. `flush` reports what happened — `clean`, `saved`, `conflict` or `failed` — and a
+ * caller that is about to drop this module (a switch, a rename) proceeds only on the first two.
+ *
+ * **One snapshot per write.** A write calls {@link SyncCallbacks.serialize} and then
+ * {@link SyncIO.write} in one synchronous step, and `io.write` reads every other part of the
+ * document it writes (the sidecar) before its own first `await`, so the Markdown and the sidecar
+ * always come from one state of the editor.
  */
 
 export interface SyncIO {
   /** The document's current bytes on disk. */
   read(): Promise<string>;
-  /** Write the editor's document (Markdown + sidecar); `text` is the Markdown being written. */
+  /**
+   * Write the editor's document (Markdown + sidecar); `text` is the Markdown being written. Called
+   * in the same synchronous step as `serialize`: read the sidecar before the first `await`.
+   */
   write(text: string): Promise<void>;
 }
 
@@ -62,17 +78,30 @@ export const DEFAULT_SYNC_OPTIONS: SyncOptions = {
   shrinkHoldMs: 2000,
 };
 
+/** What {@link DocumentSync.flush} found: nothing to save, saved, held by a conflict, or failed. */
+export type FlushResult = "clean" | "saved" | "conflict" | "failed";
+
 export interface DocumentSync {
   /** The editor's document changed. */
   edited(): void;
   /** The watcher reported this document. */
   changed(): void;
   /** Resolve a conflict by writing the editor's document over the disk. */
-  keepMine(): Promise<void>;
+  keepMine(): Promise<FlushResult>;
   /** Resolve a conflict by taking the disk's document. */
   reload(): Promise<void>;
-  /** Save now if dirty (before a rename or a switch), whatever the timer says. */
-  flush(): Promise<void>;
+  /**
+   * Save now if dirty (before a rename or a switch), whatever the timer says, after any write in
+   * flight. `clean` and `saved` mean the disk holds the editor's document; `conflict` and `failed`
+   * mean it does not, and the edit is still dirty.
+   */
+  flush(): Promise<FlushResult>;
+  /**
+   * The document was renamed (the I/O now reads the new path), and the rename may have rewritten
+   * its image URLs: re-read it. The same bytes as `known` change nothing; different bytes become
+   * `known` and, when clean, reload like an external change. Never a conflict: the rename was ours.
+   */
+  renamed(): Promise<void>;
   /** Stop every timer; later reports and edits are ignored. */
   dispose(): void;
   readonly dirty: boolean;
@@ -118,7 +147,28 @@ export function createDocumentSync(
     callbacks.conflicted();
   };
 
-  const write = async (): Promise<void> => {
+  // The operation in flight, or null. `serialised` chains each new one behind it.
+  let inFlight: Promise<FlushResult> | null = null;
+
+  const serialised = (operation: () => Promise<FlushResult>): Promise<FlushResult> => {
+    const before = inFlight;
+    const next = (async () => {
+      if (before !== null) await before;
+      return operation();
+    })();
+    inFlight = next;
+    void next.then(() => {
+      if (inFlight === next) inFlight = null;
+    });
+    return next;
+  };
+
+  const settle = async (): Promise<void> => {
+    while (inFlight !== null) await inFlight;
+  };
+
+  // Only ever inside a `serialised` operation.
+  const write = async (): Promise<FlushResult> => {
     const at = generation;
     const text = callbacks.serialize();
     const previous = known;
@@ -129,61 +179,68 @@ export function createDocumentSync(
     } catch (error) {
       setKnown(previous);
       callbacks.failed(error);
-      return;
+      return "failed";
     }
     if (generation === at) dirty = false;
+    return "saved";
   };
 
-  const save = async (): Promise<void> => {
-    saveTimer = null;
-    if (disposed || conflict || !dirty) return;
-    let disk: string;
-    try {
-      disk = await io.read();
-    } catch (error) {
-      callbacks.failed(error);
-      return;
-    }
-    if (disposed || conflict) return;
-    if (disk !== known) {
-      enterConflict();
-      return;
-    }
-    await write();
-  };
-
-  const check = async (): Promise<void> => {
-    changeTimer = null;
-    if (disposed) return;
-    let disk: string;
-    try {
-      disk = await io.read();
-    } catch (error) {
-      // A file that is gone mid-rewrite reads as a failure; the rewrite's own report re-checks.
-      callbacks.failed(error);
-      return;
-    }
-    if (disposed) return;
-    if (disk === known) {
-      holdStartedAt = null;
-      return;
-    }
-    if (disk.length < known.length) {
-      const now = timers.now();
-      holdStartedAt ??= now;
-      const left = holdStartedAt + options.shrinkHoldMs - now;
-      if (left > 0) {
-        changeTimer = timers.setTimeout(() => void check(), left);
-        return;
+  const save = (): Promise<FlushResult> =>
+    serialised(async () => {
+      if (disposed || conflict) return conflict ? "conflict" : "clean";
+      if (!dirty) return "clean";
+      let disk: string;
+      try {
+        disk = await io.read();
+      } catch (error) {
+        callbacks.failed(error);
+        return "failed";
       }
-    }
-    holdStartedAt = null;
-    if (dirty || conflict) {
-      enterConflict();
-      return;
-    }
-    setKnown(disk);
-    callbacks.reloaded(disk);
+      if (disposed) return "clean";
+      if (conflict) return "conflict";
+      if (disk !== known) {
+        enterConflict();
+        return "conflict";
+      }
+      return write();
+    });
+
+  const check = (): void => {
+    changeTimer = null;
+    void serialised(async () => {
+      // A later report scheduled its own check while this one waited behind a write.
+      if (disposed || changeTimer !== null) return "clean";
+      let disk: string;
+      try {
+        disk = await io.read();
+      } catch (error) {
+        // A file that is gone mid-rewrite reads as a failure; the rewrite's own report re-checks.
+        callbacks.failed(error);
+        return "failed";
+      }
+      if (disposed) return "clean";
+      if (disk === known) {
+        holdStartedAt = null;
+        return "clean";
+      }
+      if (disk.length < known.length) {
+        const now = timers.now();
+        holdStartedAt ??= now;
+        const left = holdStartedAt + options.shrinkHoldMs - now;
+        if (left > 0) {
+          changeTimer = timers.setTimeout(check, left);
+          return "clean";
+        }
+      }
+      holdStartedAt = null;
+      if (dirty || conflict) {
+        enterConflict();
+        return "conflict";
+      }
+      setKnown(disk);
+      callbacks.reloaded(disk);
+      return "clean";
+    });
   };
 
   return {
@@ -193,18 +250,21 @@ export function createDocumentSync(
       dirty = true;
       if (conflict) return;
       clearSave();
-      saveTimer = timers.setTimeout(() => void save(), options.saveDelayMs);
+      saveTimer = timers.setTimeout(() => {
+        saveTimer = null;
+        void save();
+      }, options.saveDelayMs);
     },
     changed() {
       if (disposed) return;
       clearChange();
-      changeTimer = timers.setTimeout(() => void check(), options.quietMs);
+      changeTimer = timers.setTimeout(check, options.quietMs);
     },
-    async keepMine() {
-      if (disposed) return;
+    keepMine() {
+      if (disposed) return Promise.resolve<FlushResult>(dirty ? "failed" : "clean");
       conflict = false;
       clearSave();
-      await write();
+      return serialised(() => (disposed ? Promise.resolve<FlushResult>("clean") : write()));
     },
     async reload() {
       if (disposed) return;
@@ -223,9 +283,31 @@ export function createDocumentSync(
       callbacks.reloaded(disk);
     },
     async flush() {
-      if (disposed || !dirty || conflict) return;
+      const wasDirty = dirty;
+      await settle();
+      if (disposed) return dirty ? "failed" : "clean";
+      if (conflict) return "conflict";
+      if (!dirty) return wasDirty ? "saved" : "clean";
       clearSave();
-      await save();
+      return save();
+    },
+    renamed() {
+      return serialised(async () => {
+        if (disposed) return "clean";
+        let disk: string;
+        try {
+          disk = await io.read();
+        } catch (error) {
+          callbacks.failed(error);
+          return "failed";
+        }
+        if (disposed || disk === known) return "clean";
+        setKnown(disk);
+        // Dirty only if an edit landed between the flush before the rename and here; the edit
+        // wins over the rewritten file, as it would have after the rename's own write.
+        if (!dirty && !conflict) callbacks.reloaded(disk);
+        return "clean";
+      }).then(() => undefined);
     },
     dispose() {
       disposed = true;

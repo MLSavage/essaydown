@@ -77,6 +77,7 @@ describe("autosave and external changes", () => {
     doc = join(workspace, "a.md");
     writeFileSync(doc, "Hello\n");
     writeFileSync(join(workspace, "crlf.md"), readFileSync(CRLF_FIXTURE));
+    writeFileSync(join(workspace, "b.md"), "Bee\n");
     // A sidecar that does not validate (no `version`): saving must leave it as it is.
     writeFileSync(join(workspace, "crlf.essaydown.json"), INVALID_SIDECAR);
     await openThroughRestore(workspace, "a.md");
@@ -204,5 +205,38 @@ describe("autosave and external changes", () => {
     await browser.pause(700);
     assert.equal(readFileSync(doc, "utf8"), "# Rewritten\n\nBy a sync tool.Q\n");
     assert.equal(existsSync(join(workspace, "a.essaydown.json")), true);
+  });
+
+  it("a switch under 'Changed on disk' keeps the document and its edit; after Keep mine it goes ahead", async () => {
+    // DECISIONS #review-2-r0 U1: the click used to drop the typed text from memory and disk.
+    await openThroughRestore(workspace, "a.md");
+    const before = readFileSync(doc, "utf8");
+    const editorBefore = await textContentOf(EDITOR);
+    await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
+    await typeText(EDITOR, "W");
+    appendFileSync(doc, "\nExternal.\n");
+    const external = `${before}\nExternal.\n`;
+    await waitFor(async () => exists(CONFLICT), 3000, "the 'Changed on disk' banner never appeared");
+
+    await clickCentreOf('[data-testid="tree-entry:b.md"]');
+    await waitFor(async () => exists('[data-testid="switch-waits"]'), 3000, "the switch never said it waits");
+    await browser.pause(700);
+    assert.equal(await textContentOf('[data-testid="current-file"]'), "a.md");
+    assert.equal(await textContentOf(EDITOR), `${editorBefore}W`);
+    assert.equal(await exists(CONFLICT), true);
+    assert.equal(readFileSync(doc, "utf8"), external);
+
+    await clickCentreOf('[data-testid="conflict-keep-mine"]');
+    const mine = `${before.slice(0, -1)}W\n`;
+    await waitFor(async () => readFileSync(doc, "utf8") === mine, 3000, "Keep mine did not overwrite the file");
+    await waitFor(async () => !(await exists(CONFLICT)), 3000, "the banner stayed after Keep mine");
+    await clickCentreOf('[data-testid="tree-entry:b.md"]');
+    await waitFor(
+      async () => (await textContentOf('[data-testid="current-file"]')) === "b.md",
+      3000,
+      "b.md never opened after Keep mine",
+    );
+    assert.equal(await exists('[data-testid="switch-waits"]'), false);
+    assert.equal(readFileSync(doc, "utf8"), mine);
   });
 });

@@ -13,7 +13,7 @@ import {
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
-import { createDocumentSync, type DocumentSync } from "./document-sync";
+import { createDocumentSync, type DocumentSync, type FlushResult } from "./document-sync";
 import { createImageNodeView } from "./image-view";
 import { imagePastePlugin } from "./image-paste";
 import { sidecarPathFor } from "./paths";
@@ -51,8 +51,11 @@ function storeFor(text: string, sidecar: Sidecar): DocumentStore {
 }
 
 export interface DocumentPaneHandle {
-  /** Save a pending edit now (before a rename, a switch or a delete moves the file). */
-  flush(): Promise<void>;
+  /**
+   * Save a pending edit now (before a rename, a switch or a delete moves the file). The caller
+   * drops or moves the document only on `clean` or `saved` (document-sync.ts).
+   */
+  flush(): Promise<FlushResult>;
 }
 
 interface Props {
@@ -118,10 +121,12 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
       {
         read: () => invoke<string>("read_doc", { path: pathRef.current }),
         write: async (text) => {
+          // The same synchronous step as `serialize` (document-sync.ts): the sidecar is read from
+          // the state `text` was serialised from, before the first `await`.
           const at = pathRef.current;
+          const { root, sidecar } = storeRef.current.getState().document;
           await invoke("write_doc", { path: at, contents: text });
           if (!sidecarWritable) return;
-          const { root, sidecar } = storeRef.current.getState().document;
           await invoke("write_sidecar", {
             path: sidecarPathFor(at),
             contents: `${JSON.stringify(refresh(sidecar, root), null, 2)}\n`,
@@ -169,7 +174,17 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
 
   useEffect(() => store.subscribe(() => syncRef.current?.edited()), [store]);
 
-  useImperativeHandle(ref, () => ({ flush: async () => syncRef.current?.flush() }), []);
+  useImperativeHandle(ref, () => ({ flush: async () => (await syncRef.current?.flush()) ?? "clean" }), []);
+
+  // A rename changes `path` without a remount, and `rename_file` may have rewritten the document's
+  // image URLs: re-read it at the new path, so the next save does not find the disk changed
+  // (DECISIONS #review-2-r0 U20).
+  const pathSeen = useRef(path);
+  useEffect(() => {
+    if (pathSeen.current === path) return;
+    pathSeen.current = path;
+    void syncRef.current?.renamed();
+  }, [path]);
 
   useEffect(() => {
     const element = host.current;

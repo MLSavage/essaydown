@@ -18,9 +18,24 @@ interface Harness {
   conflicts: number;
   known: string[];
   failures: unknown[];
+  reads: number;
+  /** Every write as it starts, before it lands. */
+  started: string[];
 }
 
-function harness(initial: string, options = DEFAULT_SYNC_OPTIONS, failWrite = false): Harness {
+/** A write that lands only when `release` is called (a write in flight). */
+function gated(): { wait: Promise<void>; release: () => void } {
+  let release: () => void = () => {};
+  const wait = new Promise<void>((resolve) => (release = resolve));
+  return { wait, release };
+}
+
+function harness(
+  initial: string,
+  options = DEFAULT_SYNC_OPTIONS,
+  failWrite = false,
+  gate: Promise<void> | null = null,
+): Harness {
   const h: Omit<Harness, "sync"> = {
     disk: { text: initial },
     editor: { text: initial },
@@ -29,12 +44,19 @@ function harness(initial: string, options = DEFAULT_SYNC_OPTIONS, failWrite = fa
     conflicts: 0,
     known: [],
     failures: [],
+    reads: 0,
+    started: [],
   };
   const sync = createDocumentSync(
     initial,
     {
-      read: async () => h.disk.text,
+      read: async () => {
+        h.reads += 1;
+        return h.disk.text;
+      },
       write: async (text) => {
+        h.started.push(text);
+        if (gate !== null) await gate;
         if (failWrite) throw new Error("disk full");
         h.writes.push(text);
         h.disk.text = text;
@@ -299,12 +321,199 @@ describe("external changes", () => {
     h.sync.dispose();
     h.sync.edited();
     h.sync.changed();
-    await h.sync.keepMine();
+    expect(await h.sync.keepMine()).toBe("failed");
     await h.sync.reload();
-    await h.sync.flush();
+    expect(await h.sync.flush()).toBe("failed");
+    await h.sync.renamed();
     await vi.advanceTimersByTimeAsync(shrinkHoldMs * 2);
     expect(h.writes).toEqual([]);
     expect(h.reloads).toEqual([]);
     expect(h.conflicts).toBe(0);
+  });
+});
+
+// DECISIONS #review-2-r0 U1, U6 (task 2.16): `flush` reports what it found, and every save, Keep
+// mine and watcher check waits for the write in flight. One test per guard in the diff.
+describe("flush results and the in-flight write", () => {
+  it("flush during a conflict resolves conflict, keeps the edit dirty and writes nothing", async () => {
+    const h = harness("a\n");
+    edit(h, "ax\n");
+    h.disk.text = "a\nb\n";
+    h.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    expect(h.sync.conflict).toBe(true);
+    expect(await h.sync.flush()).toBe("conflict");
+    expect(h.sync.dirty).toBe(true);
+    expect(h.writes).toEqual([]);
+    expect(h.disk.text).toBe("a\nb\n");
+  });
+
+  it("flush after a failed write resolves failed and keeps the edit dirty", async () => {
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, true);
+    edit(h, "ab\n");
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    expect(h.failures).toHaveLength(1);
+    expect(await h.sync.flush()).toBe("failed");
+    expect(h.sync.dirty).toBe(true);
+    expect(h.disk.text).toBe("a\n");
+  });
+
+  it("flush while a write is in flight awaits it: no second read, no conflict, saved", async () => {
+    const { wait, release } = gated();
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    edit(h, "ab\n");
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    expect(h.reads).toBe(1);
+    expect(h.sync.dirty).toBe(true);
+    let result: string | null = null;
+    const flushed = h.sync.flush().then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBe(null);
+    release();
+    await flushed;
+    expect(result).toBe("saved");
+    expect(h.reads).toBe(1);
+    expect(h.conflicts).toBe(0);
+    expect(h.writes).toEqual(["ab\n"]);
+    expect(h.sync.dirty).toBe(false);
+  });
+
+  it("a watcher report during an in-flight write is deferred, and the write's own echo reads as ours", async () => {
+    const { wait, release } = gated();
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    edit(h, "ab\n");
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    h.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs * 4);
+    // Deferred: the disk still holds the pre-write bytes, and a read now would call them a change.
+    expect(h.reads).toBe(1);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.reads).toBe(2);
+    expect(h.conflicts).toBe(0);
+    expect(h.reloads).toEqual([]);
+    expect(h.sync.dirty).toBe(false);
+  });
+
+  it("flush when clean resolves clean and writes nothing", async () => {
+    const h = harness("a\n");
+    expect(await h.sync.flush()).toBe("clean");
+    expect(h.writes).toEqual([]);
+    expect(h.reads).toBe(0);
+  });
+
+  it("keepMine during an in-flight write awaits it before its own write", async () => {
+    const { wait, release } = gated();
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    edit(h, "ab\n");
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    edit(h, "abc\n");
+    let result: string | null = null;
+    const kept = h.sync.keepMine().then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBe(null);
+    // Keep mine's own write has not started: it waits behind the one in flight.
+    expect(h.started).toEqual(["ab\n"]);
+    release();
+    await kept;
+    expect(result).toBe("saved");
+    // In order: the in-flight write landed first, then Keep mine's.
+    expect(h.writes).toEqual(["ab\n", "abc\n"]);
+    expect(h.disk.text).toBe("abc\n");
+    expect(h.sync.dirty).toBe(false);
+  });
+
+  it("flush of a dirty, idle document saves and resolves saved", async () => {
+    const h = harness("a\n");
+    edit(h, "ab\n");
+    expect(await h.sync.flush()).toBe("saved");
+    expect(h.disk.text).toBe("ab\n");
+  });
+
+  it("flush that finds the disk changed resolves conflict and writes nothing", async () => {
+    const h = harness("a\n");
+    edit(h, "ab\n");
+    h.disk.text = "z\n";
+    expect(await h.sync.flush()).toBe("conflict");
+    expect(h.writes).toEqual([]);
+    expect(h.sync.dirty).toBe(true);
+  });
+
+  it("flush that cannot read the disk resolves failed", async () => {
+    const failures: unknown[] = [];
+    const sync = createDocumentSync(
+      "a\n",
+      { read: () => Promise.reject(new Error("gone")), write: async () => {} },
+      { serialize: () => "ab\n", reloaded: () => {}, conflicted: () => {}, knownChanged: () => {}, failed: (e) => failures.push(e) },
+      { setTimeout, clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now },
+    );
+    sync.edited();
+    expect(await sync.flush()).toBe("failed");
+    expect(sync.dirty).toBe(true);
+    expect(failures).toHaveLength(1);
+  });
+
+  it("a watcher check deferred behind a write is dropped when a later report rescheduled it", async () => {
+    const { wait, release } = gated();
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    edit(h, "ab\n");
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    h.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    h.sync.changed();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(quietMs);
+    expect(h.reads).toBe(2);
+    expect(h.conflicts).toBe(0);
+  });
+});
+
+describe("after a rename", () => {
+  it("the same bytes as known change nothing", async () => {
+    const h = harness("a\n");
+    await h.sync.renamed();
+    expect(h.reads).toBe(1);
+    expect(h.reloads).toEqual([]);
+    expect(h.known).toEqual([]);
+  });
+
+  it("rewritten bytes reload a clean document and never conflict", async () => {
+    const h = harness("![](assets/a/x.png)\n");
+    h.disk.text = "![](assets/b/x.png)\n";
+    await h.sync.renamed();
+    expect(h.reloads).toEqual(["![](assets/b/x.png)\n"]);
+    expect(h.conflicts).toBe(0);
+    edit(h, "![](assets/b/x.png)Q\n");
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    expect(h.conflicts).toBe(0);
+    expect(h.disk.text).toBe("![](assets/b/x.png)Q\n");
+  });
+
+  it("rewritten bytes under an edit move known without a reload or a conflict", async () => {
+    const h = harness("a\n");
+    edit(h, "aQ\n");
+    h.disk.text = "b\n";
+    await h.sync.renamed();
+    expect(h.reloads).toEqual([]);
+    expect(h.conflicts).toBe(0);
+    expect(h.known).toEqual(["b\n"]);
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    expect(h.disk.text).toBe("aQ\n");
+  });
+
+  it("a failed read reports the error and changes nothing", async () => {
+    const failures: unknown[] = [];
+    const reloads: string[] = [];
+    const sync = createDocumentSync(
+      "a\n",
+      { read: () => Promise.reject(new Error("gone")), write: async () => {} },
+      { serialize: () => "a\n", reloaded: (t) => reloads.push(t), conflicted: () => {}, knownChanged: () => {}, failed: (e) => failures.push(e) },
+      { setTimeout, clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now },
+    );
+    await sync.renamed();
+    expect(failures).toHaveLength(1);
+    expect(reloads).toEqual([]);
   });
 });

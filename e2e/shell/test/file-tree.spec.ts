@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reloadPage, setRenameField } from "./routes.js";
+import { caretToEndOf, reloadPage, setRenameField, typeText } from "./routes.js";
 
 // The file tree sidebar (task 2.4): open folder, new file, rename (F2 / context menu), delete to
 // trash, click to open, cloudOnly entries greyed with a tooltip, last folder and file restored on
@@ -25,6 +25,12 @@ import { reloadPage, setRenameField } from "./routes.js";
 // called at most once per test, immediately before the one real click that test needs — never
 // inside a `waitUntil` predicate, never for a lookup whose result isn't clicked.
 const STORAGE_KEY = "essaydown:lastWorkspace";
+const EDITOR = '[data-testid="editor"] .ProseMirror';
+// An image under assets/a/, so the rename rewrites the open document's bytes (task 2.16). Before
+// the text paragraph: `caretToEndOf`'s `ArrowDown` reaches a one-line block's end only when that
+// block is the last one.
+const A_MD = "# A\n\n![](assets/a/image.png)\n\nOriginal content.\n";
+const B_MD = "# A\n\n![](assets/b/image.png)\n\nOriginal content.\n";
 
 async function setLastWorkspace(folder: string, file: string | null): Promise<void> {
   await browser.execute(
@@ -99,7 +105,7 @@ describe("the file tree sidebar", () => {
 
   before(() => {
     workspace = mkdtempSync(join(tmpdir(), "essaydown-file-tree-"));
-    writeFileSync(join(workspace, "a.md"), "# A\n\nOriginal content.\n");
+    writeFileSync(join(workspace, "a.md"), A_MD);
     writeFileSync(join(workspace, "a.essaydown.json"), JSON.stringify({ sentences: [] }));
     mkdirSync(join(workspace, "assets", "a"), { recursive: true });
     writeFileSync(join(workspace, "assets", "a", "image.png"), "not-a-real-png");
@@ -119,7 +125,7 @@ describe("the file tree sidebar", () => {
     await waitForSelector(entrySelector("a.md"), "tree-entry:a.md never appeared");
     await (await browser.$(entrySelector("a.md"))).click();
     await waitForTextContent('[data-testid="current-file"]', "a.md", 'current-file never became "a.md"');
-    assert.equal(await textContentOf('[data-testid="current-content"]'), "# A\n\nOriginal content.\n");
+    assert.equal(await textContentOf('[data-testid="current-content"]'), A_MD);
   });
 
   it("renames a.md to b.md via F2, moving the sidecar and assets together", async () => {
@@ -141,7 +147,7 @@ describe("the file tree sidebar", () => {
 
     assert.equal(existsSync(join(workspace, "a.md")), false);
     assert.equal(existsSync(join(workspace, "b.md")), true);
-    assert.equal(readFileSync(join(workspace, "b.md"), "utf8"), "# A\n\nOriginal content.\n");
+    assert.equal(readFileSync(join(workspace, "b.md"), "utf8"), B_MD);
     assert.equal(existsSync(join(workspace, "a.essaydown.json")), false);
     assert.equal(existsSync(join(workspace, "b.essaydown.json")), true);
     assert.equal(existsSync(join(workspace, "assets", "a")), false);
@@ -149,6 +155,17 @@ describe("the file tree sidebar", () => {
 
     // The renamed file was the open one: the main pane and the persisted-restore key follow it.
     await waitForTextContent('[data-testid="current-file"]', "b.md", 'current-file never became "b.md"');
+  });
+
+  it("after renaming the open document, a typed character saves to b.md without a conflict", async () => {
+    // The pane re-read b.md after the rename (DECISIONS #review-2-r0 U20): what it believes is on
+    // disk is the rewritten file, so the next save does not find the disk changed.
+    await waitForTextContent('[data-testid="current-content"]', B_MD, "the pane never re-read the renamed file");
+    await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
+    await typeText(EDITOR, "Q");
+    await browser.pause(700);
+    assert.equal(readFileSync(join(workspace, "b.md"), "utf8"), "# A\n\n![](assets/b/image.png)\n\nOriginal content.Q\n");
+    assert.equal(await exists('[data-testid="conflict-banner"]'), false);
   });
 
   it("relaunch (reloadSession, a real process restart) restores the same file", async () => {

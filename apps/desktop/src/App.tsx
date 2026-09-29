@@ -7,10 +7,22 @@ import type { HasCoachKeyResult, SettingsIO } from "./settings/settings-sync";
 import ConfirmDelete from "./workspace/ConfirmDelete";
 import ContextMenu, { type ContextMenuTarget } from "./workspace/ContextMenu";
 import DocumentPane, { loadDocument, type DocumentPaneHandle, type LoadedDocument } from "./workspace/DocumentPane";
+import type { FlushResult } from "./workspace/document-sync";
 import FileTree from "./workspace/FileTree";
 import { basenameOf, dirnameOf, joinRelative } from "./workspace/paths";
 import { readLastWorkspace, writeLastWorkspace } from "./workspace/storage";
 import { buildTree, type TreeEntry } from "./workspace/tree";
+
+/**
+ * The line a switch, an Open Folder… or a rename shows when the open document is not on disk: the
+ * pane, its banner and its error stay, and nothing moves until the user resolves it
+ * (DECISIONS #review-2-r0 U1).
+ */
+function switchWaits(result: FlushResult): string | null {
+  if (result === "conflict") return "Not switched: choose Reload or Keep mine on 'Changed on disk' first.";
+  if (result === "failed") return "Not switched: this document is not saved yet.";
+  return null;
+}
 
 function describeError(error: unknown): string {
   if (typeof error === "string") return error;
@@ -50,6 +62,8 @@ function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenuTarget | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Beside `error`, never over it: a failed save's message stays while the switch waits.
+  const [waiting, setWaiting] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const settingsIO: SettingsIO = useMemo(
@@ -96,7 +110,9 @@ function App() {
   const openFile = useCallback(
     async (path: string): Promise<void> => {
       try {
-        await pane.current?.flush();
+        const waits = switchWaits((await pane.current?.flush()) ?? "clean");
+        setWaiting(waits);
+        if (waits !== null) return;
         showDocument(path, await loadDocument(path));
         setError(null);
         if (root !== null) writeLastWorkspace({ folder: root, file: path });
@@ -147,7 +163,9 @@ function App() {
   const openFolderDialog = useCallback(async (): Promise<void> => {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected !== "string") return; // the user cancelled the native dialog
-    await pane.current?.flush();
+    const waits = switchWaits((await pane.current?.flush()) ?? "clean");
+    setWaiting(waits);
+    if (waits !== null) return;
     const canonical = await setWorkspace(selected);
     if (canonical === null) return;
     writeLastWorkspace({ folder: canonical, file: null });
@@ -173,7 +191,11 @@ function App() {
       const newPath = joinRelative(dirnameOf(oldPath), trimmed);
       try {
         // A save still pending under the old name would recreate that file after the rename.
-        if (openPath === oldPath) await pane.current?.flush();
+        if (openPath === oldPath) {
+          const waits = switchWaits((await pane.current?.flush()) ?? "clean");
+          setWaiting(waits);
+          if (waits !== null) return;
+        }
         await invoke("rename_file", { oldPath, newPath });
         await refreshTree();
         setError(null);
@@ -313,9 +335,10 @@ function App() {
           }}
         />
       )}
-      {error !== null && (
+      {(error !== null || waiting !== null) && (
         <div className="workspace-error" data-testid="error">
           {error}
+          {waiting !== null && <div data-testid="switch-waits">{waiting}</div>}
         </div>
       )}
       {settingsOpen && <SettingsDialog io={settingsIO} onClose={() => setSettingsOpen(false)} />}
