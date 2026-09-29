@@ -111,13 +111,16 @@ pub fn new_file(state: tauri::State<WorkspaceState>) -> Result<String, Workspace
     workspace::new_file_at(&current_root(&state)?)
 }
 
+/// `rename_file`: `rewritten` is the document's new bytes, computed by the frontend before the
+/// first move; absent when the rename leaves them unchanged.
 #[tauri::command]
 pub fn rename_file(
     state: tauri::State<WorkspaceState>,
     old_path: String,
     new_path: String,
+    rewritten: Option<String>,
 ) -> Result<(), WorkspaceError> {
-    workspace::rename_file_at(&current_root(&state)?, &old_path, &new_path)
+    workspace::rename_file_at(&current_root(&state)?, &old_path, &new_path, rewritten.as_deref())
 }
 
 #[tauri::command]

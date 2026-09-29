@@ -1,3 +1,4 @@
+export { rewriteAssetUrls } from "./assets.js";
 export { format, createFormatter, stringifyOptions, opaqueHandlers, toMarkdownExtensions } from "./format.js";
 export {
   parse,

@@ -26,11 +26,18 @@ import { caretToEndOf, reloadPage, setRenameField, typeText } from "./routes.js"
 // inside a `waitUntil` predicate, never for a lookup whose result isn't clicked.
 const STORAGE_KEY = "essaydown:lastWorkspace";
 const EDITOR = '[data-testid="editor"] .ProseMirror';
-// An image under assets/a/, so the rename rewrites the open document's bytes (task 2.16). Before
-// the text paragraph: `caretToEndOf`'s `ArrowDown` reaches a one-line block's end only when that
-// block is the last one.
-const A_MD = "# A\n\n![](assets/a/image.png)\n\nOriginal content.\n";
-const B_MD = "# A\n\n![](assets/b/image.png)\n\nOriginal content.\n";
+// An image under assets/a/, so the rename rewrites the open document's bytes (task 2.16), and a
+// code span holding the same bytes, an authored literal the rename leaves as written (task 2.18).
+// Before the text paragraph: `caretToEndOf`'s `ArrowDown` reaches a one-line block's end only when
+// that block is the last one.
+const LITERAL = "The literal `assets/a/image.png` stays.";
+const A_MD = `# A\n\n![x](assets/a/image.png)\n\n${LITERAL}\n\nOriginal content.\n`;
+const B_MD = `# A\n\n![x](assets/b/image.png)\n\n${LITERAL}\n\nOriginal content.\n`;
+const IMAGE = `${EDITOR} .image-node img`;
+// A minimal valid 1x1 transparent PNG (images.spec.ts's bytes), so the webview's own decoder proves
+// the rewritten destination renders.
+const PNG_1X1_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 async function setLastWorkspace(folder: string, file: string | null): Promise<void> {
   await browser.execute(
@@ -57,6 +64,13 @@ async function readAttribute(selector: string, attr: string): Promise<string | n
 // `textContent` instead (DECISIONS #022's rule, never a normalising matcher).
 async function textContentOf(selector: string): Promise<string> {
   return browser.execute((sel) => document.querySelector(sel)?.textContent ?? "", selector);
+}
+
+async function imageLoaded(selector: string): Promise<boolean> {
+  return browser.execute((sel) => {
+    const img = document.querySelector(sel);
+    return img instanceof HTMLImageElement && img.complete && img.naturalWidth > 0;
+  }, selector);
 }
 
 async function waitForTextContent(selector: string, expected: string, timeoutMsg: string): Promise<void> {
@@ -108,7 +122,7 @@ describe("the file tree sidebar", () => {
     writeFileSync(join(workspace, "a.md"), A_MD);
     writeFileSync(join(workspace, "a.essaydown.json"), JSON.stringify({ sentences: [] }));
     mkdirSync(join(workspace, "assets", "a"), { recursive: true });
-    writeFileSync(join(workspace, "assets", "a", "image.png"), "not-a-real-png");
+    writeFileSync(join(workspace, "assets", "a", "image.png"), Buffer.from(PNG_1X1_BASE64, "base64"));
     // `c.md.icloud`: `list_tree` reports this as `c.md`, `cloudOnly: true` (task 2.2).
     writeFileSync(join(workspace, "c.md.icloud"), "");
   });
@@ -155,6 +169,14 @@ describe("the file tree sidebar", () => {
 
     // The renamed file was the open one: the main pane and the persisted-restore key follow it.
     await waitForTextContent('[data-testid="current-file"]', "b.md", 'current-file never became "b.md"');
+    // The rewritten destination renders from assets/b/, and the rewrite raised no conflict.
+    await browser.waitUntil(async () => imageLoaded(IMAGE), {
+      timeout: 15000,
+      timeoutMsg: "the image never rendered from assets/b/ after the rename",
+    });
+    // assets/a/ no longer exists, so a loaded image is the rewritten one; its src names it too.
+    assert.equal(decodeURIComponent((await readAttribute(IMAGE, "src")) ?? "").includes("assets/b/image.png"), true);
+    assert.equal(await exists('[data-testid="conflict-banner"]'), false);
   });
 
   it("after renaming the open document, a typed character saves to b.md without a conflict", async () => {
@@ -164,7 +186,7 @@ describe("the file tree sidebar", () => {
     await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
     await typeText(EDITOR, "Q");
     await browser.pause(700);
-    assert.equal(readFileSync(join(workspace, "b.md"), "utf8"), "# A\n\n![](assets/b/image.png)\n\nOriginal content.Q\n");
+    assert.equal(readFileSync(join(workspace, "b.md"), "utf8"), B_MD.replace("Original content.\n", "Original content.Q\n"));
     assert.equal(await exists('[data-testid="conflict-banner"]'), false);
   });
 

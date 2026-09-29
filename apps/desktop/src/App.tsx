@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { rewriteAssetUrls } from "@essaydown/core";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -11,7 +12,7 @@ import ContextMenu, { type ContextMenuTarget } from "./workspace/ContextMenu";
 import DocumentPane, { loadDocument, type DocumentPaneHandle, type LoadedDocument } from "./workspace/DocumentPane";
 import type { FlushResult } from "./workspace/document-sync";
 import FileTree from "./workspace/FileTree";
-import { basenameOf, dirnameOf, joinRelative } from "./workspace/paths";
+import { basenameOf, dirnameOf, joinRelative, stemOf } from "./workspace/paths";
 import { readLastWorkspace, writeLastWorkspace } from "./workspace/storage";
 import { buildTree, type TreeEntry } from "./workspace/tree";
 
@@ -231,7 +232,10 @@ function App() {
           setWaiting(waits);
           if (waits !== null) return;
         }
-        await invoke("rename_file", { oldPath, newPath });
+        // The rewritten bytes are computed before the first move, so a failed read changes nothing.
+        const source = await invoke<string>("read_doc", { path: oldPath });
+        const next = rewriteAssetUrls(source, stemOf(oldPath), stemOf(newPath));
+        await invoke("rename_file", { oldPath, newPath, rewritten: next === source ? undefined : next });
         await refreshTree();
         setError(null);
         if (openPath === oldPath) {

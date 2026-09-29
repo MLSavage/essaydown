@@ -299,21 +299,23 @@ pub fn new_file_at(root: &Path) -> Result<String, WorkspaceError> {
 }
 
 /// `rename_file`: renames the document, its sidecar (if present) and its `assets/<stem>` directory
-/// (if present) together, then rewrites every relative image URL in the moved document that points
-/// into `assets/<oldstem>/` to `assets/<newstem>/`. The target document, sidecar or assets directory
-/// already existing is `AlreadyExists` and changes nothing; a failure renaming the sidecar or the
-/// assets directory rolls back everything renamed so far, so a caller never observes a half-renamed
-/// document.
+/// (if present) together as one transaction. `rewritten` is the document's new bytes, computed by
+/// the caller before the first move (core's `rewriteAssetUrls`, which rewrites only the
+/// destinations that pointed into `assets/<oldstem>/`); `None` leaves the bytes untouched. The
+/// target document, sidecar or assets directory already existing is `AlreadyExists` and changes
+/// nothing. Then, in order: the doc is renamed; `rewritten` is installed; the sidecar is moved; the
+/// assets directory is moved. A failure at any step undoes every step before it, in reverse (the
+/// doc's original bytes restored before it is renamed back), so a caller never observes a
+/// half-renamed document. Every rollback result is checked: a failed rollback is returned as its
+/// own `Io(kind)`, and the step's first error, which that return replaces, goes to stderr.
 pub fn rename_file_at(
     root: &Path,
     old_relative: &str,
     new_relative: &str,
+    rewritten: Option<&str>,
 ) -> Result<(), WorkspaceError> {
     let old_doc = resolve_workspace_path(root, old_relative, false)?;
     let new_doc = resolve_workspace_path(root, new_relative, false)?;
-
-    let old_stem = file_stem_of(old_relative).ok_or(WorkspaceError::InvalidPath)?;
-    let new_stem = file_stem_of(new_relative).ok_or(WorkspaceError::InvalidPath)?;
 
     let old_sidecar_rel = sidecar_relative_for(old_relative).ok_or(WorkspaceError::InvalidPath)?;
     let new_sidecar_rel = sidecar_relative_for(new_relative).ok_or(WorkspaceError::InvalidPath)?;
@@ -329,34 +331,74 @@ pub fn rename_file_at(
         return Err(WorkspaceError::Io(io::ErrorKind::AlreadyExists));
     }
 
-    std::fs::rename(&old_doc, &new_doc)?;
+    // Read before the first move, so a failed read changes nothing.
+    let original = match rewritten {
+        Some(_) => Some(std::fs::read(&old_doc)?),
+        None => None,
+    };
 
-    let sidecar_existed = old_sidecar.exists();
-    if sidecar_existed {
-        if let Err(e) = std::fs::rename(&old_sidecar, &new_sidecar) {
-            let _ = std::fs::rename(&new_doc, &old_doc);
-            return Err(e.into());
-        }
-    }
+    // Each completed step's undo, run in reverse when a later step fails.
+    let mut undo: Vec<Box<dyn Fn() -> io::Result<()>>> = Vec::new();
 
-    let assets_existed = old_assets.exists();
-    if assets_existed {
-        if let Err(e) = std::fs::rename(&old_assets, &new_assets) {
-            if sidecar_existed {
-                let _ = std::fs::rename(&new_sidecar, &old_sidecar);
+    let step = |result: io::Result<()>, undo: &[Box<dyn Fn() -> io::Result<()>>]| -> Result<(), WorkspaceError> {
+        let Err(first) = result else { return Ok(()) };
+        let mut rollback_error = None;
+        for undo_step in undo.iter().rev() {
+            if let Err(e) = undo_step() {
+                rollback_error.get_or_insert(e.kind());
             }
-            let _ = std::fs::rename(&new_doc, &old_doc);
-            return Err(e.into());
         }
+        match rollback_error {
+            Some(kind) => {
+                eprintln!("rename_file: rollback failed ({kind:?}) after {:?}", first.kind());
+                Err(WorkspaceError::Io(kind))
+            }
+            None => Err(first.into()),
+        }
+    };
+
+    std::fs::rename(&old_doc, &new_doc)?;
+    {
+        let (old_doc, new_doc) = (old_doc.clone(), new_doc.clone());
+        undo.push(Box::new(move || fault("undo-rename-doc").and_then(|()| std::fs::rename(&new_doc, &old_doc))));
     }
 
-    let content = std::fs::read_to_string(&new_doc)?;
-    let old_needle = format!("assets/{old_stem}/");
-    if content.contains(&old_needle) {
-        let rewritten = content.replace(&old_needle, &format!("assets/{new_stem}/"));
-        atomic_write(&new_doc, rewritten.as_bytes())?;
+    if let (Some(bytes), Some(original)) = (rewritten, original) {
+        step(fault("write-doc").and_then(|()| atomic_write(&new_doc, bytes.as_bytes())), &undo)?;
+        let new_doc = new_doc.clone();
+        undo.push(Box::new(move || fault("undo-write-doc").and_then(|()| atomic_write(&new_doc, &original))));
     }
 
+    if old_sidecar.exists() {
+        step(fault("rename-sidecar").and_then(|()| std::fs::rename(&old_sidecar, &new_sidecar)), &undo)?;
+        undo.push(Box::new(move || fault("undo-rename-sidecar").and_then(|()| std::fs::rename(&new_sidecar, &old_sidecar))));
+    }
+
+    if old_assets.exists() {
+        step(std::fs::rename(&old_assets, &new_assets), &undo)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam for `rename_file_at`: the named steps fail with the given kind, on this thread only.
+    static FAULTS: std::cell::RefCell<Vec<(&'static str, io::ErrorKind)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `rename_file_at`'s fault seam: `Ok(())` outside tests; in a test, the error a step was told to raise.
+#[cfg(test)]
+fn fault(step: &str) -> io::Result<()> {
+    FAULTS.with(|faults| match faults.borrow().iter().find(|(name, _)| *name == step) {
+        Some((_, kind)) => Err(io::Error::from(*kind)),
+        None => Ok(()),
+    })
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn fault(_step: &str) -> io::Result<()> {
     Ok(())
 }
 
@@ -840,15 +882,16 @@ mod tests {
     // --- rename_file ---
 
     #[test]
-    fn rename_moves_doc_sidecar_and_assets_and_rewrites_image_urls() {
+    fn rename_moves_doc_sidecar_and_assets_and_installs_the_rewritten_bytes() {
         let root = scratch_dir();
-        std::fs::write(root.join("a.md"), "See ![x](assets/a/x.png) and ![y](assets/a/y.png).")
-            .unwrap();
+        std::fs::write(root.join("a.md"), "See ![x](assets/a/x.png) and `assets/a/x.png`.").unwrap();
         std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
         std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
         std::fs::write(root.join("assets").join("a").join("x.png"), "img").unwrap();
 
-        rename_file_at(&root, "a.md", "b.md").unwrap();
+        // The caller's bytes are installed verbatim: the code span is the caller's to keep.
+        let rewritten = "See ![x](assets/b/x.png) and `assets/a/x.png`.";
+        rename_file_at(&root, "a.md", "b.md", Some(rewritten)).unwrap();
 
         assert!(!root.join("a.md").exists());
         assert!(!root.join("a.essaydown.json").exists());
@@ -858,8 +901,146 @@ mod tests {
             "{\"version\":1}"
         );
         assert!(root.join("assets").join("b").join("x.png").exists());
-        let doc = std::fs::read_to_string(root.join("b.md")).unwrap();
-        assert_eq!(doc, "See ![x](assets/b/x.png) and ![y](assets/b/y.png).");
+        assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), rewritten);
+    }
+
+    #[test]
+    fn rename_without_rewritten_bytes_leaves_every_byte_of_the_doc() {
+        let root = scratch_dir();
+        std::fs::write(root.join("a.md"), "![x](assets/a/x.png)").unwrap();
+        std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
+
+        rename_file_at(&root, "a.md", "b.md", None).unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), "![x](assets/a/x.png)");
+        assert!(root.join("assets").join("b").is_dir());
+    }
+
+    /// Arms `rename_file_at`'s fault seam for this thread; disarmed again on drop.
+    struct Faults;
+    impl Faults {
+        fn arm(faults: &[(&'static str, io::ErrorKind)]) -> Self {
+            FAULTS.with(|f| *f.borrow_mut() = faults.to_vec());
+            Faults
+        }
+    }
+    impl Drop for Faults {
+        fn drop(&mut self) {
+            FAULTS.with(|f| f.borrow_mut().clear());
+        }
+    }
+
+    fn assert_nothing_renamed(root: &Path, doc: &str) {
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), doc);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.essaydown.json")).unwrap(),
+            "{\"version\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("assets").join("a").join("x.png")).unwrap(),
+            "img"
+        );
+        assert!(!root.join("b.md").exists());
+        assert!(!root.join("b.essaydown.json").exists());
+        assert!(!root.join("assets").join("b").exists());
+    }
+
+    fn doc_sidecar_and_assets(root: &Path, doc: &str) {
+        std::fs::write(root.join("a.md"), doc).unwrap();
+        std::fs::write(root.join("a.essaydown.json"), "{\"version\":1}").unwrap();
+        std::fs::create_dir_all(root.join("assets").join("a")).unwrap();
+        std::fs::write(root.join("assets").join("a").join("x.png"), "img").unwrap();
+    }
+
+    #[test]
+    fn rename_rolls_the_doc_back_with_its_original_bytes_when_the_rewritten_write_fails() {
+        let root = scratch_dir();
+        doc_sidecar_and_assets(&root, "![x](assets/a/x.png)");
+        let _faults = Faults::arm(&[("write-doc", io::ErrorKind::PermissionDenied)]);
+
+        let err = rename_file_at(&root, "a.md", "b.md", Some("![x](assets/b/x.png)")).unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::PermissionDenied)));
+        assert_nothing_renamed(&root, "![x](assets/a/x.png)");
+    }
+
+    #[test]
+    fn rename_rolls_back_the_rewritten_bytes_and_the_doc_when_moving_the_sidecar_fails() {
+        let root = scratch_dir();
+        doc_sidecar_and_assets(&root, "![x](assets/a/x.png)");
+        let _faults = Faults::arm(&[("rename-sidecar", io::ErrorKind::PermissionDenied)]);
+
+        let err = rename_file_at(&root, "a.md", "b.md", Some("![x](assets/b/x.png)")).unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::PermissionDenied)));
+        assert_nothing_renamed(&root, "![x](assets/a/x.png)");
+    }
+
+    #[test]
+    fn rename_returns_the_rollback_kind_when_rolling_the_doc_back_fails() {
+        let root = scratch_dir();
+        doc_sidecar_and_assets(&root, "![x](assets/a/x.png)");
+        let _faults = Faults::arm(&[
+            ("write-doc", io::ErrorKind::PermissionDenied),
+            ("undo-rename-doc", io::ErrorKind::TimedOut),
+        ]);
+
+        let err = rename_file_at(&root, "a.md", "b.md", Some("![x](assets/b/x.png)")).unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::TimedOut)));
+        // The failed undo left the doc where the rename put it, still holding its original bytes.
+        assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), "![x](assets/a/x.png)");
+    }
+
+    #[test]
+    fn rename_returns_the_rollback_kind_when_restoring_the_original_bytes_fails() {
+        let root = scratch_dir();
+        doc_sidecar_and_assets(&root, "![x](assets/a/x.png)");
+        let _faults = Faults::arm(&[
+            ("rename-sidecar", io::ErrorKind::PermissionDenied),
+            ("undo-write-doc", io::ErrorKind::TimedOut),
+        ]);
+
+        let err = rename_file_at(&root, "a.md", "b.md", Some("![x](assets/b/x.png)")).unwrap_err();
+
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::TimedOut)));
+        // The remaining undo still ran: the doc is back under its old name.
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/b/x.png)");
+    }
+
+    #[test]
+    fn rename_returns_the_rollback_kind_when_moving_the_sidecar_back_fails() {
+        let root = scratch_dir();
+        doc_sidecar_and_assets(&root, "![x](assets/a/x.png)");
+        let _faults = Faults::arm(&[("undo-rename-sidecar", io::ErrorKind::TimedOut)]);
+
+        // The same real assets-move failure as
+        // `rename_rolls_back_doc_and_sidecar_when_moving_assets_fails`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root.join("assets"), std::fs::Permissions::from_mode(0o555))
+                .unwrap();
+        }
+        #[cfg(windows)]
+        let held = std::fs::File::open(root.join("assets").join("a").join("x.png")).unwrap();
+
+        let result = rename_file_at(&root, "a.md", "b.md", Some("![x](assets/b/x.png)"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root.join("assets"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        #[cfg(windows)]
+        drop(held);
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::TimedOut)));
+        // The sidecar stayed where the failed undo left it; the steps before it were still undone.
+        assert!(root.join("b.essaydown.json").exists());
+        assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/a/x.png)");
     }
 
     #[test]
@@ -867,7 +1048,7 @@ mod tests {
         let root = scratch_dir();
         std::fs::write(root.join("a.md"), "no images here").unwrap();
 
-        rename_file_at(&root, "a.md", "b.md").unwrap();
+        rename_file_at(&root, "a.md", "b.md", None).unwrap();
 
         assert!(!root.join("a.md").exists());
         assert_eq!(std::fs::read_to_string(root.join("b.md")).unwrap(), "no images here");
@@ -881,7 +1062,7 @@ mod tests {
         std::fs::write(root.join("a.md"), "old").unwrap();
         std::fs::write(root.join("b.md"), "existing").unwrap();
 
-        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
+        let err = rename_file_at(&root, "a.md", "b.md", None).unwrap_err();
 
         assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
         assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "old");
@@ -898,7 +1079,7 @@ mod tests {
         // A plain file already sitting at the assets destination.
         std::fs::write(root.join("assets").join("b"), "blocker").unwrap();
 
-        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
+        let err = rename_file_at(&root, "a.md", "b.md", None).unwrap_err();
 
         assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
         assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/a/x.png)");
@@ -926,7 +1107,7 @@ mod tests {
         // file-over-directory rename would otherwise swallow silently.
         std::fs::create_dir_all(root.join("assets").join("b")).unwrap();
 
-        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
+        let err = rename_file_at(&root, "a.md", "b.md", None).unwrap_err();
 
         assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
         assert_eq!(std::fs::read_to_string(root.join("a.md")).unwrap(), "![x](assets/a/x.png)");
@@ -951,7 +1132,7 @@ mod tests {
         // A pre-existing sidecar already sitting at the target, with no target document.
         std::fs::write(root.join("b.essaydown.json"), "{\"version\":2}").unwrap();
 
-        let err = rename_file_at(&root, "a.md", "b.md").unwrap_err();
+        let err = rename_file_at(&root, "a.md", "b.md", None).unwrap_err();
 
         assert!(matches!(err, WorkspaceError::Io(io::ErrorKind::AlreadyExists)));
         assert!(root.join("a.md").exists());
@@ -992,7 +1173,7 @@ mod tests {
         #[cfg(windows)]
         let held = std::fs::File::open(root.join("assets").join("a").join("x.png")).unwrap();
 
-        let result = rename_file_at(&root, "a.md", "b.md");
+        let result = rename_file_at(&root, "a.md", "b.md", Some("![x](assets/b/x.png)"));
 
         #[cfg(unix)]
         {
