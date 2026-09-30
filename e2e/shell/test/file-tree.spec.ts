@@ -97,6 +97,11 @@ async function reload(): Promise<void> {
 // `POST /session`, while a page reload only proves the frontend path (docs/lessons.md
 // [2.4]'s attempt-3 lesson). The webview's on-disk storage (the persisted-restore key included)
 // survives the process restart the same way a real relaunch's would.
+// That is the external provider's behaviour only (tauri-driver + WebKitWebDriver, Linux here).
+// On the embedded provider (tauri-plugin-wdio-webdriver: macOS, Windows, and this container's
+// embedded leg, `e2e/shell/provider.ts`) `reloadSession()` re-creates the WebDriver session inside
+// the still-running app process rather than restarting it, so in-memory state — the error banner
+// included — survives a "relaunch" here where it would not on the external leg (task 2.22).
 async function relaunch(): Promise<void> {
   try {
     await browser.reloadSession();
@@ -120,7 +125,11 @@ describe("the file tree sidebar", () => {
   before(() => {
     workspace = mkdtempSync(join(tmpdir(), "essaydown-file-tree-"));
     writeFileSync(join(workspace, "a.md"), A_MD);
-    writeFileSync(join(workspace, "a.essaydown.json"), JSON.stringify({ sentences: [] }));
+    // The shape `emptySidecar()` serialises (`{"version":1}`, packages/core/src/sidecar.ts): a
+    // `{"sentences":[]}` fixture fails `sidecarSchema` ("sidecar version missing"), and since 2.19
+    // the first save re-reads the sidecar and reports the parse failure through the error banner
+    // (`chooseSidecarForWrite`, apps/desktop/src/workspace/sidecar-sync.ts) instead of skipping it.
+    writeFileSync(join(workspace, "a.essaydown.json"), JSON.stringify({ version: 1 }));
     mkdirSync(join(workspace, "assets", "a"), { recursive: true });
     writeFileSync(join(workspace, "assets", "a", "image.png"), Buffer.from(PNG_1X1_BASE64, "base64"));
     // `c.md.icloud`: `list_tree` reports this as `c.md`, `cloudOnly: true` (task 2.2).
@@ -175,7 +184,11 @@ describe("the file tree sidebar", () => {
       timeoutMsg: "the image never rendered from assets/b/ after the rename",
     });
     // assets/a/ no longer exists, so a loaded image is the rewritten one; its src names it too.
-    assert.equal(decodeURIComponent((await readAttribute(IMAGE, "src")) ?? "").includes("assets/b/image.png"), true);
+    // On Windows a canonicalised src decodes to a `\`-separated path (`\\?\C:\...\assets\b\...`),
+    // so the separator is normalised to `/` before the check; the Markdown destination itself
+    // (asserted above via B_MD) is always POSIX-separated.
+    const imageSrc = decodeURIComponent((await readAttribute(IMAGE, "src")) ?? "").replace(/\\/g, "/");
+    assert.equal(imageSrc.includes("assets/b/image.png"), true);
     assert.equal(await exists('[data-testid="conflict-banner"]'), false);
   });
 
@@ -188,6 +201,7 @@ describe("the file tree sidebar", () => {
     await browser.pause(700);
     assert.equal(readFileSync(join(workspace, "b.md"), "utf8"), B_MD.replace("Original content.\n", "Original content.Q\n"));
     assert.equal(await exists('[data-testid="conflict-banner"]'), false);
+    assert.equal(await exists('[data-testid="error"]'), false);
   });
 
   it("relaunch (reloadSession, a real process restart) restores the same file", async () => {

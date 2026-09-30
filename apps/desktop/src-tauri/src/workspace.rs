@@ -950,7 +950,7 @@ mod tests {
     fn new_file_on_u64_max_existing_name_is_io_error_not_panic() {
         let root = scratch_dir();
         std::fs::write(
-            format!("{}/Untitled-{}.md", root.display(), u64::MAX),
+            root.join(format!("Untitled-{}.md", u64::MAX)),
             "# absurd\n",
         )
         .unwrap();

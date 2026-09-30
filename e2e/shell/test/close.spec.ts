@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
+import { selectDriverProvider } from "../provider.js";
 import { caretToEndOf, reloadPage, typeText } from "./routes.js";
 
 // The close barrier (task 2.17, DECISIONS #review-2-r0 U2): a keystroke inside the 500 ms autosave
@@ -71,12 +72,32 @@ describe("the close barrier", () => {
     });
     assert.equal(readFileSync(doc, "utf8"), "HelloX\n");
 
-    await browser.reloadSession();
-    await browser.waitUntil(async () => (await textContentOf('[data-testid="current-file"]')) === "a.md", {
-      timeout: 15000,
-      interval: 25,
-      timeoutMsg: "a.md was not restored after the relaunch",
-    });
-    assert.equal(readFileSync(doc, "utf8"), "HelloX\n");
+    // The relaunch read-back needs a real process restart: on the external provider (tauri-driver
+    // + WebKitWebDriver, Linux) `reloadSession()` ends the app process and starts a fresh one, so
+    // reading the file back afterwards proves restore-on-launch read it from disk. On the embedded
+    // provider (tauri-plugin-wdio-webdriver: macOS, Windows, and this container's embedded leg,
+    // `e2e/shell/provider.ts`) `reloadSession()` only re-creates the WebDriver session inside the
+    // still-running app process — the window this test just destroyed via close-requested is gone,
+    // so there is no process left to relaunch into, and the on-disk byte assertion above is where
+    // this leg's proof ends (task 2.22; docs/V1.1-BACKLOG.md).
+    if (selectDriverProvider(platform(), process.env.ESSAYDOWN_E2E_DRIVER) === "external") {
+      await browser.reloadSession();
+      await browser.waitUntil(async () => (await textContentOf('[data-testid="current-file"]')) === "a.md", {
+        timeout: 15000,
+        interval: 25,
+        timeoutMsg: "a.md was not restored after the relaunch",
+      });
+      assert.equal(readFileSync(doc, "utf8"), "HelloX\n");
+    } else {
+      // Nothing left to hand back to WDIO's own end-of-run teardown: `@wdio/runner`'s
+      // `Runner.endSession()` otherwise issues a real `DELETE /session` against the server that
+      // just exited with the app, and that ECONNREFUSED fails the whole spec file
+      // (`FAILED in undefined`) after every assertion above already passed. `endSession()` skips
+      // the DELETE precisely when `browser.sessionId` is falsy — the same state it leaves the
+      // browser in itself once a *live* teardown succeeds (`@wdio/runner/build/index.js`) — so this
+      // marks the session the same way the library would, honestly recording that this leg has
+      // nothing left to end.
+      (browser as unknown as { sessionId: string | undefined }).sessionId = undefined;
+    }
   });
 });
