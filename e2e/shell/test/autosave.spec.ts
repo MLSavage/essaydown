@@ -107,6 +107,16 @@ describe("autosave and external changes", () => {
     assert.equal(after.title, "Synced title");
     assert.equal(after.topicQuestion, "Synced question");
     assert.equal(readFileSync(doc, "utf8"), "HelloXV\n");
+
+    // The second save after the adoption (DECISIONS #review-2-r1 U5): the disk now equals what the
+    // pane wrote, so this save writes the pane's baseline — which must be the adopted sidecar.
+    await caretToEndOf(EDITOR, `${EDITOR} p`);
+    await typeText(EDITOR, "U");
+    await browser.pause(600);
+    const second = JSON.parse(readFileSync(sidecarPath, "utf8")) as { title: string; topicQuestion: string };
+    assert.equal(second.title, "Synced title");
+    assert.equal(second.topicQuestion, "Synced question");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXVU\n");
   });
 
   it("an external append to the clean document is visible within 1 s and is not saved back", async () => {
@@ -122,7 +132,7 @@ describe("autosave and external changes", () => {
     assert.equal(await reloads(), before + 1);
     assert.equal(await exists(CONFLICT), false);
     await browser.pause(700);
-    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n\nAppended by another app.\n");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXVU\n\nAppended by another app.\n");
   });
 
   it("an external change under an edit raises 'Changed on disk'; Keep mine overwrites it", async () => {
@@ -133,10 +143,10 @@ describe("autosave and external changes", () => {
     assert.equal(await textContentOf(`${CONFLICT} span`), "Changed on disk");
     // Saving is suspended while the banner is up: the external text is still the file.
     await browser.pause(700);
-    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n\nAppended by another app.\n\nThird paragraph.\n");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXVU\n\nAppended by another app.\n\nThird paragraph.\n");
 
     await clickCentreOf('[data-testid="conflict-keep-mine"]');
-    const mine = "HelloXV\n\nAppended by another app.Y\n";
+    const mine = "HelloXVU\n\nAppended by another app.Y\n";
     await waitFor(async () => readFileSync(doc, "utf8") === mine, 3000, "Keep mine did not overwrite the file");
     await waitFor(async () => !(await exists(CONFLICT)), 3000, "the banner stayed after Keep mine");
     assert.equal((await textContentOf(EDITOR)).includes("Third paragraph."), false);
@@ -159,7 +169,19 @@ describe("autosave and external changes", () => {
     assert.equal(await exists(CONFLICT), false);
     assert.equal((await textContentOf(EDITOR)).includes("Z"), false);
     await browser.pause(700);
-    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n\nAppended by another app.Y\n\nFourth paragraph.\n");
+    assert.equal(readFileSync(doc, "utf8"), "HelloXVU\n\nAppended by another app.Y\n\nFourth paragraph.\n");
+
+    // A save after the reload still writes the adopted sidecar (DECISIONS #review-2-r1 U5).
+    await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
+    await typeText(EDITOR, "J");
+    await browser.pause(600);
+    assert.equal(readFileSync(doc, "utf8"), "HelloXVU\n\nAppended by another app.Y\n\nFourth paragraph.J\n");
+    const sidecar = JSON.parse(readFileSync(join(workspace, "a.essaydown.json"), "utf8")) as {
+      title: string;
+      topicQuestion: string;
+    };
+    assert.equal(sidecar.title, "Synced title");
+    assert.equal(sidecar.topicQuestion, "Synced question");
   });
 
   it("a truncate then a rewrite 300 ms later is one reload, not two", async () => {

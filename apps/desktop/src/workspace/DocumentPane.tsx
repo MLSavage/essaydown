@@ -17,7 +17,7 @@ import { createDocumentSync, type DocumentSync, type FlushResult } from "./docum
 import { createImageNodeView } from "./image-view";
 import { imagePastePlugin } from "./image-paste";
 import { sidecarPathFor } from "./paths";
-import { chooseSidecarForWrite } from "./sidecar-sync";
+import { createSidecarBaseline } from "./sidecar-sync";
 
 /** What `loadDocument` read for one path: the file's bytes and its sidecar. */
 export interface LoadedDocument {
@@ -117,38 +117,40 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
   const syncRef = useRef<DocumentSync | null>(null);
 
   useEffect(() => {
-    // The sidecar's raw JSON text as this pane last read or wrote it (task 2.19); reset on every
-    // reload of this document (a new `initial`), and moved forward by every read and write below.
-    const sidecarKnownRaw = { current: initial.sidecarRaw };
+    // The sidecar's raw JSON text and the sidecar it stands for, as this pane last read or wrote
+    // them (tasks 2.19, 2.23); reset on every reload of this document (a new `initial`), and moved
+    // forward together by every write below. The store's `document.sidecar` is never the next
+    // write's source: this build has no in-app sidecar edit (docs/V1.1-BACKLOG.md
+    // `[review-2-r1, sidecar baseline vs store]`).
+    const baseline = createSidecarBaseline(initial.sidecarRaw, initial.sidecar);
     const sync = createDocumentSync(
       initial.text,
       {
         read: () => invoke<string>("read_doc", { path: pathRef.current }),
         write: async (text) => {
-          // The same synchronous step as `serialize` (document-sync.ts): the sidecar is read from
+          // The same synchronous step as `serialize` (document-sync.ts): the root is read from
           // the state `text` was serialised from, before the first `await`.
           const at = pathRef.current;
-          const { root, sidecar } = storeRef.current.getState().document;
+          const { root } = storeRef.current.getState().document;
           await invoke("write_doc", { path: at, contents: text });
           const sidecarPath = sidecarPathFor(at);
           // Re-read before writing: `watch.rs` reports `.md` paths only, so a sidecar-only change
           // by another writer is never seen except here (DECISIONS #review-2-r0 U5).
           const diskRaw = await invoke<string | null>("read_sidecar", { path: sidecarPath });
-          const choice = chooseSidecarForWrite(sidecarKnownRaw.current, diskRaw, sidecar, root);
+          const choice = baseline.choose(diskRaw, root);
           if (choice.action === "skip") {
             errorRef.current(describe(choice.error));
             return;
           }
           const raw = `${JSON.stringify(choice.sidecar, null, 2)}\n`;
           await invoke("write_sidecar", { path: sidecarPath, contents: raw });
-          sidecarKnownRaw.current = raw;
+          baseline.wrote(raw, choice.sidecar);
         },
       },
       {
         serialize: () => format(storeRef.current.getState().document.root),
         reloaded: (text) => {
-          const { sidecar } = storeRef.current.getState().document;
-          setStore(storeFor(text, sidecar));
+          setStore(storeFor(text, baseline.current()));
           setConflict(false);
           setReloads((n) => n + 1);
         },

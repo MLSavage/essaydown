@@ -51,3 +51,32 @@ export function chooseSidecarForWrite(
   }
   return { action: "write", sidecar: refresh(inMemory, root) };
 }
+
+/**
+ * The pane's sidecar baseline (task 2.23, DECISIONS #review-2-r1 U5): the raw JSON text the pane
+ * last read or wrote and the parsed sidecar that text stands for, held together so one never moves
+ * without the other. 2.19 moved the raw text after a write but built the next write from the store's
+ * stale sidecar, so the second save after an external write found the disk equal to the raw
+ * baseline and wrote the stale copy over the values it had just adopted.
+ */
+export interface SidecarBaseline {
+  /** `chooseSidecarForWrite` with this baseline's raw text and its own sidecar as `inMemory`. */
+  choose(diskRaw: string | null, root: Root): SidecarWriteChoice;
+  /** After `write_sidecar` resolves: the bytes written and the sidecar they encode, both at once. */
+  wrote(raw: string, sidecar: Sidecar): void;
+  /** The sidecar the next write (or a reload's store) starts from. */
+  current(): Sidecar;
+}
+
+export function createSidecarBaseline(initialRaw: string | null, initialSidecar: Sidecar): SidecarBaseline {
+  let raw = initialRaw;
+  let sidecar = initialSidecar;
+  return {
+    choose: (diskRaw, root) => chooseSidecarForWrite(raw, diskRaw, sidecar, root),
+    wrote: (nextRaw, nextSidecar) => {
+      raw = nextRaw;
+      sidecar = nextSidecar;
+    },
+    current: () => sidecar,
+  };
+}
