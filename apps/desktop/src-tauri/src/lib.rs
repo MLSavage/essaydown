@@ -1,5 +1,6 @@
 mod coach_key;
 mod commands;
+mod menu;
 mod settings;
 mod watch;
 mod workspace;
@@ -18,10 +19,22 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
     // Embedded WebDriver server for the WDIO Tauri plugin's macOS and Windows shell-e2e provider
     // (PRD §4: "debug/test builds only"; Windows moved here at 2.1.g1 — actions/runner-images
     // #14738 makes the tauri-driver -> msedgedriver route unable to create a session at all).
-    // Ubuntu alone drives the app through the cargo-installed tauri-driver and never loads this
-    // plugin.
+    // It is registered on every debug build, Linux included; Ubuntu's shell e2e alone drives the
+    // app through the cargo-installed tauri-driver instead and never connects to it.
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+
+    // macOS only (Linux and Windows keep no menu bar): tauri's default menu with its Quit replaced
+    // by a custom item that closes every window through the frontend's close barrier, because the
+    // predefined Quit (`terminate:`) raises no window or exit event (`menu.rs`, #review-2-r1 U2).
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(|handle| menu::build_menu(handle, &menu::default_menu_spec()))
+        .on_menu_event(|app, event| {
+            if menu::quit_requested(event.id()) {
+                menu::request_quit(app);
+            }
+        });
 
     builder
         .plugin(tauri_plugin_fs::init())
