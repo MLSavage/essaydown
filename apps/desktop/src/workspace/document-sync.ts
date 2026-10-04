@@ -53,7 +53,10 @@ export interface SyncTimers {
 export interface SyncCallbacks {
   /** The canonical Markdown of the editor's document, read at save time. */
   serialize(): string;
-  /** A clean document's file changed on disk: replace the editor's document with `text`. */
+  /**
+   * Replace the editor's document with `text`: a clean document's file changed on disk, or a
+   * rename rewrote the asset URLs of a dirty one (then the document stays dirty).
+   */
   reloaded(text: string): void;
   /** The file changed on disk while the editor was dirty: show the banner. */
   conflicted(): void;
@@ -93,15 +96,18 @@ export interface DocumentSync {
   /**
    * Save now if dirty (before a rename or a switch), whatever the timer says, after any write in
    * flight. `clean` and `saved` mean the disk holds the editor's document; `conflict` and `failed`
-   * mean it does not, and the edit is still dirty.
+   * mean it does not, and the edit is still dirty. An edit that lands during the write is written
+   * too, before `saved` (DECISIONS #review-2-r2 W1).
    */
   flush(): Promise<FlushResult>;
   /**
    * The document was renamed (the I/O now reads the new path), and the rename may have rewritten
-   * its image URLs: re-read it. The same bytes as `known` change nothing; different bytes become
-   * `known` and, when clean, reload like an external change. Never a conflict: the rename was ours.
+   * its image URLs with `rewrite`: re-read it. The same bytes as `known` change nothing; different
+   * bytes become `known` and, when clean, reload like an external change. When dirty, the editor
+   * is handed `rewrite` of its own document and stays dirty, so the next save writes the edit with
+   * the new URLs (DECISIONS #review-2-r2 W2). Never a conflict: the rename was ours.
    */
-  renamed(): Promise<void>;
+  renamed(rewrite: (text: string) => string): Promise<void>;
   /** Stop every timer; later reports and edits are ignored. */
   dispose(): void;
   readonly dirty: boolean;
@@ -185,25 +191,43 @@ export function createDocumentSync(
     return "saved";
   };
 
-  const save = (): Promise<FlushResult> =>
-    serialised(async () => {
-      if (disposed || conflict) return conflict ? "conflict" : "clean";
-      if (!dirty) return "clean";
-      let disk: string;
-      try {
-        disk = await io.read();
-      } catch (error) {
-        callbacks.failed(error);
-        return "failed";
-      }
-      if (disposed) return "clean";
-      if (conflict) return "conflict";
-      if (disk !== known) {
-        enterConflict();
-        return "conflict";
-      }
-      return write();
-    });
+  // Only ever inside a `serialised` operation: re-read, and write unless the disk changed.
+  const saveOnce = async (): Promise<FlushResult> => {
+    if (disposed || conflict) return conflict ? "conflict" : "clean";
+    if (!dirty) return "clean";
+    let disk: string;
+    try {
+      disk = await io.read();
+    } catch (error) {
+      callbacks.failed(error);
+      return "failed";
+    }
+    if (disposed) return "clean";
+    if (conflict) return "conflict";
+    if (disk !== known) {
+      enterConflict();
+      return "conflict";
+    }
+    return write();
+  };
+
+  // Only ever inside a `serialised` operation, after a barrier's write: while an edit landed
+  // during the write (`saved` but still dirty), write the newer document the way a save does, so
+  // `saved` means the disk holds the latest generation (DECISIONS #review-2-r2 W1). A dispose
+  // stops the drain, and the edit it leaves unwritten is `failed`, as `flush` reports it.
+  const drain = async (first: FlushResult): Promise<FlushResult> => {
+    let result = first;
+    while (result === "saved" && dirty) {
+      if (disposed) return "failed";
+      clearSave();
+      result = await saveOnce();
+      // Disposed during the re-read: the newer edit was not written.
+      if (result === "clean" && dirty) return "failed";
+    }
+    return result;
+  };
+
+  const save = (): Promise<FlushResult> => serialised(saveOnce);
 
   const check = (): void => {
     changeTimer = null;
@@ -264,7 +288,7 @@ export function createDocumentSync(
       if (disposed) return Promise.resolve<FlushResult>(dirty ? "failed" : "clean");
       conflict = false;
       clearSave();
-      return serialised(() => (disposed ? Promise.resolve<FlushResult>("clean") : write()));
+      return serialised(async () => (disposed ? "clean" : drain(await write())));
     },
     async reload() {
       if (disposed) return;
@@ -289,9 +313,9 @@ export function createDocumentSync(
       if (conflict) return "conflict";
       if (!dirty) return wasDirty ? "saved" : "clean";
       clearSave();
-      return save();
+      return serialised(async () => drain(await saveOnce()));
     },
-    renamed() {
+    renamed(rewrite) {
       return serialised(async () => {
         if (disposed) return "clean";
         let disk: string;
@@ -303,9 +327,17 @@ export function createDocumentSync(
         }
         if (disposed || disk === known) return "clean";
         setKnown(disk);
-        // Dirty only if an edit landed between the flush before the rename and here; the edit
-        // wins over the rewritten file, as it would have after the rename's own write.
-        if (!dirty && !conflict) callbacks.reloaded(disk);
+        if (conflict) return "clean";
+        if (!dirty) {
+          callbacks.reloaded(disk);
+          return "clean";
+        }
+        // Dirty only if an edit landed between the flush before the rename and here: the edit is
+        // kept, with the rename's rewrite applied to it, and stays dirty. An edit the rewrite
+        // leaves alone is not handed back (a reload rebuilds the editor and its undo history).
+        const mine = callbacks.serialize();
+        const rewritten = rewrite(mine);
+        if (rewritten !== mine) callbacks.reloaded(rewritten);
         return "clean";
       }).then(() => undefined);
     },

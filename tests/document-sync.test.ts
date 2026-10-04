@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { rewriteAssetUrls } from "../packages/core/src/assets.js";
 import {
   createDocumentSync,
   DEFAULT_SYNC_OPTIONS,
@@ -21,6 +22,10 @@ interface Harness {
   reads: number;
   /** Every write as it starts, before it lands. */
   started: string[];
+  /** Writes from now on reject (initially the `failWrite` argument). */
+  failWrite: boolean;
+  /** Runs after each write lands (another writer, a dispose), before the next operation. */
+  afterWrite: (() => void) | null;
 }
 
 /** A write that lands only when `release` is called (a write in flight). */
@@ -46,6 +51,8 @@ function harness(
     failures: [],
     reads: 0,
     started: [],
+    failWrite,
+    afterWrite: null,
   };
   const sync = createDocumentSync(
     initial,
@@ -57,9 +64,10 @@ function harness(
       write: async (text) => {
         h.started.push(text);
         if (gate !== null) await gate;
-        if (failWrite) throw new Error("disk full");
+        if (h.failWrite) throw new Error("disk full");
         h.writes.push(text);
         h.disk.text = text;
+        h.afterWrite?.();
       },
     },
     {
@@ -491,14 +499,32 @@ describe("after a rename", () => {
     expect(h.disk.text).toBe("![](assets/b/x.png)Q\n");
   });
 
-  it("rewritten bytes under an edit move known without a reload or a conflict", async () => {
+  // DECISIONS #review-2-r2 W2 (task 2.27): the rename's rewrite reaches the dirty editor.
+  it("rewritten image URLs under an edit reach the editor, stay dirty, and the next save writes the edit with the new stem", async () => {
+    const h = harness("![image](assets/a/x.png)\n");
+    edit(h, "![image](assets/a/x.png) later edit\n");
+    h.disk.text = "![image](assets/b/x.png)\n";
+    await h.sync.renamed((text) => rewriteAssetUrls(text, "a", "b"));
+    expect(h.reloads).toEqual(["![image](assets/b/x.png) later edit\n"]);
+    expect(h.editor.text).toBe("![image](assets/b/x.png) later edit\n");
+    expect(h.sync.dirty).toBe(true);
+    expect(h.conflicts).toBe(0);
+    expect(h.known).toEqual(["![image](assets/b/x.png)\n"]);
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    expect(h.conflicts).toBe(0);
+    expect(h.disk.text).toBe("![image](assets/b/x.png) later edit\n");
+    expect(h.disk.text).not.toContain("assets/a/");
+    expect(h.sync.dirty).toBe(false);
+  });
+
+  it("an edit the rename's rewrite leaves alone is not handed back to the editor and stays dirty", async () => {
     const h = harness("a\n");
     edit(h, "aQ\n");
     h.disk.text = "b\n";
-    await h.sync.renamed();
+    await h.sync.renamed((text) => rewriteAssetUrls(text, "a", "b"));
     expect(h.reloads).toEqual([]);
+    expect(h.sync.dirty).toBe(true);
     expect(h.conflicts).toBe(0);
-    expect(h.known).toEqual(["b\n"]);
     await vi.advanceTimersByTimeAsync(saveDelayMs);
     expect(h.disk.text).toBe("aQ\n");
   });
@@ -515,5 +541,149 @@ describe("after a rename", () => {
     await sync.renamed();
     expect(failures).toHaveLength(1);
     expect(reloads).toEqual([]);
+  });
+});
+
+// DECISIONS #review-2-r2 W1 (task 2.27): a barrier's `saved` covers an edit typed during its own
+// write. Each case gates the barrier's first write and edits while it is in flight.
+describe("a barrier drains an edit made during its write", () => {
+  async function editDuringFlush(setup: (h: Harness) => void = () => {}) {
+    const { wait, release } = gated();
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    edit(h, "first\n");
+    setup(h);
+    let result: string | null = null;
+    const flushed = h.sync.flush().then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.started).toEqual(["first\n"]);
+    edit(h, "first later\n");
+    release();
+    await flushed;
+    return { h, result: result as string | null };
+  }
+
+  it("(1) an edit during flush's write: saved only after a second write, the later edit on disk", async () => {
+    const { h, result } = await editDuringFlush();
+    expect(result).toBe("saved");
+    expect(h.writes).toEqual(["first\n", "first later\n"]);
+    expect(h.disk.text).toBe("first later\n");
+    expect(h.sync.dirty).toBe(false);
+    expect(h.conflicts).toBe(0);
+  });
+
+  it("(2) another writer between the two writes: conflict, the later edit dirty, nothing written over the disk", async () => {
+    const { h, result } = await editDuringFlush((h) => {
+      h.afterWrite = () => {
+        h.afterWrite = null;
+        h.disk.text = "theirs\n";
+      };
+    });
+    expect(result).toBe("conflict");
+    expect(h.sync.conflict).toBe(true);
+    expect(h.sync.dirty).toBe(true);
+    expect(h.writes).toEqual(["first\n"]);
+    expect(h.started).toEqual(["first\n"]);
+    expect(h.disk.text).toBe("theirs\n");
+    expect(h.editor.text).toBe("first later\n");
+  });
+
+  it("(3) the second write rejected: failed, the later edit dirty", async () => {
+    const { h, result } = await editDuringFlush((h) => {
+      h.afterWrite = () => {
+        h.failWrite = true;
+      };
+    });
+    expect(result).toBe("failed");
+    expect(h.sync.dirty).toBe(true);
+    expect(h.started).toEqual(["first\n", "first later\n"]);
+    expect(h.writes).toEqual(["first\n"]);
+    expect(h.disk.text).toBe("first\n");
+    expect(h.failures).toHaveLength(1);
+  });
+
+  it("(4) disposed during the first write: no second write, failed", async () => {
+    const { h, result } = await editDuringFlush((h) => {
+      h.afterWrite = () => h.sync.dispose();
+    });
+    expect(result).toBe("failed");
+    expect(h.started).toEqual(["first\n"]);
+    expect(h.writes).toEqual(["first\n"]);
+    expect(h.sync.dirty).toBe(true);
+  });
+
+  it("(4b) disposed during the drain's re-read: no second write, failed", async () => {
+    const { wait, release } = gated();
+    let reads = 0;
+    const disk = { text: "a\n" };
+    const editor = { text: "first\n" };
+    const started: string[] = [];
+    const sync = createDocumentSync(
+      "a\n",
+      {
+        read: async () => {
+          reads += 1;
+          // The drain's re-read (the second read): the pane unmounts while it is pending.
+          if (reads === 2) sync.dispose();
+          return disk.text;
+        },
+        write: async (text) => {
+          started.push(text);
+          await wait;
+          disk.text = text;
+        },
+      },
+      { serialize: () => editor.text, reloaded: () => {}, conflicted: () => {}, knownChanged: () => {}, failed: () => {} },
+      { setTimeout, clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now },
+    );
+    sync.edited();
+    const flushed = sync.flush();
+    await vi.advanceTimersByTimeAsync(0);
+    editor.text = "first later\n";
+    sync.edited();
+    release();
+    expect(await flushed).toBe("failed");
+    expect(reads).toBe(2);
+    expect(started).toEqual(["first\n"]);
+    expect(sync.dirty).toBe(true);
+  });
+
+  it("(5) keepMine with an edit during its write: saved only after the later edit is on disk", async () => {
+    const { wait, release } = gated();
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    edit(h, "mine\n");
+    h.disk.text = "theirs\n";
+    h.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    expect(h.sync.conflict).toBe(true);
+    let result: string | null = null;
+    const kept = h.sync.keepMine().then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.started).toEqual(["mine\n"]);
+    edit(h, "mine later\n");
+    release();
+    await kept;
+    expect(result).toBe("saved");
+    expect(h.writes).toEqual(["mine\n", "mine later\n"]);
+    expect(h.disk.text).toBe("mine later\n");
+    expect(h.sync.dirty).toBe(false);
+    expect(h.sync.conflict).toBe(false);
+  });
+
+  it("(6) flush with no edit during its own write: exactly one write", async () => {
+    const { wait, release } = gated();
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    edit(h, "first\n");
+    let result: string | null = null;
+    const flushed = h.sync.flush().then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.started).toEqual(["first\n"]);
+    release();
+    await flushed;
+    await vi.advanceTimersByTimeAsync(saveDelayMs * 2);
+    expect(result).toBe("saved");
+    expect(h.started).toEqual(["first\n"]);
+    expect(h.writes).toEqual(["first\n"]);
+    expect(h.reads).toBe(1);
+    expect(h.sync.dirty).toBe(false);
   });
 });

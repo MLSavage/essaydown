@@ -1,7 +1,7 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { attach, emptySidecar, format, parse, parseSidecar, type Sidecar } from "@essaydown/core";
+import { attach, emptySidecar, format, parse, parseSidecar, rewriteAssetUrls, type Sidecar } from "@essaydown/core";
 import {
   bindProseMirror,
   createDocumentStore,
@@ -16,7 +16,7 @@ import "prosemirror-view/style/prosemirror.css";
 import { createDocumentSync, type DocumentSync, type FlushResult } from "./document-sync";
 import { createImageNodeView } from "./image-view";
 import { imagePastePlugin } from "./image-paste";
-import { sidecarPathFor } from "./paths";
+import { sidecarPathFor, stemOf } from "./paths";
 import { createSidecarBaseline } from "./sidecar-sync";
 
 /** What `loadDocument` read for one path: the file's bytes and its sidecar. */
@@ -191,12 +191,15 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
 
   // A rename changes `path` without a remount, and `rename_file` may have rewritten the document's
   // image URLs: re-read it at the new path, so the next save does not find the disk changed
-  // (DECISIONS #review-2-r0 U20).
+  // (DECISIONS #review-2-r0 U20), and apply the same rewrite to an edit made since the flush
+  // (DECISIONS #review-2-r2 W2).
   const pathSeen = useRef(path);
   useEffect(() => {
     if (pathSeen.current === path) return;
+    const oldStem = stemOf(pathSeen.current);
+    const newStem = stemOf(path);
     pathSeen.current = path;
-    void syncRef.current?.renamed();
+    void syncRef.current?.renamed((text) => rewriteAssetUrls(text, oldStem, newStem));
   }, [path]);
 
   useEffect(() => {
