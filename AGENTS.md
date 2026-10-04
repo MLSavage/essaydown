@@ -59,6 +59,7 @@ You are one agent in a Ralph loop on Essay Down, a Tauri 2 + React Markdown essa
 - A round-trip family's corpus legs seeded from the writing surface include one transaction that joins two blocks and one that deletes the whole separator between two inline nodes, and the family enumerates ordered pairs of the schema's mark kinds × the first run's edge-character class (punctuation, letter, astral), because a leg that edits one position inside one block never makes two nodes adjacent (DECISIONS #review-1-r9 O1).
 - A helper that must finish before state is dropped (a save before a switch, a close or a rename) returns a checked outcome — clean, saved, or why not — and never resolves alike on success and failure; every caller that discards state proceeds only on success, and has one test per not-saved outcome (DECISIONS #review-2-r0 U1).
 - A fix that adopts external state — a disk value that won a reconciliation — moves the parsed value and its raw baseline together in one owner, and its test asserts the adopted value after the second write and after a reload, never only after the first (DECISIONS #review-2-r1 U5).
+- A checked outcome that permits discarding state covers the latest generation, not the one its write started with — a helper that writes while edits can still arrive writes again until the disk holds the newest edit or the result is not a success — and its test injects the edit during the awaited write, never only before it (DECISIONS #review-2-r2 W1).
 
 ## Runner facts you rely on (DECISIONS #009, #012)
 
