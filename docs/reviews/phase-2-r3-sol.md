@@ -1,0 +1,46 @@
+# Phase 2 review — Sol
+
+Reviewer: GPT-6 (Codex), reviewer identity `sol`. Inputs: docs/PRD.md §7/§8 phase 2/§9, docs/RUNNER-SPEC.md, docs/lessons.md, DECISIONS #025 and #review-2-r2, docs/V1.1-BACKLOG.md, `git diff 92a2ec17cbecfcae5e7b5e5a7a723484bc7dda24...5522dbb311c6bbe6011f772f48d74b01d79c05b9` (attempt r3; detailed inspection of the scoped persistence changes), accepted CI evidence for 2.1.g1h, 2.verify.g3h, 2.verify.r1.g1h, 2.verify.r2.g1h and 2.verify.r3h, /logs/tasks/2.27/1.log and /logs/tasks/2.verify.r3/1.log, and human records 2.9 and 2.25. Cold build: scratch local clone `/scratch/sol` at implementation_sha `5522dbb311c6bbe6011f772f48d74b01d79c05b9`. Commands run: `pnpm install --frozen-lockfile`, `scripts/check` (pnpm lint, pnpm test, cargo test), `PATH=/usr/local/cargo/bin:$PATH scripts/check cargo`, artifact hashing with `digestDir`, `sha256sum`, source/diff inspection, TypeScript transpilation and `node /report/probes.mjs`. The initial cargo invocation failed to locate cargo; the explicit PATH invocation passed. No repository code was edited.
+
+Files read under `/logs/reviews/`: `/logs/reviews/2/r3/phase_base_sha`, `/logs/reviews/2/r3/implementation_sha`, `/logs/reviews/2/r3/verification_sha`, `/logs/reviews/2/r3/verifier_id`, `/logs/reviews/2/r2/sol/probes.mjs`, and `/logs/reviews/2/r2/sol/document-sync.mjs`. No sibling directory of this attempt was read. Scope follows task 2.10.r3b: confirm W1/W2, reverse the specified ordering for close/switch/rename, inspect the three dispositions, report blockers only; no new sweep or browser drive.
+
+## Gate table
+
+| Criterion (from PRD §7) | Result (pass / fail / unverifiable) | Evidence (command + output line, or file:line) |
+|---|---|---|
+| File tree on Linux and Windows, including rename preserving edited content and asset destinations | pass | `/logs/ci/2.verify.r3h/accepted/e2e-shell/e2e-shell-ubuntu-latest/e2e-shell.log:69091` and the Windows log `:12412`: six file-tree tests passed. `/report/probes.log:2`: the r2 rename scenario now saves `![image](assets/b/x.png) later edit\n`, with no conflict. `DocumentPane.tsx:196` passes the old/new stem rewrite; `document-sync.ts:340` applies it to the dirty editor. |
+| Autosave on Linux and Windows, including the save-before-discard lifecycle | pass | Accepted Ubuntu shell log `:69068` and Windows `:12389`: nine autosave tests passed; close cases at `:69077` / `:12398`. `/report/probes.log:1` and `:3`–`:5`: an edit during the awaited write forces a second write before `saved`; disk equals editor and dirty is false before the modeled close/switch/rename continuation. `document-sync.ts:221` drains subsequent dirty generations. |
+| External-change handling on Linux and Windows | pass | The same nine autosave tests include clean external append, dirty conflict, Keep mine, Reload and truncate/rewrite; byte assertions in `e2e/shell/test/autosave.spec.ts:122`, `:138`, `:157`, `:187`. `tests/document-sync.test.ts:574` verifies an external writer between drain writes yields conflict rather than overwrite. |
+| `.icloud` / `.stfolder` handling on Linux and Windows | pass | Accepted Ubuntu robustness results `:69114`, Windows `:12435`: three tests passed. `e2e/shell/test/robustness.spec.ts:134` seeds placeholders and `.stfolder` noise. This confirms the existing synthetic spelling and bounded session; the previously deferred real-iCloud spelling and longer robustness instrument are not newly certified. |
+| macOS result recorded; xfail allowed | pass | Accepted macOS shell log `:11679`: eight of eight spec files passed, 33 tests. macOS cargo log `:686`: 78 passed. These are CI observations, not local macOS executions. |
+| Michael opens his synced folder on the MacBook Pro and edits in both applications | pass | `/logs/human/2.9/accepted.json` selects build `01a4c72`; its referenced `a1.md` records both directions surviving, final bytes retained, and VS Code expressly substituted for unavailable Typora. Manual dirty-conflict handling was not demonstrated by that observation. |
+| Follow-up Mac close/Quit observation, task 2.25 | pass | `/logs/human/2.25/accepted.json` records checks 1–4 passing on `1bb43d1`; its referenced `a1.md` describes close, in-debounce Cmd+Q, conflict blocking Quit, and Edit shortcuts. The referenced DMG file hashes to payload `a75fea0cf721cb68810dd3e2a54ef29807a19bc937e11c2d8f1697b71bd2f09c`. Check 5 remains explicitly not-run. |
+
+All 14 artifact directories across the five accepted phase 2 manifests match SHA-256 and byte count (`/report/digests.log:1`–`:14`). The current manifest names run `37215729303`, exact implementation SHA `5522dbb311c6bbe6011f772f48d74b01d79c05b9`, and three OS directories in both test and shell artifacts. The two phase 1 baseline artifact digests also match (`digests.log:15`–`:16`).
+
+## Test counts and coverage
+
+Vitest: **5,111 passed / 0 failed**, 56 files (`/report/test.log:140`–`:141`), including 39 document-sync tests. cargo test: **78 passed / 0 failed / 0 ignored**, three suites (`/report/cargo-check.log:1`). Install and lint passed. e2e: accepted current verifier **33 passed / 0 failed, eight spec files on each of Linux, Windows and macOS**; eight is independently counted from `e2e/shell/test/*.spec.ts`. No local shell e2e rerun. CI Vitest is 5,111 per OS; cargo is Linux 78, macOS 78, Windows 75, all zero failed.
+
+Coverage delta vs main: statements **99.52% → 99.54% (+0.02 percentage points)**; branches **97.25% → 97.25% (0)**; functions and lines **100% → 100% (0)**. Baseline is the digest-verified accepted 1.verify.r10h log, whose covered source/config matches the phase base; current local table is `/report/test.log:149`, matching current CI. The denominator remains `packages/*/src/**` (`vitest.config.ts:19`): app wiring and Rust are not covered by these percentages, including the repaired sync module.
+
+The r2 probes were re-executed against fresh ES2022 transpilation of the unchanged implementation. The rename call now uses the production `rewriteAssetUrls` callback. Scenario 1's driver releases the additional write separately and asserts the barrier remains pending until then; its old failure assertions are inverted to assert non-reproduction. The three additional cases inject the edit during awaited I/O and execute the callers' success/disposal semantics at module level; they do not claim native clicks or React scheduling coverage. Outputs are `/report/probes.log:1`–`:5`. Guard (9) is a recorded mutation, not a ninth committed test: `/logs/tasks/2.27/1.log:130` records five failures with the drain removed, restoration, and 39 passing tests. Guards (1)–(6), (4b), and the rename guards are present and passed locally.
+
+## Findings (≤ 20, most severe first)
+
+Severity, rated by the consequence for the gate's criterion and never by the size of the fix (DECISIONS #review-1-r1): **blocker** — a gate criterion is not met, or wrong output reaches the user silently (example: Copy Markdown puts stale text on the clipboard and reports "Copied"); **should-fix** — a defect or a missing guard the phase should not close with, while the criterion still holds or the path is not the gate's own instrument (example: a redo chord bound under two names with no test that reads the binding table, so deleting one name stays green); **nit** — wording, citations, style, or an assertion with no behaviour behind it (example: `expect(checked).toBe(Object.keys(index).length)` where both sides are the same list). Mark a should-fix **Required** when the reconciliation should fail without it.
+
+None within the prescribed blocker-only confirmation scope. Verdict: **PASS**, zero blockers, zero should-fix, zero nits.
+
+The three r2 dispositions remain present at `docs/V1.1-BACKLOG.md:164`–`:166`, with their triggers: sidecar partial failure at the first Phase 3 sidecar-writing task (hard stop 3.verify); barrier-to-discard gap at the first Phase 3 editor-lock task (hard stop 3.verify); unperformed Dock Quit at Phase 6 packaging, with its missing Dock-icon precondition and the Phase 2→3 boundary question. Source and human evidence do not falsify these recorded premises. This PASS does not close those backlog items.
+
+## Three riskiest things
+
+1. The editor remains writable after the save barrier and before actual destruction or replacement. The deliberately deferred barrier-to-discard gap remains; these probes only confirm edits arriving during the awaited write.
+2. Markdown and sidecar persistence can partially succeed. A sidecar failure can restore an obsolete Markdown baseline and raise a false conflict; the existing visible error and recovery remain the basis for its deferral.
+3. Dock Quit remains unobserved, and module-level ordering probes do not prove native lifecycle routing. Human checks 1–4 and accepted platform tests are distinct evidence from the missing check 5.
+
+## Class-level lessons (for docs/lessons.md)
+
+- LESSON: Fixing a save barrier can introduce additional awaited writes that a one-release reproduction never completes → drive each write explicitly and assert both pending-before-release and latest-bytes-after-success.
+- LESSON: A module probe confirms an ordering contract without proving native routing or rendering schedules → identify the tested boundary and retain the separate platform and human evidence limits.
