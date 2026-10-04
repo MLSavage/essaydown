@@ -10,7 +10,13 @@ use commands::{WatchState, WorkspaceState};
 
 /// Plugin registration and the IPC surface, shared by `run()` (a real runtime) and the `commands`
 /// integration test (`tauri::test`'s `MockRuntime`), so the test exercises the exact wiring `run()`
-/// installs rather than a hand-rolled copy of it.
+/// installs rather than a hand-rolled copy of it. The macOS menu is `run()`'s alone, not this
+/// function's: `muda::Menu::new` asserts the calling thread is the main thread
+/// (muda-0.19.3 `src/platform_impl/macos/mod.rs:132`), libtest runs every `#[test]` on a worker
+/// thread, and `tauri::test::MockRuntime` runs a main-thread task inline on the calling thread
+/// while the app is not yet running (tauri-2.11.5 `src/test/mock_runtime.rs:76-91`) — so a menu
+/// registered here would reach `muda::Menu::new` from `commands::tests::test_app()`'s builder
+/// thread and panic on macOS alone.
 ///
 /// Registration order matters (PRD §6.4, tested in `commands::tests`): tauri-plugin-fs must load
 /// before tauri-plugin-persisted-scope, which restores a saved scope onto the fs plugin's own scope
@@ -23,18 +29,6 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
     // app through the cargo-installed tauri-driver instead and never connects to it.
     #[cfg(debug_assertions)]
     let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
-
-    // macOS only (Linux and Windows keep no menu bar): tauri's default menu with its Quit replaced
-    // by a custom item that closes every window through the frontend's close barrier, because the
-    // predefined Quit (`terminate:`) raises no window or exit event (`menu.rs`, #review-2-r1 U2).
-    #[cfg(target_os = "macos")]
-    let builder = builder
-        .menu(|handle| menu::build_menu(handle, &menu::default_menu_spec()))
-        .on_menu_event(|app, event| {
-            if menu::quit_requested(event.id()) {
-                menu::request_quit(app);
-            }
-        });
 
     builder
         .plugin(tauri_plugin_fs::init())
@@ -84,7 +78,21 @@ pub(crate) fn context<R: tauri::Runtime>() -> tauri::Context<R> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    configure(tauri::Builder::default())
+    let builder = configure(tauri::Builder::default());
+
+    // macOS only (Linux and Windows keep no menu bar): tauri's default menu with its Quit replaced
+    // by a custom item that closes every window through the frontend's close barrier, because the
+    // predefined Quit (`terminate:`) raises no window or exit event (`menu.rs`, #review-2-r1 U2).
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .menu(|handle| menu::build_menu(handle, &menu::default_menu_spec()))
+        .on_menu_event(|app, event| {
+            if menu::quit_requested(event.id()) {
+                menu::request_quit(app);
+            }
+        });
+
+    builder
         .run(context())
         .expect("error while running tauri application");
 }

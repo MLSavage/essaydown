@@ -245,6 +245,33 @@ mod tests {
         );
     }
 
+    /// The macOS menu is registered in `run()`, not in `configure()`: `muda::Menu::new()` asserts
+    /// the main thread (muda-0.19.3 `src/platform_impl/macos/mod.rs:132`) and `tauri::test`'s
+    /// `MockRuntime` runs a main-thread task inline on the calling thread while the app is not yet
+    /// running (tauri-2.11.5 `src/test/mock_runtime.rs:76-91`), so a menu registered in `configure()`
+    /// would reach that assert from `test_app()`'s builder thread — a libtest worker, never the
+    /// main thread — and panic on macOS. `.menu(` must occur exactly once, after `pub fn run()`.
+    #[test]
+    fn macos_menu_is_registered_in_run_not_configure() {
+        let lib_rs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("src/lib.rs must exist");
+        let run_pos = lib_rs
+            .find("pub fn run()")
+            .expect("pub fn run() must exist");
+        let menu_pos = lib_rs
+            .find(".menu(")
+            .expect(".menu( must be registered somewhere");
+        assert_eq!(
+            lib_rs.matches(".menu(").count(),
+            1,
+            "exactly one .menu( call"
+        );
+        assert!(
+            menu_pos > run_pos,
+            ".menu( must be registered inside run(), after pub fn run()"
+        );
+    }
+
     /// `open_folder` extends the fs and asset-protocol scopes to only the folder the user chose
     /// (PRD §6.4); a `**` entry in the shipped capability file would grant every command it names
     /// access to the whole filesystem regardless of that runtime grant, so the static file itself

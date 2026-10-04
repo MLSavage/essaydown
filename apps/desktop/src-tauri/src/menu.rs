@@ -397,6 +397,14 @@ mod tests {
         }
     }
 
+    /// Off macOS only: `build_menu` calls `Menu::new`, which runs `muda::Menu::new()` inline on the
+    /// calling thread under `MockRuntime` (tauri-2.11.5 `src/test/mock_runtime.rs:76-91`, the app
+    /// not yet running), and only muda's macOS `platform_impl` asserts that thread is the main one
+    /// (`src/platform_impl/macos/mod.rs:132`) — libtest runs every `#[test]` on a worker thread, so
+    /// this guard panics there. Proving `build_menu` on macOS itself needs `harness = false` (a
+    /// manifest change out of this task's scope); on macOS it is proven only by the production run
+    /// at human gate 2.25 (its checks (2) and (4)).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn guard5_build_menu_under_mock_runtime_matches_the_spec_per_submenu() {
         let app = tauri::test::mock_builder()
