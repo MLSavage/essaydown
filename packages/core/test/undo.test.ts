@@ -5,6 +5,7 @@ import { format } from "../src/format.js";
 import { parse } from "../src/parse.js";
 import { emptySidecar, parseSidecar, type Sidecar } from "../src/sidecar.js";
 import {
+  amendSidecar,
   canRedo,
   canUndo,
   createUndoStack,
@@ -512,5 +513,37 @@ describe("default clock", () => {
 
     expect(stack.entries).toHaveLength(3);
     expect(stack.entries[1].coalesceKey).toBe(null);
+  });
+});
+
+describe("amendSidecar (task 3.2: an adopted sidecar is not an undo step)", () => {
+  it("replaces the present sidecar, keeps the root by reference, and pushes nothing", () => {
+    const opened = doc("Opened.");
+    const edited = doc("Edited.");
+    const stack = push(createUndoStack(opened, empty, { at: 0 }), edited, empty, { coalesceKey: "typing", at: 10 });
+    const adopted = sidecarWithChoice("Edited.", 1);
+    const amended = amendSidecar(stack, adopted);
+    expect(amended.entries).toHaveLength(stack.entries.length);
+    expect(amended.index).toBe(stack.index);
+    expect(amended.openKey).toBe(stack.openKey);
+    expect(current(amended).root).toBe(edited);
+    expect(current(amended).sidecar).toBe(adopted);
+    // The step before the present one is untouched, so an Undo still returns to it.
+    expect(current(undo(amended))).toBe(current(undo(stack)));
+    // The input stack is not mutated.
+    expect(current(stack).sidecar).toBe(empty);
+  });
+
+  it("amends the present entry after an undo, never the newest one", () => {
+    const stack = undo(push(createUndoStack(doc("A."), empty, { at: 0 }), doc("B."), empty, { at: 10 }));
+    const adopted = sidecarWithChoice("A.", 0);
+    const amended = amendSidecar(stack, adopted);
+    expect(current(amended).sidecar).toBe(adopted);
+    expect(amended.entries[1]).toBe(stack.entries[1]);
+  });
+
+  it("returns the same stack for the sidecar it already shows", () => {
+    const stack = createUndoStack(doc("A."), empty, { at: 0 });
+    expect(amendSidecar(stack, empty)).toBe(stack);
   });
 });

@@ -3,6 +3,7 @@ import { rewriteAssetUrls } from "../packages/core/src/assets.js";
 import {
   createDocumentSync,
   DEFAULT_SYNC_OPTIONS,
+  MarkdownWritten,
   type DocumentSync,
 } from "../apps/desktop/src/workspace/document-sync.js";
 
@@ -165,6 +166,50 @@ describe("autosave", () => {
     expect(h.failures).toHaveLength(1);
     expect(h.sync.dirty).toBe(true);
     expect(h.known).toEqual(["ab\n", "a\n"]);
+  });
+
+  it("a write whose Markdown landed and whose sidecar failed keeps known on the written text: the retry writes, no conflict", async () => {
+    const h = harness("a\n");
+    let sidecarFails = true;
+    const sidecar = new Error("sidecar: permission denied");
+    const sync = createDocumentSync(
+      "a\n",
+      {
+        read: async () => h.disk.text,
+        write: async (text) => {
+          h.disk.text = text;
+          h.writes.push(text);
+          if (sidecarFails) throw new MarkdownWritten(sidecar);
+        },
+      },
+      {
+        serialize: () => h.editor.text,
+        reloaded: () => {},
+        conflicted: () => {
+          h.conflicts += 1;
+        },
+        knownChanged: (text) => h.known.push(text),
+        failed: (error) => h.failures.push(error),
+      },
+      {
+        setTimeout: (callback, ms) => setTimeout(callback, ms),
+        clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+        now: () => Date.now(),
+      },
+    );
+    h.editor.text = "ab\n";
+    sync.edited();
+    expect(await sync.flush()).toBe("failed");
+    // The sidecar's own error is reported, and `known` was not put back to the pre-write bytes.
+    expect(h.failures).toEqual([sidecar]);
+    expect(h.known).toEqual(["ab\n"]);
+    expect(sync.dirty).toBe(true);
+    sidecarFails = false;
+    expect(await sync.flush()).toBe("saved");
+    expect(h.conflicts).toBe(0);
+    expect(sync.conflict).toBe(false);
+    expect(h.writes).toEqual(["ab\n", "ab\n"]);
+    expect(sync.dirty).toBe(false);
   });
 
   it("flush saves at once and cancels the timer", async () => {

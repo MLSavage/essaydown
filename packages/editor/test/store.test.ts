@@ -358,6 +358,29 @@ describe("dispatch: mode mutations (task 3.1)", () => {
   });
 });
 
+describe("adoptSidecar (task 3.2)", () => {
+  it("replaces the present sidecar without an undo step, and leaves the view's document alone", () => {
+    const context = boundWithSidecar("One.\n\nTwo.\n");
+    const before = context.store.getState().document;
+    const doc = context.view.state.doc;
+    const adopted = emptySidecar();
+    context.store.getState().adoptSidecar(adopted);
+    const { stack, document } = context.store.getState();
+    expect(stack.entries).toHaveLength(1);
+    expect(document.sidecar).toBe(adopted);
+    expect(document.root).toBe(before.root);
+    expect(context.view.state.doc).toBe(doc);
+  });
+
+  it("does not wake a subscriber for the sidecar it already shows", () => {
+    const context = boundWithSidecar("One.\n");
+    const listener = vi.fn();
+    context.store.subscribe(listener);
+    context.store.getState().adoptSidecar(context.store.getState().document.sidecar);
+    expect(listener).not.toHaveBeenCalled();
+  });
+});
+
 describe("cursor (task 3.1)", () => {
   it("is null in a store no view has reported to", () => {
     expect(createDocumentStore(parse("a\n"), SIDECAR).getState().cursor).toBeNull();

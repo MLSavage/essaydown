@@ -237,7 +237,7 @@ export function candidatesOf(root: Root, options: SegmentOptions = {}): AnchorCa
 }
 
 /** The anchor a candidate is described by. */
-function anchorOf(candidate: AnchorCandidate): Anchor {
+export function anchorOf(candidate: AnchorCandidate): Anchor {
   return {
     kind: candidate.kind,
     hash: candidate.hash,
@@ -605,7 +605,7 @@ const MOVE_TAG = "__essaydownMoveIndex";
  * before the call and the tag is stripped after) rather than recomputed here, so the two cannot
  * drift.
  */
-function carryTopLevelMove(
+export function carryTopLevelMove(
   state: DocumentState,
   move: (root: Root) => Root,
   options: SegmentOptions,

@@ -6,6 +6,7 @@ import {
   blocksOf,
   moveBlock,
   moveSection,
+  moveSectionTo,
   normalizedText,
   replaceBlock,
   sectionsOf,
@@ -412,6 +413,82 @@ describe("moveBlock, moveSection and replaceBlock are the identity for their own
     expect(format(replaceBlock(root, block.contentId, paragraph("A different paragraph.")))).not.toBe(
       before,
     );
+  });
+});
+
+describe("moveSectionTo (task 3.2, the Outline drag)", () => {
+  // Boundaries in "## A\n\na.\n\n### A1\n\n## B\n\n## C\n": 0 A, 1 a., 2 A1, 3 B, 4 C, 5 the end.
+  const source = "## A\n\na.\n\n### A1\n\n## B\n\n## C\n";
+
+  it("moves the essay fixture's section 5 to the end of section 2 one level deeper, matching expected/essay-fixture.nested.md", () => {
+    const canonical = fixture("essay-fixture.canonical.md");
+    const root = parse(canonical);
+    const before = snapshot(root);
+    const sections = sectionsOf(root);
+    const expected = readFileSync(`${FIXTURES}/expected/essay-fixture.nested.md`, "utf8");
+    expect(format(moveSectionTo(root, 5, sections[2].end, sections[2].depth + 1))).toBe(expected);
+    expect(snapshot(root)).toBe(before);
+    // Only the moved heading's line changed; every other line is the canonical file's, reordered.
+    const strip = (text: string) => text.split("\n").filter((line) => !line.endsWith("The Golden Age of the Fountain Pen")).sort();
+    expect(strip(expected)).toEqual(strip(canonical));
+    expect(expected).toContain("\n#### The Golden Age of the Fountain Pen\n");
+    expect(canonical).toContain("\n## The Golden Age of the Fountain Pen\n");
+  });
+
+  it("puts the section before the node at a boundary ahead of it (the first boundary)", () => {
+    const root = parse(source);
+    expect(format(moveSectionTo(root, 3, 0, 2))).toBe("## C\n\n## A\n\na.\n\n### A1\n\n## B\n");
+  });
+
+  it("shifts a boundary after the section down by the nodes lifted out (a middle and the last boundary)", () => {
+    const root = parse(source);
+    expect(format(moveSectionTo(root, 0, 4, 2))).toBe("## B\n\n## A\n\na.\n\n### A1\n\n## C\n");
+    expect(format(moveSectionTo(root, 0, 5, 2))).toBe("## B\n\n## C\n\n## A\n\na.\n\n### A1\n");
+  });
+
+  it("re-depths the section and everything it owns by one delta, over the nodes it owned where it was", () => {
+    const root = parse(source);
+    const nested = moveSectionTo(root, 0, 5, 3);
+    expect(format(nested)).toBe("## B\n\n## C\n\n### A\n\na.\n\n#### A1\n");
+    expect(headingDepths(nested)).toEqual([2, 2, 3, 4]);
+  });
+
+  it("leaves the section in place at either of its own boundaries, so the call is setHeadingDepth alone", () => {
+    const root = parse(source);
+    expect(format(moveSectionTo(root, 0, 0, 3))).toBe(format(setHeadingDepth(root, 0, 3)));
+    expect(format(moveSectionTo(root, 0, 3, 3))).toBe(format(setHeadingDepth(root, 0, 3)));
+  });
+
+  it("refuses a boundary strictly inside the section", () => {
+    const root = parse(source);
+    expect(() => moveSectionTo(root, 0, 1, 2)).toThrow(/inside section 0/);
+    expect(() => moveSectionTo(root, 0, 2, 2)).toThrow(/inside section 0/);
+  });
+
+  it("rejects an out-of-document section, an out-of-document boundary and a depth outside 1..6", () => {
+    const root = parse(source);
+    expect(() => moveSectionTo(root, 4, 0, 2)).toThrow(RangeError);
+    expect(() => moveSectionTo(root, 0, 6, 2)).toThrow(RangeError);
+    expect(() => moveSectionTo(root, 0, -1, 2)).toThrow(RangeError);
+    expect(() => moveSectionTo(root, 0, 5, 6)).toThrow(/depth 7/);
+    expect(() => moveSectionTo(root, 0, 5, 0)).toThrow(RangeError);
+  });
+
+  it("moveSectionTo(root, i, start, ownDepth) re-serialises every fixture byte-identically, for every section", () => {
+    let fixturesChecked = 0;
+    let movesChecked = 0;
+    for (const name of Object.keys(index).sort()) {
+      const root = parse(fixture(name));
+      const before = format(root);
+      sectionsOf(root).forEach((section, i) => {
+        expect(format(moveSectionTo(root, i, section.start, section.depth))).toBe(before);
+        expect(format(moveSectionTo(root, i, section.end, section.depth))).toBe(before);
+        movesChecked += 1;
+      });
+      fixturesChecked += 1;
+    }
+    expect(fixturesChecked).toBe(Object.keys(index).length);
+    expect(movesChecked).toBeGreaterThan(0);
   });
 });
 

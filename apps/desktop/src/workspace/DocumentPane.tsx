@@ -13,7 +13,13 @@ import {
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
-import { createDocumentSync, type DocumentSync, type FlushResult, type RenameOutcome } from "./document-sync";
+import {
+  createDocumentSync,
+  MarkdownWritten,
+  type DocumentSync,
+  type FlushResult,
+  type RenameOutcome,
+} from "./document-sync";
 import { createImageNodeView } from "./image-view";
 import { imagePastePlugin } from "./image-paste";
 import { sidecarPathFor, stemOf } from "./paths";
@@ -77,6 +83,12 @@ interface Props {
   /** §6.1's Undo-open: the user declined the first open of a non-canonical file. */
   readonly onUndoOpen: () => void;
   readonly onError: (message: string) => void;
+  /**
+   * The pane's document store, each time it is replaced (an open, a reload), and null when the
+   * pane unmounts — so a mode's views outside the pane (the Outline's sidebar tree and question
+   * list, task 3.2) read and edit the same store the editor does.
+   */
+  readonly onStore?: (store: DocumentStore | null) => void;
   readonly ref?: Ref<DocumentPaneHandle>;
 }
 
@@ -104,7 +116,7 @@ function describe(error: unknown): string {
  * `current-content` (hidden) holds the text the pane believes is on disk — what it last read or
  * wrote — so the shell e2e can compare it with the file byte for byte (DECISIONS #022).
  */
-export default function DocumentPane({ root, path, initial, onUndoOpen, onError, ref }: Props) {
+export default function DocumentPane({ root, path, initial, onUndoOpen, onError, onStore, ref }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const [store, setStore] = useState(() => storeFor(initial.text, initial.sidecar));
   // What the sync's I/O reads at call time: a rename moves `path` without a remount, and a reload
@@ -125,42 +137,62 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
   const [reloads, setReloads] = useState(0);
   const [nonCanonical, setNonCanonical] = useState(() => format(parse(initial.text)) !== initial.text);
   const syncRef = useRef<DocumentSync | null>(null);
+  // Set only while a save adopts the disk's sidecar into the store: external state, not an edit,
+  // so the subscriber below must not schedule another save for it.
+  const adopting = useRef(false);
 
   useEffect(() => {
-    // The sidecar's raw JSON text and the sidecar it stands for, as this pane last read or wrote
-    // them (tasks 2.19, 2.23); reset on every reload of this document (a new `initial`), and moved
-    // forward together by every write below. The store's `document.sidecar` is never the next
-    // write's source: this build has no in-app sidecar edit (docs/V1.1-BACKLOG.md
-    // `[review-2-r1, sidecar baseline vs store]`).
-    const baseline = createSidecarBaseline(initial.sidecarRaw, initial.sidecar);
+    // The sidecar's raw JSON text as this pane last read or wrote it (tasks 2.19, 2.23), reset on
+    // every reload of this document (a new `initial`). Since task 3.2 the parsed half is the
+    // store's: the Outline edits questions through it, so the store's present sidecar is every
+    // write's source, and a sidecar adopted from the disk is put back into it in the same step as
+    // the raw text moves (docs/V1.1-BACKLOG.md `[review-2-r1, sidecar baseline vs store]`).
+    const baseline = createSidecarBaseline(initial.sidecarRaw, {
+      current: () => storeRef.current.getState().document.sidecar,
+      adopt: (sidecar) => {
+        adopting.current = true;
+        try {
+          storeRef.current.getState().adoptSidecar(sidecar);
+        } finally {
+          adopting.current = false;
+        }
+      },
+    });
     const sync = createDocumentSync(
       initial.text,
       {
         read: () => invoke<string>("read_doc", { path: pathRef.current }),
         write: async (text) => {
-          // The same synchronous step as `serialize` (document-sync.ts): the root is read from
-          // the state `text` was serialised from, before the first `await`.
+          // The same synchronous step as `serialize` (document-sync.ts): the root and the sidecar
+          // are read from the state `text` was serialised from, before the first `await`.
           const at = pathRef.current;
-          const { root } = storeRef.current.getState().document;
+          const { root, sidecar } = storeRef.current.getState().document;
           await invoke("write_doc", { path: at, contents: text });
-          const sidecarPath = sidecarPathFor(at);
-          // Re-read before writing: `watch.rs` reports `.md` paths only, so a sidecar-only change
-          // by another writer is never seen except here (DECISIONS #review-2-r0 U5).
-          const diskRaw = await invoke<string | null>("read_sidecar", { path: sidecarPath });
-          const choice = baseline.choose(diskRaw, root);
-          if (choice.action === "skip") {
-            errorRef.current(describe(choice.error));
-            return;
+          // From here the Markdown is on disk, so a failure is the sidecar's alone and is reported
+          // apart from it (`MarkdownWritten`; backlog `[review-2-r2, sidecar failure after a
+          // Markdown write]`).
+          try {
+            const sidecarPath = sidecarPathFor(at);
+            // Re-read before writing: `watch.rs` reports `.md` paths only, so a sidecar-only change
+            // by another writer is never seen except here (DECISIONS #review-2-r0 U5).
+            const diskRaw = await invoke<string | null>("read_sidecar", { path: sidecarPath });
+            const choice = baseline.choose(diskRaw, root, sidecar);
+            if (choice.action === "skip") {
+              errorRef.current(describe(choice.error));
+              return;
+            }
+            const raw = `${JSON.stringify(choice.sidecar, null, 2)}\n`;
+            await invoke("write_sidecar", { path: sidecarPath, contents: raw });
+            baseline.wrote(raw, choice);
+          } catch (error) {
+            throw new MarkdownWritten(error);
           }
-          const raw = `${JSON.stringify(choice.sidecar, null, 2)}\n`;
-          await invoke("write_sidecar", { path: sidecarPath, contents: raw });
-          baseline.wrote(raw, choice.sidecar);
         },
       },
       {
         serialize: () => format(storeRef.current.getState().document.root),
         reloaded: (text) => {
-          setStore(storeFor(text, baseline.current()));
+          setStore(storeFor(text, storeRef.current.getState().document.sidecar));
           setConflict(false);
           setReloads((n) => n + 1);
         },
@@ -200,10 +232,20 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
   useEffect(
     () =>
       store.subscribe((state, previous) => {
-        if (state.document !== previous.document) syncRef.current?.edited();
+        if (state.document !== previous.document && !adopting.current) syncRef.current?.edited();
       }),
     [store],
   );
+
+  // The Outline's views live outside the pane (task 3.2) and edit this store too.
+  const storeListener = useRef(onStore);
+  useLayoutEffect(() => {
+    storeListener.current = onStore;
+  });
+  useEffect(() => {
+    storeListener.current?.(store);
+    return () => storeListener.current?.(null);
+  }, [store]);
 
   // The shell e2e's handle on this pane's store (task 3.1; ./test-hook.ts).
   useEffect(() => installTestHook(window as TestHookHost, store), [store]);

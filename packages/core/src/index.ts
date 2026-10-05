@@ -41,6 +41,7 @@ export {
   replaceBlock,
   moveBlock,
   moveSection,
+  moveSectionTo,
   setHeadingDepth,
   type Block,
   type BlockNode,
@@ -130,6 +131,18 @@ export {
 } from "./sidecar.js";
 
 export {
+  outlineOf,
+  applySetQuestion,
+  applySetTopicQuestion,
+  applyNewQuestion,
+  applyOutlineDrop,
+  outlineDrop,
+  topicQuestionEditable,
+  NEW_QUESTION_DEPTH,
+  type OutlineItem,
+} from "./outline.js";
+
+export {
   COALESCE_WINDOW_MS,
   UNDO_CAP,
   createUndoStack,
@@ -140,6 +153,7 @@ export {
   push,
   undo,
   redo,
+  amendSidecar,
   type UndoEntry,
   type UndoStack,
   type UndoStackOptions,

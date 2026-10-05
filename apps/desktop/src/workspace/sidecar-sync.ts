@@ -11,6 +11,12 @@ import { parseSidecar, refresh, type Sidecar } from "@essaydown/core";
 export interface SidecarWrite {
   readonly action: "write";
   readonly sidecar: Sidecar;
+  /**
+   * The sidecar the choice was made against (the pane's own, as the save read it), and whether the
+   * disk's sidecar won over it — then `sidecar` is the disk's, to be adopted by the pane's owner.
+   */
+  readonly basis: Sidecar;
+  readonly adopted: boolean;
 }
 
 export interface SidecarSkip {
@@ -27,8 +33,8 @@ export type SidecarWriteChoice = SidecarWrite | SidecarSkip;
  *
  * Disk unchanged since `knownRaw` means nobody else touched the file since this pane last knew its
  * contents: the pane's own edit is current, and its in-memory sidecar wins. Disk changed to
- * something this pane did not write: PRD §6.2 says the sidecar wins over the pane's copy (this
- * build has no in-app sidecar edit to lose), so the disk's content is taken, re-attached to `root`
+ * something this pane did not write: PRD §6.2 says the sidecar wins over the pane's copy, so the
+ * disk's content is taken (and adopted by the pane's owner, {@link SidecarBaseline.wrote}), re-attached to `root`
  * so its anchors resolve against the document as it stands now — not the stale in-memory copy from
  * `loadDocument`. Disk changed to something that does not parse is never adopted, and never
  * overwritten: the caller reports it and skips the write, leaving the file as the only copy of
@@ -47,36 +53,56 @@ export function chooseSidecarForWrite(
     } catch (error) {
       return { action: "skip", error };
     }
-    if (diskRaw !== knownRaw) return { action: "write", sidecar: refresh(disk, root) };
+    if (diskRaw !== knownRaw) {
+      return { action: "write", sidecar: refresh(disk, root), basis: inMemory, adopted: true };
+    }
   }
-  return { action: "write", sidecar: refresh(inMemory, root) };
+  return { action: "write", sidecar: refresh(inMemory, root), basis: inMemory, adopted: false };
 }
 
 /**
- * The pane's sidecar baseline (task 2.23, DECISIONS #review-2-r1 U5): the raw JSON text the pane
- * last read or wrote and the parsed sidecar that text stands for, held together so one never moves
- * without the other. 2.19 moved the raw text after a write but built the next write from the store's
- * stale sidecar, so the second save after an external write found the disk equal to the raw
- * baseline and wrote the stale copy over the values it had just adopted.
+ * The owner of the pane's parsed sidecar. Since task 3.2 that is the document store: the Outline's
+ * question and topic fields edit the sidecar through the store (one undo step each), so the store's
+ * present sidecar is what every save writes, and a sidecar adopted from the disk has to land there
+ * too or the next save would write the store's stale copy over it (DECISIONS #review-2-r1 U5,
+ * backlog `[review-2-r1, sidecar baseline vs store]`).
  */
-export interface SidecarBaseline {
-  /** `chooseSidecarForWrite` with this baseline's raw text and its own sidecar as `inMemory`. */
-  choose(diskRaw: string | null, root: Root): SidecarWriteChoice;
-  /** After `write_sidecar` resolves: the bytes written and the sidecar they encode, both at once. */
-  wrote(raw: string, sidecar: Sidecar): void;
-  /** The sidecar the next write (or a reload's store) starts from. */
+export interface SidecarOwner {
+  /** The sidecar the document currently has. */
   current(): Sidecar;
+  /** Make `sidecar` the document's sidecar; external state, so not an edit. */
+  adopt(sidecar: Sidecar): void;
 }
 
-export function createSidecarBaseline(initialRaw: string | null, initialSidecar: Sidecar): SidecarBaseline {
+/**
+ * The pane's sidecar baseline (tasks 2.23, 3.2, DECISIONS #review-2-r1 U5): the raw JSON text the
+ * pane last read or wrote, moved in the same synchronous step as the parsed sidecar it stands for.
+ * 2.19 moved the raw text after a write but built the next write from a stale sidecar, so the
+ * second save after an external write found the disk equal to the raw baseline and wrote the stale
+ * copy over the values it had just adopted. The parsed half lives in the {@link SidecarOwner}; this
+ * holds the raw half and moves both in {@link wrote}.
+ */
+export interface SidecarBaseline {
+  /**
+   * `chooseSidecarForWrite` with this baseline's raw text. `inMemory` is the owner's sidecar as
+   * the save read it, in the same synchronous step as the root it writes.
+   */
+  choose(diskRaw: string | null, root: Root, inMemory: Sidecar): SidecarWriteChoice;
+  /**
+   * After `write_sidecar` resolves: the bytes written become the raw baseline, and an adopted
+   * disk sidecar becomes the owner's — unless the owner's sidecar moved since the choice (an
+   * in-app edit made during the write), which is then kept and written by the save it scheduled.
+   */
+  wrote(raw: string, choice: SidecarWrite): void;
+}
+
+export function createSidecarBaseline(initialRaw: string | null, owner: SidecarOwner): SidecarBaseline {
   let raw = initialRaw;
-  let sidecar = initialSidecar;
   return {
-    choose: (diskRaw, root) => chooseSidecarForWrite(raw, diskRaw, sidecar, root),
-    wrote: (nextRaw, nextSidecar) => {
+    choose: (diskRaw, root, inMemory) => chooseSidecarForWrite(raw, diskRaw, inMemory, root),
+    wrote: (nextRaw, choice) => {
       raw = nextRaw;
-      sidecar = nextSidecar;
+      if (choice.adopted && owner.current() === choice.basis) owner.adopt(choice.sidecar);
     },
-    current: () => sidecar,
   };
 }

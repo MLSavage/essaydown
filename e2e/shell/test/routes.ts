@@ -185,3 +185,66 @@ const MOD_KEY = platform() === "darwin" ? "Meta" : "Control";
 export async function pressModChord(key: string): Promise<void> {
   await browser.keys([MOD_KEY, key]);
 }
+
+/** A pointer drag from `from` to `to` (viewport points), task 3.2's Outline tree drag. `@dnd-kit/core`'s
+ * PointerSensor starts a drag after 4 px of movement and reads `over` from the render that follows
+ * each move, so the drag goes in steps with a pause after each. external: native WebDriver pointer
+ * actions (a real press, moves and release). embedded: the provider's pointer actions are
+ * synthetic mouse events, which raise no pointer events at all, so the route dispatches the
+ * PointerEvents the sensor listens for — `pointerdown` on the element under `from`, then
+ * `pointermove`s and a `pointerup` on that same element (bubbling to the document listeners the
+ * sensor adds) — one execute per step, so React renders between them. */
+export async function dragBetween(from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+  const steps = [
+    { x: from.x + 6, y: from.y + 6 },
+    { x: Math.round((from.x + to.x) / 2), y: Math.round((from.y + to.y) / 2) },
+    { x: to.x, y: to.y - 2 },
+    to,
+  ];
+  if (!embedded) {
+    let chain = browser
+      .action("pointer", { parameters: { pointerType: "mouse" } })
+      .move({ x: from.x, y: from.y, origin: "viewport" })
+      .down({ button: 0 })
+      .pause(80);
+    for (const step of steps) chain = chain.move({ x: step.x, y: step.y, origin: "viewport" }).pause(80);
+    await chain.up({ button: 0 }).perform();
+    return;
+  }
+  const fire = (type: string, x: number, y: number): Promise<boolean> =>
+    browser.execute(
+      (kind, px, py, sx, sy) => {
+        const w = window as unknown as { __essaydownDragTarget?: Element };
+        if (kind === "pointerdown") w.__essaydownDragTarget = document.elementFromPoint(sx, sy) ?? undefined;
+        const target = w.__essaydownDragTarget;
+        if (target === undefined) return false;
+        target.dispatchEvent(
+          new PointerEvent(kind, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            clientX: px,
+            clientY: py,
+            button: 0,
+            buttons: kind === "pointerup" ? 0 : 1,
+            pointerId: 1,
+            pointerType: "mouse",
+            isPrimary: true,
+          }),
+        );
+        return true;
+      },
+      type,
+      x,
+      y,
+      from.x,
+      from.y,
+    );
+  assert.ok(await fire("pointerdown", from.x, from.y), `nothing under the drag start ${from.x},${from.y}`);
+  for (const step of steps) {
+    await browser.pause(80);
+    await fire("pointermove", step.x, step.y);
+  }
+  await browser.pause(80);
+  await fire("pointerup", to.x, to.y);
+}

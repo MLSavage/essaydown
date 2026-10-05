@@ -259,3 +259,39 @@ export function setHeadingDepth(root: Root, sectionIndex: number, depth: number)
   }
   return next;
 }
+
+/**
+ * A copy of `root` with section `from` lifted out and put back in front of the top-level node that
+ * was at `index` in `root.children` (`index === root.children.length` puts it at the end), its
+ * heading set to `depth` and every heading it owns re-depthed by the same delta — the one primitive
+ * behind the Outline drag of §6.3 ("drag to reorder / nest = `setHeadingDepth` + `moveSection`"),
+ * done as one step so the section is re-depthed over exactly the nodes it owned where it was.
+ *
+ * `index` names a boundary between top-level nodes in the document *before* the move. The two
+ * boundaries of the section itself (`start` and `end`) leave it where it is, so the call is then
+ * `setHeadingDepth` alone; every boundary strictly inside it is refused, because a section cannot
+ * be put inside itself. The caller picks a boundary at which the section stays whole: the next
+ * heading after `index` must be no deeper than `depth` (a sibling's heading, a parent's end, or
+ * the end of the document), which is what the Outline's three drops (before a row, after a row's
+ * section, at the end of a row's section as its child) all give.
+ *
+ * @throws RangeError if `from` is outside the document, if `index` is not a boundary of `root` or
+ * lies inside the section, or if `depth` or a re-depthed descendant falls outside 1–6.
+ */
+export function moveSectionTo(root: Root, from: number, index: number, depth: number): Root {
+  const sections = sectionsOf(root);
+  assertIndex("moveSectionTo", "from", from, sections.length);
+  assertIndex("moveSectionTo", "index", index, root.children.length + 1);
+  const source = sections[from];
+  if (index > source.start && index < source.end) {
+    throw new RangeError(`moveSectionTo: boundary ${index} is inside section ${from}`);
+  }
+
+  const redepthed = setHeadingDepth(root, from, depth);
+  const next = { ...redepthed, children: [...redepthed.children] };
+  const moved = next.children.splice(source.start, source.end - source.start);
+  // A boundary after the section shifts down by the nodes lifted out ahead of it.
+  const insertAt = index >= source.end ? index - moved.length : index;
+  next.children.splice(insertAt, 0, ...moved);
+  return next;
+}

@@ -39,9 +39,25 @@ export interface SyncIO {
   read(): Promise<string>;
   /**
    * Write the editor's document (Markdown + sidecar); `text` is the Markdown being written. Called
-   * in the same synchronous step as `serialize`: read the sidecar before the first `await`.
+   * in the same synchronous step as `serialize`: read the sidecar before the first `await`. A
+   * failure after the Markdown landed rejects with {@link MarkdownWritten}, so the two outcomes are
+   * reported apart.
    */
   write(text: string): Promise<void>;
+}
+
+/**
+ * The rejection of a {@link SyncIO.write} whose Markdown reached the disk and whose later part (the
+ * sidecar's read or write) failed: `cause` is that failure. The disk then holds the written text,
+ * so `known` stays on it and the next save finds the disk unchanged rather than raising a false
+ * 'Changed on disk' (backlog `[review-2-r2, sidecar failure after a Markdown write]`, Sol r2
+ * finding 3); the edit stays dirty, so the next save writes both halves again.
+ */
+export class MarkdownWritten extends Error {
+  constructor(readonly cause: unknown) {
+    super("the Markdown was written; the sidecar was not");
+    this.name = "MarkdownWritten";
+  }
 }
 
 export interface SyncTimers {
@@ -198,6 +214,10 @@ export function createDocumentSync(
     try {
       await io.write(text);
     } catch (error) {
+      if (error instanceof MarkdownWritten) {
+        callbacks.failed(error.cause);
+        return "failed";
+      }
       setKnown(previous);
       callbacks.failed(error);
       return "failed";

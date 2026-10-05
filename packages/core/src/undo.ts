@@ -208,3 +208,19 @@ export function redo(stack: UndoStack): UndoStack {
   if (!canRedo(stack)) return endCoalescing(stack);
   return { ...stack, index: stack.index + 1, openKey: null };
 }
+
+/**
+ * Replace the present snapshot's sidecar without pushing (task 3.2): a sidecar another writer put
+ * on disk, adopted at save time because the disk wins over the pane's copy (§6.2;
+ * DECISIONS #review-2-r1 U5), is not an edit, so it is no undo step — the way a reload is a new
+ * store rather than a commit. The present root is kept by reference, the history and the open
+ * coalescing group are untouched, and an Undo still returns to the snapshot before the present
+ * one. Returns the same stack when the present sidecar already is `sidecar`.
+ */
+export function amendSidecar(stack: UndoStack, sidecar: Sidecar): UndoStack {
+  const present = stack.entries[stack.index];
+  if (present.state.sidecar === sidecar) return stack;
+  const entries = stack.entries.slice();
+  entries[stack.index] = { ...present, state: { root: present.state.root, sidecar } };
+  return { ...stack, entries };
+}

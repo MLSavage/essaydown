@@ -344,3 +344,134 @@ button:disabled {
     background-color: #3a3a3a;
   }
 }
+
+/* Task 3.2: Outline mode (PRD §6.3) — the sidebar section tree and the main pane's question list. */
+.outline-tree {
+  flex: 0 1 auto;
+  max-height: 55%;
+  overflow-y: auto;
+  border-top: 1px solid #d9d9d9;
+  padding: 6px 0;
+}
+
+.outline-tree-title {
+  padding: 0 8px 4px;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+}
+
+.outline-tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.outline-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding-right: 8px;
+  font-size: 0.88em;
+  border-top: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+}
+
+.outline-tree-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-tree-handle {
+  padding: 0 4px;
+  box-shadow: none;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+
+.outline-tree-dragging {
+  background-color: #dfe5f7;
+  opacity: 0.85;
+}
+
+.outline-tree-drop-beside {
+  border-top-color: #396cd8;
+}
+
+.outline-tree-drop-nest {
+  border-bottom-color: #396cd8;
+  background-color: #eef1fb;
+}
+
+.outline-panel {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #d9d9d9;
+}
+
+.outline-topic {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.outline-topic .question-field {
+  flex: 1;
+}
+
+.outline-topic-readonly {
+  margin: 4px 0 0;
+  color: #888;
+  font-size: 0.85em;
+}
+
+.outline-topic .question-field[readonly] {
+  color: #888;
+  background-color: #f0f0f0;
+}
+
+.outline-questions {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.outline-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0;
+}
+
+.outline-section-title {
+  flex: 0 1 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-section .question-field,
+.outline-new-question input {
+  flex: 1;
+}
+
+.question-field,
+.outline-new-question input {
+  font: inherit;
+  font-size: 0.9em;
+  padding: 2px 6px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.outline-new-question {
+  display: flex;
+  gap: 8px;
+}

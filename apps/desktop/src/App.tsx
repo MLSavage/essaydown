@@ -4,8 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
+import type { DocumentStore } from "@essaydown/editor";
 import ModeBar from "./modes/ModeBar";
 import { DEFAULT_MODE, isMacPlatform, modeForKey, type Mode } from "./modes/modes";
+import OutlinePanel from "./outline/OutlinePanel";
+import OutlineTree from "./outline/OutlineTree";
 import SettingsDialog from "./settings/SettingsDialog";
 import type { HasCoachKeyResult, SettingsIO } from "./settings/settings-sync";
 import ConfirmDelete from "./workspace/ConfirmDelete";
@@ -72,6 +75,9 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // PRD §6.3: a mode is a view of the one document store, so it lives here and never in the store.
   const [mode, setMode] = useState<Mode>(DEFAULT_MODE);
+  // The open document's store, which the Outline's sidebar tree and question list edit beside the
+  // editor (task 3.2); null when no document is open.
+  const [store, setStore] = useState<DocumentStore | null>(null);
   const mac = useMemo(() => isMacPlatform(navigator.platform), []);
 
   const settingsIO: SettingsIO = useMemo(
@@ -360,9 +366,11 @@ function App() {
             onStartRename={setRenamingPath}
           />
         )}
+        {mode === "outline" && store !== null && openDoc !== null && <OutlineTree store={store} />}
       </aside>
       <main className="workspace-main" data-testid="main">
         <ModeBar mode={mode} onSelect={setMode} mac={mac} />
+        {mode === "outline" && store !== null && openDoc !== null && <OutlinePanel store={store} />}
         {openPath === null || openDoc === null || root === null ? (
           <p className="workspace-empty" data-testid="workspace-empty">
             No file open
@@ -376,6 +384,7 @@ function App() {
             initial={openDoc.loaded}
             onUndoOpen={undoOpen}
             onError={setError}
+            onStore={setStore}
           />
         )}
       </main>

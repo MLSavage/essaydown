@@ -1,5 +1,6 @@
 import type { Root, Yaml } from "mdast";
 import {
+  amendSidecar,
   createUndoStack,
   current,
   endCoalescing,
@@ -83,6 +84,12 @@ export interface DocumentStoreState {
    * mutation that returns the snapshot it was given (both halves, by reference) pushes nothing.
    */
   dispatch(mutation: ModeMutation): void;
+  /**
+   * Make `sidecar` the present snapshot's sidecar without pushing (`core`'s `amendSidecar`): the
+   * pane adopts a sidecar another writer put on disk (task 3.2), which is not an edit and so is
+   * no undo step. A no-op when the present sidecar already is `sidecar`.
+   */
+  adoptSidecar(sidecar: Sidecar): void;
   /** Push a committed mutation (`core`'s `push`, with this store's stack). */
   commit(root: Root, sidecar: Sidecar, options?: PushOptions): void;
   /** Step back one snapshot. */
@@ -119,6 +126,10 @@ export function createDocumentStore(
         const after = mutation(before);
         if (after.root === before.root && after.sidecar === before.sidecar) return;
         move(push(get().stack, after.root, after.sidecar));
+      },
+      adoptSidecar: (sidecar) => {
+        const next = amendSidecar(get().stack, sidecar);
+        if (next !== get().stack) move(next);
       },
       commit: (nextRoot, nextSidecar, pushOptions) =>
         move(push(get().stack, nextRoot, nextSidecar, pushOptions)),
