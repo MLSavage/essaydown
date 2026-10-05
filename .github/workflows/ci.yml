@@ -17,6 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -177,15 +178,16 @@ jobs:
   # macOS has no external WebDriver for WKWebView, and Windows' tauri-driver -> msedgedriver route
   # cannot create a session on this image's WebView2 (actions/runner-images#14738), so both run the
   # embedded provider instead (tauri-plugin-wdio-webdriver, registered under
-  # #[cfg(debug_assertions)] in apps/desktop/src-tauri/src/lib.rs, PRD §4); macOS is
-  # continue-on-error until Phase 6 (PRD §8 2.1).
+  # #[cfg(debug_assertions)] in apps/desktop/src-tauri/src/lib.rs, PRD §4); Linux and macOS are
+  # required and Windows is recorded (continue-on-error) until Michael can test Windows himself
+  # (DECISIONS #047).
   e2e-shell:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
 
