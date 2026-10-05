@@ -25,6 +25,16 @@ import { format, parse } from "../../packages/core/src/index.js";
  * guards this file too). A surrogate pair is one caret step in Blink and two units in the anchor's
  * offset — the offset is asserted, not assumed.
  *
+ * Task 3.9 (the `[1.46]` caret race's sixth and seventh gate instances, both at this case's
+ * `Backspace`, DECISIONS #042, #046): ProseMirror takes a native `ArrowRight` from the DOM's own
+ * `selectionchange` one rendering step after the key, so a key that reads the editor's selection
+ * rather than the DOM's — `Backspace`, `Delete` — can land before that step on a slow runner and
+ * change nothing. Before the `Backspace` (which follows the counted `ArrowRight`s) and before the
+ * `Delete` (which follows the single `ArrowRight` after it) this case polls the dev bar's own
+ * selection readout (task 1.62; helper copied from `editor-toggle-cell-code-pipe.spec.ts:74`) for
+ * its `before` field, so the key only fires once the editor's state has caught up with the DOM
+ * caret `press()` already confirmed.
+ *
  * The copy case asserts the string the app handed `navigator.clipboard.writeText`, recorded by an
  * init-script spy, never the OS clipboard read back (task 1.28, DECISIONS #021); the bytes are
  * asserted with `toBe`, never a normalising matcher (DECISIONS #022); the fixed point of the pane
@@ -101,6 +111,17 @@ function caret(page: Page): Promise<{ text: string | null; offset: number }> {
   });
 }
 
+/** The dev bar's selection readout (task 1.62), parsed — the editor's own selection, not the DOM's. */
+async function selection(page: Page): Promise<unknown> {
+  const text = await page.getByTestId("selection").textContent();
+  return JSON.parse(text ?? "null");
+}
+
+/** The `before` field of {@link selection}: the current textblock's text up to the editor's caret. */
+async function selectionBefore(page: Page): Promise<string | null> {
+  return ((await selection(page)) as { before: string | null }).before;
+}
+
 /** Click "Copy Markdown" and return the one string the app handed `writeText`. */
 async function clickCopyMarkdown(page: Page): Promise<string> {
   await page.getByTestId("copy-markdown").click();
@@ -157,6 +178,11 @@ test.describe("an astral character left flush between two emphasis runs reaches 
     await press(page, "ArrowRight", 3);
     await expect.poll(() => caret(page)).toEqual({ text: " 😀 ", offset: 1 });
 
+    // The sixth and seventh gate instances of the `[1.46]` race (DECISIONS #042, #046) found this
+    // `Backspace` landing one rendering step before ProseMirror's own selection had caught up with
+    // the `ArrowRight`s just confirmed on the DOM, and it changed nothing. This poll waits for the
+    // editor's own selection (task 1.62's readout, not the DOM's) to reach the same caret.
+    await expect.poll(() => selectionBefore(page)).toBe("a. ");
     // The space before the emoji taken: the emoji is now the closing neighbour of `*a.*`.
     await page.keyboard.press("Backspace");
     await expect.poll(() => markdown(page)).toBe("*a.*&#x1F600; *(b)*\n");
@@ -167,6 +193,8 @@ test.describe("an astral character left flush between two emphasis runs reaches 
     await page.keyboard.press("ArrowRight");
     await expect.poll(() => caret(page)).toEqual({ text: "😀 ", offset: 2 });
 
+    // The same guard before `Delete`, which also follows a native `ArrowRight`.
+    await expect.poll(() => selectionBefore(page)).toBe("a.😀");
     // The space after the emoji taken: the emoji is now also the opening neighbour of `*(b)*`.
     // Before 1.49 the pane read `*a.*&#xD83D;&#xDE00;*(b)*` here (Sol's log), while the rendered
     // paragraph still showed the emoji.
