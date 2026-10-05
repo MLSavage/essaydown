@@ -1,1 +1,1 @@
-See <https://example.com/pens> for details.
+See https://example.com/pens for details.

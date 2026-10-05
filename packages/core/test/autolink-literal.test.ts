@@ -154,31 +154,46 @@ describe("autolink round trip (task 1.50, L2): the `<…>` form is written exact
     });
   });
 
+  /**
+   * Task 3.14 (DECISIONS #review-1-r6 L9): a source that writes the link as a bare GFM literal is
+   * now written back bare — the writer's bytes — so each literal-source guard below asserts the
+   * source as the bytes, and asserts the form task 1.50 chose for the same tree under the escaped
+   * serialization (`createFormatter("all")`, what `format` falls back to for a literal the
+   * parser would misread raw), which is where the fallback still decides.
+   */
+  const escaped = (source: string): string => createFormatter("all").stringify(parse(source));
+
   describe("named guards", () => {
-    it("the backslash before the closing `>` (`see https://x.y\\ end`): the resource form, whose parse holds the one-backslash url", () => {
-      assertRoundTrip("see https://x.y\\ end\n", "https://x.y\\", "see [https://x.y\\\\](https://x.y\\\\) end\n");
+    it("the backslash before the closing `>` (`see https://x.y\\ end`): bare, its own bytes; escaped, the resource form, whose parse holds the one-backslash url", () => {
+      assertRoundTrip("see https://x.y\\ end\n", "https://x.y\\", "see https://x.y\\ end\n");
+      const out = escaped("see https://x.y\\ end\n");
+      expect(out).toBe("see [https://x.y\\\\](https://x.y\\\\) end\n");
+      expect(links(parse(out)).map((link) => link.url)).toEqual(["https://x.y\\"]);
     });
 
-    it("`\\_` (the hand-escaped underscore in a Wikipedia url): the resource form, the url's single backslash kept", () => {
-      assertRoundTrip(
-        "see https://en.wikipedia.org/wiki/Foo\\_bar end\n",
-        "https://en.wikipedia.org/wiki/Foo\\_bar",
+    it("`\\_` (the hand-escaped underscore in a Wikipedia url): bare, its own bytes; escaped, the resource form, the url's single backslash kept", () => {
+      const source = "see https://en.wikipedia.org/wiki/Foo\\_bar end\n";
+      assertRoundTrip(source, "https://en.wikipedia.org/wiki/Foo\\_bar", source);
+      expect(escaped(source)).toBe(
         "see [https://en.wikipedia.org/wiki/Foo\\\\\\_bar](https://en.wikipedia.org/wiki/Foo\\\\_bar) end\n",
       );
     });
 
-    it("the `www.` form: the text and the url differ, so the built-in takes the resource form on its own — the fallback is not involved", () => {
-      assertRoundTrip("see www.x.y\\ end\n", "http://www.x.y\\", "see [www.x.y\\\\](http://www.x.y\\\\) end\n");
+    it("the `www.` form: bare, its own bytes; escaped, the text and the url differ, so the built-in takes the resource form on its own — the fallback is not involved", () => {
+      assertRoundTrip("see www.x.y\\ end\n", "http://www.x.y\\", "see www.x.y\\ end\n");
+      expect(escaped("see www.x.y\\ end\n")).toBe("see [www.x.y\\\\](http://www.x.y\\\\) end\n");
     });
 
-    it("the plain autolink literal and the plain autolink (the absence cases): the `<…>` form is kept", () => {
-      assertRoundTrip("see https://example.com/a_b end\n", "https://example.com/a_b", "see <https://example.com/a_b> end\n");
+    it("the plain autolink literal is kept bare and the plain autolink keeps its `<…>` form; escaped, the literal takes `<…>`", () => {
+      assertRoundTrip("see https://example.com/a_b end\n", "https://example.com/a_b", "see https://example.com/a_b end\n");
       assertRoundTrip("<https://example.com/a_b>\n", "https://example.com/a_b", "<https://example.com/a_b>\n");
+      expect(escaped("see https://example.com/a_b end\n")).toBe("see <https://example.com/a_b> end\n");
     });
 
-    it("an email autolink carries its url through the `mailto:` the parser prefixes (format-link-as-autolink.js:27), so `<a@b.c>` is kept", () => {
-      assertRoundTrip("see a@b.c end\n", "mailto:a@b.c", "see <a@b.c> end\n");
+    it("an email autolink carries its url through the `mailto:` the parser prefixes (format-link-as-autolink.js:27), so `<a@b.c>` is kept, and the literal `a@b.c` is kept bare", () => {
+      assertRoundTrip("see a@b.c end\n", "mailto:a@b.c", "see a@b.c end\n");
       assertRoundTrip("<a@b.c>\n", "mailto:a@b.c", "<a@b.c>\n");
+      expect(escaped("see a@b.c end\n")).toBe("see <a@b.c> end\n");
     });
 
     it("a `mailto:` autolink whose url holds a backslash before punctuation falls back like any other", () => {
@@ -200,7 +215,7 @@ describe("autolink round trip (task 1.50, L2): the `<…>` form is written exact
       });
     }
 
-    it("the five sources are the canonical forms of the task's five: `see https://x.y\\ end`, the Wikipedia url, `see www.x.y\\ end`, the plain literal, the plain autolink", () => {
+    it("the five sources are the escaped forms of the task's five (`see https://x.y\\ end`, the Wikipedia url, `see www.x.y\\ end`, the plain literal, the plain autolink), each of which `format` keeps as written (task 3.14)", () => {
       const originals = [
         "see https://x.y\\ end\n",
         "see https://en.wikipedia.org/wiki/Foo\\_bar end\n",
@@ -208,15 +223,16 @@ describe("autolink round trip (task 1.50, L2): the `<…>` form is written exact
         "see https://example.com/a_b end\n",
         "<https://example.com/a_b>\n",
       ];
-      expect(originals.map((original) => format(parse(original)))).toEqual(SOURCES);
+      expect(originals.map(escaped)).toEqual(SOURCES);
+      expect(originals.map((original) => format(parse(original)))).toEqual(originals);
     });
   });
 
   describe("`formatWithMap` inherits the wrapper", () => {
-    it("`formatWithMap(parse(\"see https://x.y\\\\ end\\n\"))` is a fixed point, nothing unresolved, and the backslash's spelling is the two-character escape", () => {
-      const source = "see https://x.y\\ end\n";
+    it("`formatWithMap(parse(\"see [https://x.y\\\\](https://x.y\\\\) end\\n\"))` is a fixed point, nothing unresolved, and the backslash's spelling is the two-character escape", () => {
+      const source = "see [https://x.y\\\\](https://x.y\\\\) end\n";
       const { text, map, spellings } = formatWithMap(parse(source));
-      expect(text).toBe("see [https://x.y\\\\](https://x.y\\\\) end\n");
+      expect(text).toBe(source);
       expect(format(parse(text))).toBe(text);
       expect(map.unresolved).toEqual([]);
       // The link is the paragraph's second child; its text child is `https://x.y\`, whose last
@@ -230,6 +246,18 @@ describe("autolink round trip (task 1.50, L2): the `<…>` form is written exact
       expect(text.slice(table.starts[index], table.ends[index])).toBe("\\\\");
       // The other eleven characters are spelled as themselves, one byte each.
       for (let i = 0; i < index; i++) {
+        expect(text.slice(table.starts[i], table.ends[i]), `character ${i}`).toBe(value[i]);
+      }
+    });
+
+    it("`formatWithMap(parse(\"see https://x.y\\\\ end\\n\"))`: the literal bare, nothing unresolved, the backslash spelled by itself (task 3.14)", () => {
+      const source = "see https://x.y\\ end\n";
+      const { text, map, spellings } = formatWithMap(parse(source));
+      expect(text).toBe(source);
+      expect(map.unresolved).toEqual([]);
+      const value = "https://x.y\\";
+      const table = spellings["0.1.0"];
+      for (let i = 0; i < value.length; i++) {
         expect(text.slice(table.starts[i], table.ends[i]), `character ${i}`).toBe(value[i]);
       }
     });

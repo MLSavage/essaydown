@@ -1,7 +1,7 @@
 import { gfmAutolinkLiteralFromMarkdown } from "mdast-util-gfm-autolink-literal";
 import { gfmStrikethroughFromMarkdown } from "mdast-util-gfm-strikethrough";
 import { gfmTableFromMarkdown } from "mdast-util-gfm-table";
-import type { Root } from "mdast";
+import type { Nodes, Root } from "mdast";
 import { gfmAutolinkLiteral } from "micromark-extension-gfm-autolink-literal";
 import { gfmStrikethrough } from "micromark-extension-gfm-strikethrough";
 import { gfmTable } from "micromark-extension-gfm-table";
@@ -52,5 +52,37 @@ export function createParser(): Processor<Root> {
  * the opaque set (`html`, `yaml`) keeps its (now LF-only) source bytes verbatim in `node.value`.
  */
 export function parse(markdown: string): Root {
-  return createParser().parse(markdown.replace(/\r\n?/g, "\n"));
+  const normalised = markdown.replace(/\r\n?/g, "\n");
+  const root = createParser().parse(normalised);
+  markAutolinkLiterals(root, normalised);
+  return root;
+}
+
+declare module "mdast" {
+  interface LinkData {
+    /**
+     * Set by {@link parse} on a link the source wrote as a GFM autolink literal — a bare
+     * `https://…`, `www.…` or e-mail address, with no `<…>` and no `[…](…)` around it — so that
+     * the formatter can write it back bare (task 3.14). Absent on every other link.
+     */
+    autolinkLiteral?: true;
+  }
+}
+
+/**
+ * Mark every link the source wrote as a GFM autolink literal (task 3.14): the mdast of a literal
+ * and of a `<…>` autolink are otherwise the same tree, and each form's bytes are the writer's. The
+ * two ways the installed extension makes a literal are both read here: a micromark
+ * `literalAutolink` token, whose link starts at the literal's first byte — never `<` or `[`, the
+ * first byte of the other two forms — and `mdast-util-gfm-autolink-literal`'s
+ * `transformGfmAutolinkLiterals` (2.0.1, `lib/index.js`), whose `findAndReplace` builds the link
+ * with no `position`. Resource, reference and `<…>` links all start at `<` or `[`.
+ */
+function markAutolinkLiterals(node: Nodes, source: string): void {
+  if (node.type === "link") {
+    const start = node.position?.start.offset;
+    const first = start === undefined ? undefined : source.charAt(start);
+    if (first !== "<" && first !== "[") node.data = { ...node.data, autolinkLiteral: true };
+  }
+  if ("children" in node) for (const child of node.children) markAutolinkLiterals(child, source);
 }

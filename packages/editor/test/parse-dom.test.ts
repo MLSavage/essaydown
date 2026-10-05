@@ -229,10 +229,38 @@ describe("each rule reads back exactly what its toDOM wrote", () => {
     const rule = (marks.link.parseDOM as TagParseRule[])[0];
     const attrsFor = (mark: { type: { spec: { toDOM?: unknown } } }): Record<string, string> =>
       attrsOf((marks.link.toDOM as (m: unknown, i: boolean) => DOMOutputSpec)(mark, true));
-    expect(rule.getAttrs!(element(attrsFor(withTitle)))).toEqual({ url: "a.md", title: "t" });
+    expect(rule.getAttrs!(element(attrsFor(withTitle)))).toEqual({
+      url: "a.md",
+      title: "t",
+      literal: false,
+    });
     const bare = schema.marks.link.create({ url: "a.md" });
-    expect(rule.getAttrs!(element(attrsFor(bare)))).toEqual({ url: "a.md", title: null });
-    expect(rule.getAttrs!(element({}))).toEqual({ url: "", title: null });
+    expect(rule.getAttrs!(element(attrsFor(bare)))).toEqual({
+      url: "a.md",
+      title: null,
+      literal: false,
+    });
+    expect(rule.getAttrs!(element({}))).toEqual({ url: "", title: null, literal: false });
+  });
+
+  it("link: the GFM autolink literal flag, present and absent (task 3.14: the editor's own copy → paste)", () => {
+    const rule = (marks.link.parseDOM as TagParseRule[])[0];
+    const attrsFor = (mark: { type: { spec: { toDOM?: unknown } } }): Record<string, string> =>
+      attrsOf((marks.link.toDOM as (m: unknown, i: boolean) => DOMOutputSpec)(mark, true));
+    const literal = schema.marks.link.create({ url: "https://a.b", literal: true });
+    expect(attrsFor(literal)).toHaveProperty("data-literal");
+    expect(rule.getAttrs!(element(attrsFor(literal)))).toEqual({
+      url: "https://a.b",
+      title: null,
+      literal: true,
+    });
+    const angle = schema.marks.link.create({ url: "https://a.b" });
+    expect(attrsFor(angle)).not.toHaveProperty("data-literal");
+    expect(rule.getAttrs!(element(attrsFor(angle)))).toEqual({
+      url: "https://a.b",
+      title: null,
+      literal: false,
+    });
   });
 
   it("the three inline-content rules preserve whitespace fully, so a soft break stays a break", () => {

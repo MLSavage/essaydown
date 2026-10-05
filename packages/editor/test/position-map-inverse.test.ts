@@ -451,8 +451,12 @@ interface LineShift {
  *   where the source bytes hold a raw `X`.
  * - `[review-1-r6 L9, URL-shaped text]`: a character typed inside an autolink literal's text
  *   leaves the editor holding a `link` whose text is no longer its destination, so the rendered
- *   bytes are a `[text](url)` link while the source keystroke edits the `<…>` autolink in place.
- *   Asserted: the rendered bytes hold the resource form and the source bytes the autolink form.
+ *   bytes are a `[text](url)` link while the source keystroke edits the literal in place. Since
+ *   task 3.14 the source writes the literal bare, so the source keystroke edits the bare bytes —
+ *   the literal re-linked with the edited url, or, for a letter typed right before it, un-linked
+ *   by GFM's previous-character rule while the rendered view keeps the link (`<…>` or resource).
+ *   Asserted: the rendered bytes hold a link form, the source bytes none, and the source bytes,
+ *   backslashes dropped, hold the rendered link's text.
  *
  * Task 1.64 recorded a third class here, `[1.64, a block-final mark whose last child is a link]`:
  * the caret after a link that ends a run, with plain text after the run, takes `[emphasis]` in the
@@ -488,10 +492,11 @@ describe("cursor map: the two views write the same bytes, and toRendered ∘ toS
   /** Which recorded class a disagreement belongs to, or `null` when it belongs to none. */
   function classify(rendered: string, written: string): string | null {
     if (rendered.includes("&#x58;") && !written.includes("&#x58;")) return PUNCTUATION_EDGED;
-    // The resource form on one side and the autolink form on the other, of the same URL: the
-    // source keystroke edits the `<…>` destination in place, the rendered one splits text from it.
-    if (/\]\(/.test(rendered) && !/\]\(/.test(written) && /<[^\s>]+>/.test(written))
-      return AUTOLINK_LITERAL;
+    // A link form on the rendered side and none on the source side: the source keystroke edits
+    // the bare literal's bytes in place (task 3.14 writes a literal bare) — re-linking it with the
+    // edited url, or un-linking it — while the rendered keystroke leaves the link mark and its url
+    // where they were.
+    if (keptLinkSourceBare(rendered, written)) return AUTOLINK_LITERAL;
     return null;
   }
 
@@ -629,6 +634,22 @@ describe("cursor map: the two views write the same bytes, and toRendered ∘ toS
     expect(excluded.length).toBeLessThan(positionsAgreeing);
   }, START_LEG_TIMEOUT_MS);
 });
+
+/**
+ * Whether `rendered` writes a link — the resource form or `<…>` — and `typed` writes none, while
+ * `typed`, with every backslash dropped, still holds that link's text: the
+ * source keystroke edited the bare literal's bytes in place (task 3.14), the rendered one left the
+ * link mark where it was.
+ */
+function keptLinkSourceBare(rendered: string, typed: string): boolean {
+  const form = /\[((?:\\.|[^\]\\])*)\]\(|<([^\s>]+)>/;
+  const found = form.exec(rendered);
+  if (found === null || form.test(typed)) return false;
+  // Backslashes dropped on both sides: un-linked, the source reads a `\\_` the literal kept as an
+  // escape, so the two spell one text with different backslashes and nothing else.
+  const bare = (bytes: string): string => bytes.replace(/\\/g, "");
+  return bare(typed).includes(bare(found[1] ?? found[2]));
+}
 
 /** The ProseMirror positions at the end of every table cell's content, in document order. */
 function cellEnds(doc: PMNode): number[] {

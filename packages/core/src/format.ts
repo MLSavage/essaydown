@@ -1,14 +1,21 @@
-import { gfmAutolinkLiteralToMarkdown } from "mdast-util-gfm-autolink-literal";
+import {
+  gfmAutolinkLiteralFromMarkdown,
+  gfmAutolinkLiteralToMarkdown,
+} from "mdast-util-gfm-autolink-literal";
 import { gfmStrikethroughToMarkdown } from "mdast-util-gfm-strikethrough";
 import { gfmTableToMarkdown } from "mdast-util-gfm-table";
 import type {
   Delete,
   Emphasis,
   Html,
+  Link,
   Nodes,
+  Paragraph,
   Parents as TreeParents,
+  PhrasingContent,
   Root,
   Strong,
+  Text,
   Yaml,
 } from "mdast";
 import remarkStringify, { type Options } from "remark-stringify";
@@ -353,6 +360,7 @@ const PHRASING_TYPES: ReadonlySet<string> = new Set([
 type WidenedState = ToMarkdownState & {
   astralWidened?: true;
   autolinkGuarded?: true;
+  literalSpans?: Map<Text, LiteralSpan[]>;
   wideningGiveUps?: RecordedGiveUp[];
   childOrigins?: ChildOrigins;
   deleteStandIns?: DeleteMerge["standIns"];
@@ -898,6 +906,263 @@ function installSurrogateWidening(state: WidenedState): void {
 }
 
 /**
+ * One stretch of a `text` value that the parser reads as a GFM autolink literal: the half-open
+ * UTF-16 offsets `[start, end)` of the value and the url the parser gives the link it makes.
+ */
+export interface LiteralSpan {
+  start: number;
+  end: number;
+  url: string;
+}
+
+/**
+ * The constructs inside which the installed extension makes no literal: its own `notInConstruct`
+ * (`mdast-util-gfm-autolink-literal` 2.0.1, `lib/index.js`, `['autolink', 'link', 'image',
+ * 'label']`) — the same set its `transformGfmAutolinkLiterals` skips as `ignore: ['link',
+ * 'linkReference']`, since a reference's text is written inside `label`.
+ */
+const LITERAL_FREE_CONSTRUCTS: ReadonlySet<string> = new Set(["autolink", "link", "image", "label"]);
+
+/**
+ * The GFM autolink literals the parser makes of one `text` value, in order (task 3.14). The rule
+ * is never restated here: the value is handed, as the one text child of a paragraph, to the
+ * installed extension's own `transformGfmAutolinkLiterals` (reached through
+ * `gfmAutolinkLiteralFromMarkdown().transforms`, the function `parse` runs over every tree), and
+ * each `link` it splits out is one span. Its `previous` rule reads the character before a match
+ * in the value, so a match at offset 0 is taken whatever precedes the node — which is the parser's
+ * reading too, because the parser's text node starts there as well.
+ *
+ * Partition: the spans are disjoint and in order; the stretches between them, before the first and
+ * after the last are plain text, and a value with no literal has no span.
+ */
+export function literalSpans(value: string): LiteralSpan[] {
+  const paragraph: Paragraph = { type: "paragraph", children: [{ type: "text", value }] };
+  const tree: Root = { type: "root", children: [paragraph] };
+  for (const transform of gfmAutolinkLiteralFromMarkdown().transforms ?? []) transform(tree);
+  const spans: LiteralSpan[] = [];
+  let at = 0;
+  for (const child of paragraph.children as PhrasingContent[]) {
+    const width = child.type === "link" ? textOf(child).length : (child as Text).value.length;
+    if (child.type === "link") spans.push({ start: at, end: at + width, url: child.url });
+    at += width;
+  }
+  return spans;
+}
+
+/** Every `text` value under `node`, joined in document order. */
+function textOf(node: Nodes): string {
+  if (node.type === "text") return node.value;
+  return "children" in node ? (node.children as Nodes[]).map(textOf).join("") : "";
+}
+
+/**
+ * Which literals a serialization writes escaped rather than raw (task 3.14): every one (`"all"`),
+ * or the literal links and the `text` nodes in the set — the nodes {@link settleLiterals} found the
+ * parser would misread raw. Every other literal is written raw.
+ */
+export type LiteralEscapes = "all" | ReadonlySet<Nodes>;
+
+/**
+ * The one option {@link createFormatter} adds to `remark-stringify`'s: `toMarkdown` keeps every
+ * option it is given on `state.options`, so the handlers read the escapes from the `State` of
+ * their own serialization and nothing is module-level (PRD §9).
+ */
+type LiteralOptions = Options & { literalEscapes?: LiteralEscapes };
+
+/**
+ * Whether `node`, a `text` node or a literal link written now, has its literals written raw: it
+ * is not escaped by this serialization's {@link LiteralEscapes}, and the parser reads the bytes as
+ * phrasing in which a literal can be made — inside `phrasing` (a paragraph's, a heading's or a
+ * cell's) and outside every construct of {@link LITERAL_FREE_CONSTRUCTS}. The built-in `<…>`
+ * branch of `link` empties the stack (`lib/handle/link.js:28-45`), so its text is never written
+ * raw: that branch keeps its own escaping and the {@link installAutolinkFallback} check.
+ */
+function writesLiteralsRaw(state: ToMarkdownState, node: Nodes): boolean {
+  const escaped = (state.options as LiteralOptions).literalEscapes;
+  if (escaped === "all" || escaped?.has(node) === true) return false;
+  return (
+    state.stack.includes("phrasing") &&
+    !state.stack.some((construct) => LITERAL_FREE_CONSTRUCTS.has(construct))
+  );
+}
+
+/**
+ * The app's `text` handler (task 3.14): the built-in's `state.safe(node.value, info)`
+ * (`lib/handle/text.js`) for every stretch of the value except the GFM autolink literals the
+ * parser will make of it ({@link literalSpans}), which are written as the writer's own bytes.
+ * Inside a literal no escape is ever read — the tokenizer takes the bytes as the url, and the
+ * transform runs on the decoded value, so `https\://x.y/a\_b` was re-linked with the escapes'
+ * meaning gone from neither — so an escape there is a byte the writer never typed. Each plain
+ * stretch is passed to `safe` with its real neighbours: the literal's edge character where one
+ * touches it, `info`'s otherwise.
+ *
+ * The spans written raw are recorded on the `State` per node ({@link writtenLiteralSpans}), last
+ * call wins — `containerPhrasing` calls a peek-less handler twice — so the position map reads
+ * which units were written as themselves instead of guessing it from the bytes.
+ */
+export function handleText(node: Text, _parent: Parents, state: ToMarkdownState, info: Info): string {
+  const spans = writesLiteralsRaw(state, node) ? literalSpans(node.value) : [];
+  const widened = state as WidenedState;
+  if (spans.length === 0) {
+    widened.literalSpans?.delete(node);
+    return state.safe(node.value, info);
+  }
+  (widened.literalSpans ??= new Map()).set(node, spans);
+  const { value } = node;
+  const plain = (start: number, end: number): string =>
+    start === end
+      ? ""
+      : state.safe(value.slice(start, end), {
+          ...info,
+          before: start === 0 ? info.before : value.charAt(start - 1),
+          after: end === value.length ? info.after : value.charAt(end),
+        });
+  let out = "";
+  let at = 0;
+  for (const span of spans) {
+    out += plain(at, span.start) + value.slice(span.start, span.end);
+    at = span.end;
+  }
+  return out + plain(at, value.length);
+}
+
+/**
+ * The literal spans {@link handleText} wrote raw during this `toMarkdown` call, per `text` node —
+ * the instrument {@link formatWithMap} reads so that a unit inside one is spelled by itself and
+ * never as the escape a backslash before it would otherwise look like.
+ */
+export function writtenLiteralSpans(state: ToMarkdownState): ReadonlyMap<Text, readonly LiteralSpan[]> {
+  return (state as WidenedState).literalSpans ?? new Map();
+}
+
+/**
+ * Whether `link` is written bare, as the GFM autolink literal the writer wrote (task 3.14): the
+ * parser marked it a literal (`data.autolinkLiteral`, see `parse`), it has no title, its one child
+ * is a `text` node, and that text, as a whole, is exactly the one literal the parser makes of it
+ * with this link's url ({@link literalSpans}) — so the text an edit changed (`https://a.bx` under a
+ * link to `https://a.b`) is never written bare. A link that fails any clause is written by the
+ * built-in and {@link installAutolinkFallback} as before: `<…>` when that form carries the url,
+ * the resource form otherwise.
+ */
+export function writesBare(link: Link): boolean {
+  if (link.data?.autolinkLiteral !== true || link.title != null) return false;
+  const [only] = link.children;
+  if (link.children.length !== 1 || only.type !== "text") return false;
+  const spans = literalSpans(only.value);
+  return (
+    spans.length === 1 &&
+    spans[0].start === 0 &&
+    spans[0].end === only.value.length &&
+    spans[0].url === link.url
+  );
+}
+
+/** One link as {@link literalMisread} compares it: url, title, text, and whether it is a literal. */
+type LinkSignature = string;
+
+function signature(url: string, title: string | null | undefined, text: string, bare: boolean): LinkSignature {
+  return JSON.stringify([url, title ?? null, text, bare]);
+}
+
+/** One link `parse` is expected to make of a serialization, and the node of the tree it comes from. */
+interface ExpectedLink {
+  signature: LinkSignature;
+  node: Nodes;
+  /** Whether the node wrote this link's bytes raw — a literal link bare, or a text span. */
+  raw: boolean;
+}
+
+/**
+ * The links `parse` will make of `root` serialised with `escaped` ({@link LiteralEscapes}): each
+ * link of the tree — a literal exactly when it is written bare, {@link writesBare} and not escaped
+ * — and, in document order beside them, one literal per {@link literalSpans} span of every `text`
+ * node outside a link or a link reference. A span is a literal whether its text is written raw or
+ * escaped, because the transform `literalSpans` runs is the parser's own and reads the decoded
+ * value. `undefined` when nothing is written raw, so a tree without a literal pays for no parse.
+ */
+function expectedLinks(root: Root, escaped: ReadonlySet<Nodes>): ExpectedLink[] | undefined {
+  const out: ExpectedLink[] = [];
+  const walk = (node: Nodes, linked: boolean): void => {
+    if (node.type === "link") {
+      const bare = !escaped.has(node) && writesBare(node);
+      out.push({ signature: signature(node.url, node.title, textOf(node), bare), node, raw: bare });
+    }
+    if (node.type === "text" && !linked) {
+      for (const span of literalSpans(node.value)) {
+        const text = node.value.slice(span.start, span.end);
+        out.push({ signature: signature(span.url, null, text, true), node, raw: !escaped.has(node) });
+      }
+    }
+    const inside = linked || node.type === "link" || node.type === "linkReference";
+    if ("children" in node) for (const child of node.children as Nodes[]) walk(child, inside);
+  };
+  walk(root, false);
+  return out.some((link) => link.raw) ? out : undefined;
+}
+
+/** The links of a parsed tree, a literal marked as one. */
+function parsedLinks(root: Root): LinkSignature[] {
+  const out: LinkSignature[] = [];
+  const walk = (node: Nodes): void => {
+    if (node.type === "link") {
+      out.push(signature(node.url, node.title, textOf(node), node.data?.autolinkLiteral === true));
+    }
+    if ("children" in node) for (const child of node.children as Nodes[]) walk(child);
+  };
+  walk(root);
+  return out;
+}
+
+/**
+ * Whether `text` — `root` serialised with `escaped` — parses to exactly the links
+ * {@link expectedLinks} names, in order (task 3.14), and if not, which node to escape next. A
+ * literal written raw is read by the parser's tokenizer on the bytes around it, which no
+ * one-character `before`/`after` can decide — a letter typed flush against a literal link's edge
+ * in the rendered view (`Xhttps://a.b`, `https://a.bX`), a raw literal followed by `*b*` with no
+ * space, a cell's `|` inside one — so the check is the parser itself, never a list of neighbours.
+ *
+ * Returns `null` when the links hold; else the first raw node at the first disagreement — the
+ * expected link there, or the one before it, which is the literal that swallowed it — for
+ * {@link settleLiterals} to escape; else `"all"`, when neither was written raw.
+ */
+export function literalMisread(root: Root, text: string, escaped: ReadonlySet<Nodes>): Nodes | null | "all" {
+  const expected = expectedLinks(root, escaped);
+  if (expected === undefined) return null;
+  const parsed = parsedLinks(parse(text));
+  let at = 0;
+  while (at < expected.length && at < parsed.length && parsed[at] === expected[at].signature) at += 1;
+  if (at === expected.length && at === parsed.length) return null;
+  for (const candidate of [expected[at], expected[at - 1]]) {
+    if (candidate?.raw === true) return candidate.node;
+  }
+  return "all";
+}
+
+/**
+ * Serialise `root` with every literal raw that the parser reads back (task 3.14): `run` is called
+ * with no escapes, and while {@link literalMisread} names a node, again with that node escaped as
+ * well — one node per round, so one literal flush against a letter costs that literal its bare
+ * form and no other literal of the document anything. A misread no escape can fix falls back to
+ * every literal escaped: the form every link and text had before task 3.14. Terminates: each
+ * round escapes one more node of a finite tree. {@link format} and `formatWithMap` both settle
+ * through this, so the map is always built for the very bytes `format` returns.
+ */
+export function settleLiterals<T>(
+  root: Root,
+  run: (escaped: LiteralEscapes) => T,
+  textOf: (result: T) => string,
+): T {
+  const escaped = new Set<Nodes>();
+  for (;;) {
+    const result = run(escaped);
+    const misread = literalMisread(root, textOf(result), escaped);
+    if (misread === null) return result;
+    if (misread === "all" || escaped.has(misread)) return run("all");
+    escaped.add(misread);
+  }
+}
+
+/**
  * Whether the autolink form `value` — `<` … `>` — carries `url` byte for byte: the bytes between
  * the angle brackets are the url, or the url with the `mailto:` the parser prefixes to an email
  * autolink (CommonMark §6.4) — the two spellings `format-link-as-autolink.js:27` accepts as "the
@@ -956,11 +1221,18 @@ function installAutolinkFallback(state: WidenedState): void {
       state.options.resourceLink = previous;
     }
   };
+  // A literal written bare is its text child and nothing else, so it is serialised as that child
+  // alone: `containerPhrasing` dispatches the child (the position map places it, and the link
+  // takes its hull), and {@link handleText} writes the literal raw because the construct stack is
+  // the parent's, `phrasing` on it.
+  const bare = (node: Link): boolean => writesLiteralsRaw(state, node) && writesBare(node);
   const link: PeekableHandle = (node, parent, _state, info) => {
+    if (bare(node)) return state.containerPhrasing(node, info);
     const value = original.call(state, node, parent, state, info);
     return autolinkCarriesUrl(value, node.url) ? value : asResourceLink(node, parent, state, info);
   };
   link.peek = (node, parent, _state, info) => {
+    if (bare(node)) return textOf(node).charAt(0);
     const value = original.call(state, node, parent, state, info);
     if (!autolinkCarriesUrl(value, node.url)) return "[";
     return originalPeek.call(state, node, parent, state, info);
@@ -1105,17 +1377,25 @@ export function toMarkdownExtensions(): ToMarkdownExtensions {
     gfmStrikethroughToMarkdown(),
     { handlers: { delete: handleDelete } },
     gfmAutolinkLiteralToMarkdown(),
-    { handlers: { emphasis: handleEmphasis, strong: handleStrong } },
+    { handlers: { emphasis: handleEmphasis, strong: handleStrong, text: handleText } },
   ];
 }
 
 /**
  * A formatter configured for docs/MARKDOWN-STYLE.md. Built per call, for the same reason as
  * `createParser`: `packages/core` keeps no module-level configuration (PRD §9).
+ *
+ * `escaped` (task 3.14): every GFM autolink literal outside it is written as the writer's bytes —
+ * a marked literal link bare ({@link writesBare}) and a literal inside text unescaped
+ * ({@link handleText}); one inside it is written as before, a link as `<…>` or the resource form
+ * and text through `safe`. {@link format} picks the set with {@link settleLiterals}.
  */
-export function createFormatter(): Processor<undefined, undefined, undefined, Root, string> {
+export function createFormatter(
+  escaped: LiteralEscapes = new Set(),
+): Processor<undefined, undefined, undefined, Root, string> {
+  const options: LiteralOptions = { ...stringifyOptions(), literalEscapes: escaped };
   return unified()
-    .use(remarkStringify, stringifyOptions())
+    .use(remarkStringify, options)
     .use(function attachOpaqueAndGfm(this: Processor) {
       const data = this.data();
       const extensions: ToMarkdownExtensions = (data.toMarkdownExtensions ??= []);
@@ -1127,7 +1407,14 @@ export function createFormatter(): Processor<undefined, undefined, undefined, Ro
     }) as Processor<undefined, undefined, undefined, Root, string>;
 }
 
-/** Serialize an mdast root in the canonical style of docs/MARKDOWN-STYLE.md. */
+/**
+ * Serialize an mdast root in the canonical style of docs/MARKDOWN-STYLE.md, every GFM autolink
+ * literal the parser reads back written as the writer's bytes ({@link settleLiterals}).
+ */
 export function format(root: Root): string {
-  return createFormatter().stringify(root);
+  return settleLiterals(
+    root,
+    (escaped) => createFormatter(escaped).stringify(root),
+    (text) => text,
+  );
 }

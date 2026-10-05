@@ -443,13 +443,17 @@ export const nodes: Record<string, NodeSpec> = {
  */
 export const marks: Record<string, MarkSpec> = {
   link: {
-    attrs: { url: { default: "" }, title: { default: null } },
+    // `literal`: the source wrote the link as a bare GFM autolink literal (`data.autolinkLiteral`
+    // in core's `parse`), which the formatter writes back bare (task 3.14). It rides the DOM as
+    // `data-literal` so the editor's own copy → paste keeps it.
+    attrs: { url: { default: "" }, title: { default: null }, literal: { default: false } },
     inclusive: false,
     toDOM: (mark): DOMOutputSpec => [
       "a",
       {
         href: mark.attrs.url as string,
         ...(mark.attrs.title === null ? {} : { title: mark.attrs.title as string }),
+        ...(mark.attrs.literal === true ? { "data-literal": "" } : {}),
       },
       0,
     ],
@@ -459,6 +463,7 @@ export const marks: Record<string, MarkSpec> = {
         getAttrs: (dom: HTMLElement) => ({
           url: dom.getAttribute("href") ?? "",
           title: dom.getAttribute("title"),
+          literal: dom.hasAttribute("data-literal"),
         }),
       },
     ],
@@ -1289,7 +1294,11 @@ function inlineToPM(children: readonly PhrasingContent[], carried: readonly PMMa
           ...inlineToPM(
             child.children,
             schema.marks.link
-              .create({ url: child.url, title: child.title ?? null })
+              .create({
+                url: child.url,
+                title: child.title ?? null,
+                literal: child.data?.autolinkLiteral === true,
+              })
               .addToSet(carried),
           ),
         );
@@ -1369,8 +1378,10 @@ function runHasEdgeWhitespace(nodes: readonly PMNode[], i: number, j: number): b
 /**
  * The mark {@link inlineToMdast} wraps outermost at `i` (see {@link marks} for the rule): the one
  * whose run from `i` reaches furthest, ties broken by rank — except that a `link` tied with a
- * flanking mark over a run with edge whitespace yields to it (task 1.35), and `inline_code`,
- * which can hold nothing, is never chosen while another mark is on the node.
+ * flanking mark over a run with edge whitespace yields to it (task 1.35), a literal `link` tied
+ * with a flanking mark yields to it over any run — a GFM autolink literal holds plain text only, so
+ * `*https://a.b*` is emphasis around the literal and is written bare only so (task 3.14) — and
+ * `inline_code`, which can hold nothing, is never chosen while another mark is on the node.
  */
 function outermostMark(nodes: readonly PMNode[], i: number): PMMark | undefined {
   let best: PMMark | undefined;
@@ -1387,7 +1398,7 @@ function outermostMark(nodes: readonly PMNode[], i: number): PMMark | undefined 
       end === bestEnd &&
       best.type === schema.marks.link &&
       FLANKING_MARKS.includes(mark.type) &&
-      runHasEdgeWhitespace(nodes, i, end)
+      (best.attrs.literal === true || runHasEdgeWhitespace(nodes, i, end))
     )
       best = mark;
   }
@@ -1409,6 +1420,7 @@ function wrapMark(mark: PMMark, inner: readonly PMNode[]): PhrasingContent {
         url: mark.attrs.url as string,
         title: mark.attrs.title as string | null,
         children: inlineToMdast(inner),
+        ...(mark.attrs.literal === true ? { data: { autolinkLiteral: true } } : {}),
       } satisfies Link;
     case schema.marks.strong:
       return { type: "strong", children: inlineToMdast(inner) } satisfies Strong;

@@ -1,7 +1,15 @@
 import type { Nodes, Root } from "mdast";
 import type { Options } from "remark-stringify";
 import type { Data, Processor } from "unified";
-import { createFormatter, wideningGiveUps, type RecordedGiveUp } from "./format.js";
+import {
+  createFormatter,
+  settleLiterals,
+  wideningGiveUps,
+  writtenLiteralSpans,
+  type LiteralEscapes,
+  type LiteralSpan,
+  type RecordedGiveUp,
+} from "./format.js";
 
 type ToMarkdownExtensions = NonNullable<Data["toMarkdownExtensions"]>;
 type StringifyHandlers = NonNullable<Options["handlers"]>;
@@ -215,12 +223,24 @@ interface Line {
  * tree is never mutated and nothing is carried between calls.
  */
 export function formatWithMap(root: Root): FormatWithMapResult {
+  return settleLiterals(
+    root,
+    (escaped) => formatWithMapAs(root, escaped),
+    (result) => result.text,
+  );
+}
+
+/**
+ * {@link formatWithMap} for one set of escaped literals: `format` and this both pick the set with
+ * `settleLiterals`, so the map is built for the very serialization `format` returns.
+ */
+function formatWithMapAs(root: Root, literals: LiteralEscapes): FormatWithMapResult {
   const rootEmission: Emission = { node: root, value: "", children: [] };
   const instrumentation: Instrumentation = { stack: [rootEmission], patched: false };
   const giveUpsOfThisCall = (): readonly RecordedGiveUp[] =>
     instrumentation.state === undefined ? [] : wideningGiveUps(instrumentation.state);
   const handlers = wrapHandlers(configuredHandlers(), instrumentation);
-  const text = createFormatter()
+  const text = createFormatter(literals)
     .use(function instrument(this: Processor) {
       const data = this.data();
       const extensions: ToMarkdownExtensions = (data.toMarkdownExtensions ??= []);
@@ -232,7 +252,9 @@ export function formatWithMap(root: Root): FormatWithMapResult {
   const spans = new Map<Nodes, Span>();
   const written = new Map<Nodes, SpellingTable>();
   spans.set(root, { start: 0, end: text.length });
-  placeChildren(rootEmission, (offset) => offset, spans, written, false);
+  const literalSpans =
+    instrumentation.state === undefined ? new Map() : writtenLiteralSpans(instrumentation.state);
+  placeChildren(rootEmission, (offset) => offset, spans, written, false, literalSpans);
   const map = buildMap(root, text, spans, giveUpsOfThisCall());
   const spellings: Record<string, SpellingTable> = {};
   for (const entry of map.entries) {
@@ -295,6 +317,11 @@ export function pathDepth(path: string): number {
  * characters that can *be* a prefix, so a real mismatch is still a refusal rather than a silent
  * resynchronisation. {@link SpellingTable} states which character owns it.
  *
+ * `raw` is the literal spans `handleText` wrote as the writer's own bytes (task 3.14,
+ * `writtenLiteralSpans`): inside one, a character is spelled by itself and nothing else — no escape
+ * and no reference is ever written there, so `\\` in a url is two backslashes, each its own
+ * spelling, where the escape rule would read the pair as one escaped backslash and refuse the next.
+ *
  * `eolAsSpace` is set by {@link placeChildren} exactly when the child was found in the form the
  * parent rewrote before an `html` sibling ({@link rewrittenEmissions}' fourth candidate): the
  * value's trailing line ending is then spelled by the one space at its offset, the rule
@@ -308,6 +335,7 @@ export function spellingOffsets(
   written: string,
   from = 0,
   eolAsSpace = false,
+  raw: readonly LiteralSpan[] = [],
 ): SpellingTable | undefined {
   const starts: number[] = [];
   const ends: number[] = [];
@@ -336,7 +364,14 @@ export function spellingOffsets(
     ) {
       at += 1;
     }
-    let end = spellingEnd(written, at, character);
+    // A unit of a literal `handleText` wrote raw is spelled by itself, never as the escape a
+    // backslash before it would otherwise read as: `\\` inside a url is two characters.
+    const inLiteral = raw.some((span) => index >= span.start && index < span.end);
+    let end = inLiteral
+      ? written.startsWith(character, at)
+        ? at + 1
+        : undefined
+      : spellingEnd(written, at, character);
     // A surrogate pair written as one reference: the leading unit takes the whole reference and
     // the trailing unit is the zero-width item {@link SpellingTable}'s ownership rule names. The
     // raw pair was tried first (one unit at a time), so it keeps its two one-unit spellings.
@@ -592,6 +627,7 @@ function placeChildren(
   spans: Map<Nodes, Span>,
   spellings: Map<Nodes, SpellingTable>,
   insideTable: boolean,
+  literalSpans: ReadonlyMap<Nodes, readonly LiteralSpan[]>,
 ): void {
   const indent = emission.indent;
   const shift = indent ? indentOffsetMap(indent.source, emission.value) : undefined;
@@ -615,7 +651,8 @@ function placeChildren(
     cursor = at + length;
     const inside: OffsetMap = (offset) => local(at + offset);
     if (child.node.type === "text") {
-      const table = spellingOffsets(child.node.value, container, at, found.eolAsSpace);
+      const raw = literalSpans.get(child.node);
+      const table = spellingOffsets(child.node.value, container, at, found.eolAsSpace, raw);
       if (table !== undefined) spellings.set(child.node, absoluteSpelling(table, local));
     }
     if (child.node.type === "inlineCode") {
@@ -626,7 +663,14 @@ function placeChildren(
     // dispatches `tableRow` or `tableCell` through `state.handle` (see {@link placeTableGrid}), so
     // everything dispatched below a `table` was written with `tableCell` on `state.stack` and is
     // subject to the configured `inlineCode` handler's pipe escape.
-    placeChildren(child, inside, spans, spellings, insideTable || child.node.type === "table");
+    placeChildren(
+      child,
+      inside,
+      spans,
+      spellings,
+      insideTable || child.node.type === "table",
+      literalSpans,
+    );
     // After the recursion, so the cells' own contents are already placed and a cell's explicit
     // range can be widened to cover them.
     if (child.node.type === "table") placeTableGrid(child.node, child.value, inside, spans);

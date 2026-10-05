@@ -186,8 +186,30 @@ function unpadded(text: string): string {
  *   character (a mark the caret drops that continues on both sides, or `inline_code` carried
  *   outside every code span). Asserted: **no** column of any line of the source yields the
  *   rendered bytes, so the map cannot be the reason the views part.
+ * - **`literal edge`** — `[3.14, a letter typed flush against a bare literal's edge]`: the
+ *   rendered view types the letter outside the link mark, and a bare GFM autolink literal has no
+ *   delimiter to keep it out, so the formatter writes that link `<…>` or in the resource form
+ *   (core's `settleLiterals`), while the raw keystroke in the source extends the literal or, before
+ *   it, un-links it. Asserted as `unrepresentable` is — no column agrees — and, beside it, that the
+ *   rendered bytes hold a link form, the source bytes none, and the source bytes, backslashes
+ *   dropped, the rendered link's text.
  */
-type Outcome = "agree" | "encoded" | "unrepresentable";
+type Outcome = "agree" | "encoded" | "unrepresentable" | "literal edge";
+
+/**
+ * Whether `rendered` writes a link — the resource form or `<…>` — and `typed` writes none, while
+ * `typed`, with every backslash dropped, still holds that link's text
+ * (`literal edge`).
+ */
+function literalEdge(rendered: string, typed: string): boolean {
+  const form = /\[((?:\\.|[^\]\\])*)\]\(|<([^\s>]+)>/;
+  const found = form.exec(rendered);
+  if (found === null || form.test(typed)) return false;
+  // Backslashes dropped on both sides: un-linked, the source reads a `\\_` the literal kept as an
+  // escape, so the two spell one text with different backslashes and nothing else.
+  const bare = (bytes: string): string => bytes.replace(/\\/g, "");
+  return bare(typed).includes(bare(found[1] ?? found[2]));
+}
 
 function compare(
   text: string,
@@ -210,7 +232,7 @@ function compare(
       expect(other, `${where}: no column agrees (${index + 1}:${ch})`).not.toBe(rendered);
     }
   });
-  return "unrepresentable";
+  return literalEdge(rendered, typed) ? "literal edge" : "unrepresentable";
 }
 
 /** One seed of the leg: how the document handed to the views is made from a fixture. */
@@ -319,8 +341,12 @@ describe("the two-view corpus leg: at every interior boundary, dropped-whitespac
     expect(parsed["dropped whitespace click"] ?? 0).toBe(0);
     const deleted = reach.get(SEEDS[1].name) ?? {};
     expect(deleted["dropped whitespace click"]).toBeGreaterThan(0);
-    // The exclusions are the `[1.53]` class only, a small minority of what was asserted.
-    expect(excluded.every((member) => member.startsWith("encoded "))).toBe(true);
+    // The exclusions are the `[1.53]` class and, since task 3.14, the bare literal's edge (reached
+    // on the autolink fixtures), a small minority of what was asserted.
+    expect(
+      excluded.filter((member) => !member.startsWith("encoded ") && !member.startsWith("literal edge ")),
+    ).toEqual([]);
+    expect(excluded.some((member) => member.startsWith("literal edge "))).toBe(true);
     const asserted = [...reach.values()]
       .flatMap((counts) => Object.entries(counts))
       .filter(([key]) => key.endsWith(" click") || key.endsWith(" []"))
@@ -533,7 +559,12 @@ describe("the guard enumeration: every mark kind × both routes × both edges ×
 
   let guards = 0;
   const reachedFindings = new Set<string>();
-  const outcomes: Record<Outcome, string[]> = { agree: [], encoded: [], unrepresentable: [] };
+  const outcomes: Record<Outcome, string[]> = {
+    agree: [],
+    encoded: [],
+    unrepresentable: [],
+    "literal edge": [],
+  };
 
   for (const kind of KINDS) {
     for (const [contentName, content] of Object.entries(CONTENTS)) {
@@ -572,6 +603,8 @@ describe("the guard enumeration: every mark kind × both routes × both edges ×
     expect(outcomes.agree.length + outcomes.encoded.length + outcomes.unrepresentable.length).toBe(
       guards,
     );
+    // No cell here types beside a bare GFM autolink literal (task 3.14), so none is a literal edge.
+    expect(outcomes["literal edge"]).toEqual([]);
     // Every finding agrees on both routes for every kind but where a bounded class says why not.
     for (const finding of ["O7", "O8", "O9"]) {
       for (const route of Object.keys(ROUTES)) {
