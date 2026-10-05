@@ -1,7 +1,16 @@
 import { gfmAutolinkLiteralToMarkdown } from "mdast-util-gfm-autolink-literal";
 import { gfmStrikethroughToMarkdown } from "mdast-util-gfm-strikethrough";
 import { gfmTableToMarkdown } from "mdast-util-gfm-table";
-import type { Delete, Emphasis, Html, Nodes, Root, Strong, Yaml } from "mdast";
+import type {
+  Delete,
+  Emphasis,
+  Html,
+  Nodes,
+  Parents as TreeParents,
+  Root,
+  Strong,
+  Yaml,
+} from "mdast";
 import remarkStringify, { type Options } from "remark-stringify";
 import { unified, type Data, type Processor } from "unified";
 
@@ -345,6 +354,8 @@ type WidenedState = ToMarkdownState & {
   astralWidened?: true;
   autolinkGuarded?: true;
   wideningGiveUps?: RecordedGiveUp[];
+  childOrigins?: ChildOrigins;
+  deleteStandIns?: DeleteMerge["standIns"];
 };
 
 /**
@@ -382,7 +393,14 @@ export type GiveUpRecorder = (giveUp: WideningGiveUp) => void;
  * guards the branch (see {@link widenSplitSurrogateReferences}).
  */
 export function wideningGiveUps(state: ToMarkdownState): readonly RecordedGiveUp[] {
-  return (state as WidenedState).wideningGiveUps ?? [];
+  const widened = state as WidenedState;
+  const origins = widened.childOrigins;
+  return (widened.wideningGiveUps ?? []).map((giveUp) => {
+    const origin = origins?.get(giveUp.parent as TreeParents)?.[giveUp.index];
+    return origin === undefined
+      ? giveUp
+      : { ...giveUp, parent: origin.parent, index: origin.index };
+  });
 }
 
 /** A handler as `containerPhrasing` reads it: the `peek` it looks ahead with is optional. */
@@ -685,7 +703,8 @@ export function applyEdits(joined: string, edits: readonly Edit[], record: GiveU
   let taken: Edit = NO_EDIT;
   for (const edit of [...edits].sort((left, right) => left.start - right.start)) {
     if (edit.start < at) {
-      if (!duplicates(edit, taken)) record({ reason: "overlapping-edit", index: edit.index, type: edit.type });
+      if (!duplicates(edit, taken))
+        record({ reason: "overlapping-edit", index: edit.index, type: edit.type });
       continue;
     }
     out += joined.slice(at, edit.start) + edit.replacement;
@@ -704,7 +723,9 @@ const NO_EDIT: Edit = { start: -1, end: -1, replacement: "", index: -1, type: ""
 
 /** Whether `edit` writes exactly what `taken` already wrote, over exactly the same slice. */
 function duplicates(edit: Edit, taken: Edit): boolean {
-  return edit.start === taken.start && edit.end === taken.end && edit.replacement === taken.replacement;
+  return (
+    edit.start === taken.start && edit.end === taken.end && edit.replacement === taken.replacement
+  );
 }
 
 /**
@@ -772,11 +793,31 @@ export function widenSplitSurrogateReferences(
     }
     const { start, end, headEncoded, tailEncoded, eolAsSpace } = located;
     if (node.type === "break" && eolAsSpace && next !== undefined) {
-      edits.push({ start, end, replacement: repairBreakBeforeHtml(value, next.value), index, type: node.type });
+      edits.push({
+        start,
+        end,
+        replacement: repairBreakBeforeHtml(value, next.value),
+        index,
+        type: node.type,
+      });
     }
     const markerLength = MARK_MARKER_LENGTH.get(node.type);
-    const head = node.type === "text" ? (headEncoded ? start : undefined) : markerLength === undefined ? undefined : start + markerLength;
-    const tail = node.type === "text" ? (tailEncoded ? end : undefined) : markerLength === undefined ? undefined : end - markerLength;
+    const head =
+      node.type === "text"
+        ? headEncoded
+          ? start
+          : undefined
+        : markerLength === undefined
+          ? undefined
+          : start + markerLength;
+    const tail =
+      node.type === "text"
+        ? tailEncoded
+          ? end
+          : undefined
+        : markerLength === undefined
+          ? undefined
+          : end - markerLength;
     if (head !== undefined) {
       const edit = headEdit(joined, head, index, node.type);
       if (edit) edits.push(edit);
@@ -927,15 +968,123 @@ function installAutolinkFallback(state: WidenedState): void {
   state.handlers.link = link;
 }
 
+/** Where one child of a stand-in {@link mergeAdjacentDeletes} made sat in the tree it was given. */
+interface ChildOrigin {
+  parent: TreeParents;
+  index: number;
+}
+
+/** For each stand-in and merged `delete` {@link mergeAdjacentDeletes} made, each child's origin. */
+export type ChildOrigins = Map<TreeParents, ChildOrigin[]>;
+
+/** What {@link mergeAdjacentDeletes} learns about one tree. */
+export interface DeleteMerge {
+  /**
+   * For each given parent with two adjacent `delete` children, the stand-in its children are
+   * serialised from: the parent's own fields and its children with each adjacent run merged.
+   */
+  standIns: Map<TreeParents, TreeParents>;
+  origins: ChildOrigins;
+}
+
+/**
+ * Merge every run of adjacent `delete` siblings under `parent`, at any depth, into one `delete`
+ * whose children are the run's children in order (DECISIONS #review-1-r6 L11's `~~` twin,
+ * `[1.67, found outside scope]`; tasks 3.13, 3.18). Returns `parent`'s stand-in, or `parent` itself
+ * when its own children hold no adjacent pair.
+ *
+ * Why a merge and not a separating handler, as {@link handleEmphasis} and {@link handleStrong}
+ * have: GFM strikethrough has one marker, and the installed tokenizer
+ * (`micromark-extension-gfm-strikethrough` 2.1.0, `lib/syntax.js`, `more`: a `~` after two
+ * consumed is `nok`; `start`: a `~` directly after a `~` that is not a character escape is `nok`)
+ * reads any run of more than two tildes as text. Two `delete` runs written flush are `~~~~`
+ * between their contents whatever their contents are — encoding the second run's first character
+ * (`~~a.~~~~&#x62;~~`) still parses as one `delete` holding `a.~~~~b` — so the only bytes that keep
+ * them two nodes put a node between them (`<!---->`, a character), which changes the tree just as
+ * a merge does and adds text the writer never wrote. Two adjacent runs of one mark render as one
+ * run, and the editor already holds them so (ProseMirror joins adjacent text with equal marks), so
+ * the merge is the tree the bytes can carry: `parse(format(T))` is `T` with each such run merged,
+ * and `format` is a fixed point of `parse ∘ format` for it. `emphasis` and `strong` are not merged:
+ * they have a second marker, and task 1.67's handlers keep two runs two nodes.
+ *
+ * Copy on write, and no ancestor is rebuilt: a stand-in is made only for a parent whose own
+ * children hold a pair, and it is never put in its parent's children — {@link handleRoot} has
+ * `containerPhrasing` serialise a parent from its stand-in — so every given node except the
+ * merged-away `delete` siblings is dispatched as itself, and the position map places it by its own
+ * output (task 3.18; a rebuilt spine left every ancestor of a merge to the hull of its descendants,
+ * its markers outside its range). A merged-away sibling is never dispatched and takes the hull of
+ * its dispatched descendants. Every tree `parse` produces (`parse` never yields two adjacent
+ * `delete` nodes) gets no stand-in at all. `origins` learns, for each stand-in and merged `delete`,
+ * where each of its children sat in the given tree, so {@link wideningGiveUps} can name a give-up
+ * by the given tree's parent and index (DECISIONS #review-1-r8 N3): a merged `delete`'s children
+ * come from several given parents.
+ */
+export function mergeAdjacentDeletes(parent: TreeParents, merge: DeleteMerge): TreeParents {
+  const given: readonly Nodes[] = parent.children;
+  const children: Nodes[] = [];
+  const childOrigins: ChildOrigin[] = [];
+  let merged = false;
+  const originOf = (node: TreeParents, index: number): ChildOrigin =>
+    merge.origins.get(node)?.[index] ?? { parent: node, index };
+  given.forEach((child, index) => {
+    const previous = children[children.length - 1];
+    if (child.type === "delete" && previous?.type === "delete") {
+      const joined: Delete = {
+        type: "delete",
+        children: [...previous.children, ...child.children],
+      };
+      merge.origins.set(joined, [
+        ...previous.children.map((_, at) => originOf(previous, at)),
+        ...child.children.map((_, at) => originOf(child, at)),
+      ]);
+      children[children.length - 1] = joined;
+      merged = true;
+      return;
+    }
+    children.push(child);
+    childOrigins.push(originOf(parent, index));
+  });
+  // After the list is final, so a merged run's joined children are merged in their turn.
+  for (const child of children) if ("children" in child) mergeAdjacentDeletes(child, merge);
+  if (!merged) return parent;
+  const standIn = { ...parent, children } as TreeParents;
+  merge.standIns.set(parent, standIn);
+  merge.origins.set(standIn, childOrigins);
+  return standIn;
+}
+
 /**
  * The app's `root` handler: installs {@link installSurrogateWidening} and
- * {@link installAutolinkFallback} on the `State` it receives, then does what
- * `mdast-util-to-markdown/lib/handle/root.js` does — `containerPhrasing` when any child is
- * phrasing per {@link PHRASING_TYPES}, else `containerFlow`, both called as methods of `state`.
+ * {@link installAutolinkFallback} on the `State` it receives, merges adjacent `delete` siblings
+ * ({@link mergeAdjacentDeletes}, the origins kept on the `State` for {@link wideningGiveUps}) before
+ * any other handler runs, wraps `state.containerPhrasing` once per `State` — outside the surrogate
+ * widening, so a give-up is recorded at the stand-in its walk saw — to serialise a parent from the
+ * stand-in kept on the `State`, then
+ * does what `mdast-util-to-markdown/lib/handle/root.js` does — `containerPhrasing` when any child
+ * is phrasing per {@link PHRASING_TYPES}, else `containerFlow`, both called as methods of `state`.
  */
-export function handleRoot(node: Root, _parent: Parents, state: ToMarkdownState, info: Info): string {
+export function handleRoot(
+  node: Root,
+  _parent: Parents,
+  state: ToMarkdownState,
+  info: Info,
+): string {
   installSurrogateWidening(state);
   installAutolinkFallback(state);
+  const merge: DeleteMerge = { standIns: new Map(), origins: new Map() };
+  mergeAdjacentDeletes(node, merge);
+  const widenedState = state as WidenedState;
+  widenedState.childOrigins = merge.origins;
+  if (widenedState.deleteStandIns === undefined) {
+    const widened = state.containerPhrasing;
+    state.containerPhrasing = (parent, phrasingInfo) =>
+      widened.call(
+        state,
+        widenedState.deleteStandIns?.get(parent as TreeParents) ?? parent,
+        phrasingInfo,
+      );
+  }
+  widenedState.deleteStandIns = merge.standIns;
   const hasPhrasing = node.children.some((child) => PHRASING_TYPES.has(child.type));
   return hasPhrasing ? state.containerPhrasing(node, info) : state.containerFlow(node, info);
 }
@@ -970,7 +1119,11 @@ export function createFormatter(): Processor<undefined, undefined, undefined, Ro
     .use(function attachOpaqueAndGfm(this: Processor) {
       const data = this.data();
       const extensions: ToMarkdownExtensions = (data.toMarkdownExtensions ??= []);
-      extensions.push(...toMarkdownExtensions(), { handlers: opaqueHandlers() }, { handlers: { root: handleRoot } });
+      extensions.push(
+        ...toMarkdownExtensions(),
+        { handlers: opaqueHandlers() },
+        { handlers: { root: handleRoot } },
+      );
     }) as Processor<undefined, undefined, undefined, Root, string>;
 }
 
