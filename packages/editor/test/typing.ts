@@ -92,10 +92,11 @@ export class Typing {
   /**
    * Put the cursor at a document position, the keyboard-free half of clicking. The scenarios never
    * need it — they type from the start of a blank document — but a rule that reads what follows
-   * the cursor cannot be reached any other way.
+   * the cursor cannot be reached any other way. `to` defaults to `pos`, giving a cursor; passing it
+   * gives a non-empty selection, the keyboard-free half of a drag-select.
    */
-  moveTo(pos: number): this {
-    this.dispatch(this.current.tr.setSelection(TextSelection.create(this.current.doc, pos)));
+  moveTo(pos: number, to: number = pos): this {
+    this.dispatch(this.current.tr.setSelection(TextSelection.create(this.current.doc, pos, to)));
     return this;
   }
 

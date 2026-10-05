@@ -7,6 +7,7 @@ import {
   editorPlugins,
   essaydownKeymap,
   exitEmptyListItem,
+  insertHardBreak,
   markdownInputRules,
   tableFromRow,
   tableRowCells,
@@ -270,6 +271,73 @@ describe("exitEmptyListItem", () => {
   });
 });
 
+/**
+ * The position right after the `charsInto`th character of the sole text node reading exactly
+ * `text` — the same `doc.descendants` idiom `typing-legs.ts` and `position-map-editor-leg.test.ts`
+ * use to find a position without hand-computing node-size arithmetic.
+ */
+function textPos(state: EditorState, text: string, charsInto: number): number {
+  let found = -1;
+  state.doc.descendants((node, pos) => {
+    if (node.isText && node.text === text) found = pos + charsInto;
+  });
+  if (found === -1) throw new Error(`no text node reading ${JSON.stringify(text)}`);
+  return found;
+}
+
+describe("insertHardBreak (Shift-Enter)", () => {
+  it("replaces the selection with a hard break and leaves the caret after it, in a paragraph", () => {
+    const typed = new Typing().type("alphabeta");
+    typed.moveTo(textPos(typed.state, "alphabeta", 5)).press("Shift-Enter");
+    expect(typed.markdown()).toBe("alpha\\\nbeta\n");
+  });
+
+  it("does the same inside a list item", () => {
+    const typed = new Typing().type("- alphabeta");
+    typed.moveTo(textPos(typed.state, "alphabeta", 5)).press("Shift-Enter");
+    expect(typed.markdown()).toBe("- alpha\\\n  beta\n");
+  });
+
+  it("does the same inside a blockquote", () => {
+    const typed = new Typing().type("> alphabeta");
+    typed.moveTo(textPos(typed.state, "alphabeta", 5)).press("Shift-Enter");
+    expect(typed.markdown()).toBe("> alpha\\\n> beta\n");
+  });
+
+  it("inserts a newline in a code block, as Enter does there", () => {
+    const typed = new Typing().type("```").type("alphabeta");
+    typed.moveTo(textPos(typed.state, "alphabeta", 5)).press("Shift-Enter");
+    expect(typed.state.doc.firstChild?.type).toBe(schema.nodes.code_block);
+    expect(typed.state.doc.firstChild?.textContent).toBe("alpha\nbeta");
+    expect(typed.markdown()).toBe("```\nalpha\nbeta\n```\n");
+  });
+
+  it("leaves a heading unchanged", () => {
+    const typed = new Typing().type("# alphabeta");
+    const before = typed.markdown();
+    const state = typed.moveTo(textPos(typed.state, "alphabeta", 5)).state;
+    expect(insertHardBreak(state, undefined)).toBe(true);
+    expect(typed.press("Shift-Enter").markdown()).toBe(before);
+  });
+
+  it("leaves a table cell unchanged", () => {
+    // The body row's first cell is where `tableFromRow` (tested above) leaves the cursor.
+    const typed = new Typing().type("|a|b|").press("Enter").type("alphabeta");
+    const before = typed.markdown();
+    const state = typed.moveTo(textPos(typed.state, "alphabeta", 5)).state;
+    expect(insertHardBreak(state, undefined)).toBe(true);
+    expect(typed.press("Shift-Enter").markdown()).toBe(before);
+  });
+
+  it("replaces a non-empty selection", () => {
+    const typed = new Typing().type("alphabeta");
+    const from = textPos(typed.state, "alphabeta", 5);
+    const to = textPos(typed.state, "alphabeta", 7);
+    typed.moveTo(from, to).press("Shift-Enter");
+    expect(typed.markdown()).toBe("alpha\\\nta\n");
+  });
+});
+
 describe("the keymap", () => {
   it("leaves Tab alone outside a list, so the key can still move focus", () => {
     const tab = essaydownKeymap().Tab;
@@ -286,10 +354,11 @@ describe("the keymap", () => {
     expect(typed.press("Escape").markdown()).toBe("plain\n");
   });
 
-  it("is exactly the four keys the task names", () => {
+  it("is exactly the five keys the task names", () => {
     expect(Object.keys(essaydownKeymap()).sort()).toEqual([
       "Backspace",
       "Enter",
+      "Shift-Enter",
       "Shift-Tab",
       "Tab",
     ]);

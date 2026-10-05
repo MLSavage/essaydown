@@ -1,4 +1,4 @@
-import { baseKeymap, chainCommands } from "prosemirror-commands";
+import { baseKeymap, chainCommands, newlineInCode } from "prosemirror-commands";
 import {
   InputRule,
   inputRules,
@@ -205,17 +205,45 @@ export const exitEmptyListItem: Command = (state, dispatch) => {
 };
 
 /**
+ * Shift-Enter inserts a CommonMark hard line break (PRD #006-mac-sync-smoke).
+ *
+ * The three textblock node types that hold `inline*` content are `paragraph`, `heading` and
+ * `table_cell` — the schema admits a `hard_break` in all three alike, so the restriction to
+ * paragraphs is a product rule, not a structural one, and has to be checked here: a heading or a
+ * table cell can only ever be one source line, so a Markdown line break could never round-trip out
+ * of either. Returning `true` without dispatching consumes the key in those two cases, which is
+ * what stops the browser's own native line-break insertion from reaching the DOM (the schema would
+ * otherwise accept it). `code_block` is the fourth textblock kind; there a hard break is not a
+ * Markdown construct at all, so this defers to `newlineInCode`, the same command Enter already
+ * falls back to there.
+ */
+export const insertHardBreak: Command = (state, dispatch) => {
+  const parentType = state.selection.$from.parent.type;
+  if (parentType === schema.nodes.code_block) return newlineInCode(state, dispatch);
+  if (parentType === schema.nodes.heading || parentType === schema.nodes.table_cell) return true;
+  if (parentType !== schema.nodes.paragraph) return false;
+  if (dispatch) {
+    dispatch(state.tr.replaceSelectionWith(schema.nodes.hard_break.create()).scrollIntoView());
+  }
+  return true;
+};
+
+/**
  * The keys this editor binds. Installed *before* `baseKeymap`, so each entry is tried first and
  * falls through to the base behaviour when it returns false: Enter still splits a paragraph, and
  * Backspace still deletes a character.
  *
  * Tab and Shift-Tab are list indentation only. Outside a list they return false and the key keeps
  * its browser meaning (moving focus), which is what keeps the editor keyboard-escapable.
+ *
+ * `Shift-Enter`, not a platform chord: `prosemirror-keymap` reads it the same way on every OS,
+ * unlike `Mod-Enter` (`baseKeymap`'s `exitCode`), which resolves to Ctrl or Cmd per platform.
  */
 export function essaydownKeymap(): Record<string, Command> {
   const item = schema.nodes.list_item;
   return {
     Enter: chainCommands(tableFromRow, splitListItem(item)),
+    "Shift-Enter": insertHardBreak,
     Backspace: exitEmptyListItem,
     Tab: sinkListItem(item),
     "Shift-Tab": liftListItem(item),
