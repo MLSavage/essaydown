@@ -1009,3 +1009,9 @@ verdict: PASS
   - PRD §7's Phase 3 row and the `3.verify`, `3.7` and `4.verify` texts say so (this commit). The `ci.yml` change is task 3.8's (the boundary planning commit). Phase 6's installer row is unchanged.
   - Consequence, accepted: a macOS e2e failure, including the `[1.46]` caret-race class (3 of its 7 instances on macOS), now fails a gate and takes a `.g<n>` repair instead of being noted.
 - **Reversal.** `git revert` of this commit (the PRD strings, this entry and the backlog line). Revert the boundary planning commit first if it has landed, because its `3.8` task text cites this entry.
+
+## #048-prd-4-rows-corrected-u25-u16 (2026-10-05, Michael's decisions; recorded by the principal, runner idle at the Phase 2→3 boundary, host checkout on `phase/3`, #017)
+
+- **U25 (#review-2-r0, Grok 2).** PRD §4's Rust-crates row named two debug-only plugins, `tauri-plugin-wdio-webdriver` and `tauri-plugin-wdio`. Only the first is in `apps/desktop/src-tauri/Cargo.toml` and `lib.rs`, and the three-OS e2e suite passes without the second. Michael: "Yes, correct the row." The row now names only `tauri-plugin-wdio-webdriver`. No code, manifest or `docs/dependencies.json` change.
+- **U16 (#review-2-r0, Claude 12), the directory half.** The code resolves `settings.json` through Tauri's `app_config_dir()` (`commands.rs:152`), which is named by the bundle id: `com.savagesystems.essaydown`. PRD §4's Identifiers row said `…/essaydown`. Michael: "why is this even a question? What are the tradeoffs? Why would we ever switch now?" Nothing in the product depends on the other name, and switching would mean code that overrides Tauri's default. The row now names the bundle-id directory. The other half of U16 (a Rust test and `settings.spec.ts` write the real per-user `settings.json`) stays on the backlog with a new trigger.
+- **Reversal.** `git revert` of this commit.
