@@ -1096,3 +1096,35 @@ verdict: PASS
 - **Reversal.**
   - This commit: before the runner starts 3.17, `git revert`, then `ralph/ralph.sh sync-state` (the pending 3.17 record is dropped and 3.11's old dependency is accepted, since 3.11 is pending). After 3.17 has started: none.
   - The abandon has no runner reversal (`retry` and `resume` take only `blocked`). The manual route is `git branch -m abandoned/3.10 task/3.10`, `git worktree add .wt/3.10 task/3.10`, and a `ctx.set` under `withLock` back to `blocked` with 3 attempts (#051's step-2 shape), recorded if it is ever run.
+
+## #053-3.13-stuck-replaced-by-3.18 (2026-10-05, principal; Michael's option 1 and backlog line, given conditionally in handoff 062; Fable consulted on STUCK after three attempts; manual procedure by #052's route, runner idle mid-phase, planning commit on the host checkout on `phase/3`, #017)
+
+- **What happened.** 3.13 (adjacent same-kind runs, from #050) was `STUCK` after 3 attempts. a1 (51 turns) did the work and recorded the conflict; a2 (15) and a3 (9) changed no code. Evidence: `.evidence/tasks/3.13/{1,2,3}.log` and the `[3.13]` lessons line.
+  - **(a) was already green at the base.** `format(parse("*x.*_y_\n"))` returns `*x.*_y_\n`, because 1.67's `_`/`__` rule covers the same-mark pair. All eight emphasis/strong pairs a1 swept were stable. 3.13's "(a) and (b) each recorded red" could not hold.
+  - **(b) was red, and its prescribed fix fails.** `~~a.~~~~&#x62;~~` still parses as one `delete`. The installed `micromark-extension-gfm-strikethrough` `lib/syntax.js` returns `nok` on a third `~` and on a `~` after a `~`, and requires equal opener and closer sizes. No Markdown parses to two flush `delete` runs, so "parse has the tree's node count" cannot hold for delete.
+  - **The fixture conflicts with the editor legs.** ProseMirror joins adjacent same-mark text, so a parse-produced `*x.*_y_` fixture fails 11 editor corpus legs while core keeps the runs. If core merged them instead, the fixture would fail invariant B.
+- **Michael's answer (option 1, handoff 062).**
+  - Emphasis and strong keep two runs.
+  - Delete pairs merge before serialising, and the journal says why no separation exists.
+  - The fixture is dropped, and the hand-built trees over kind × edge class are the guards.
+  - The rest of the acceptance is unchanged, plus the backlog line `[3.18, PM joins same-mark runs]`.
+- **Fable's reading (route confirmed), folded into 3.18's text.**
+  - `b1c2e19` differs from base `27656ef` in `packages/core/src/format.ts` and `packages/core/test/adjacent-same-kind.test.ts` only, and format.ts differs only by a1's six hunks plus a prettier reflow. The reflow is gate-neutral, since `pnpm lint` does not run `prettier --check`.
+  - The merge is a pre-pass in `handleRoot`, before any handler runs, so K2 gains no new rewrite. Its one coupling is N3's give-up translation (`wideningGiveUps`, `childOrigins`), which a1 tested.
+  - Two wording fixes:
+    - the merged tree is still one `text` node richer than the parse, so the delete clause reads "one `delete` node and one `text` node fewer than the tree";
+    - (a) is recorded green at the base.
+  - One guard added, under L3's rule: a merged-away sibling's position class. Each given `delete`'s range equals its text child's range, and the opening `~~` resolves to the paragraph.
+  - Invariant B is not weakened: B is defined over source strings, and no source parses to adjacent deletes. The merge is a no-op on every corpus tree. The only fixture holding `~~~~` is a code fence.
+- **The procedure (#052's route).**
+  1. `ralph/ralph.sh abandon 3.13 --reason …`. `.wt/3.13` had a clean tree and was removed; `task/3.13` was renamed `abandoned/3.13`, tip `b1c2e1984802dba3f1a3d14d171057499e5d0ece`.
+  2. This planning commit:
+     - PRD §8 gains `3.18` (depends on `3.12`). It reproduces at the base, then checks out the two files from `b1c2e19`.
+     - 3.14 now depends on `3.18`, and 3.13's row is byte-identical.
+     - `tasks.json` regenerated; `EXPECTED_COUNT` 339 → 340; `validate-tasks: OK 340`.
+     - The `[3.13]` lessons line is carried verbatim, and the backlog line is added.
+     - 3.13's three journal lines stay on `abandoned/3.13`, as with 3.10's (#052).
+  3. `sync-state`, `doctor`, `run --phase 3 --dry-run` naming `3.18`, then the restart (#051).
+- **Reversal.**
+  - This commit: before the runner starts 3.18, `git revert`, then `ralph/ralph.sh sync-state`. That drops the pending 3.18 record, and 3.14's old dependency is accepted since 3.14 is pending. After 3.18 has started: none.
+  - The abandon has no runner reversal (`retry` and `resume` take only `blocked`). The manual route is #052's: `git branch -m abandoned/3.13 task/3.13`, `git worktree add .wt/3.13 task/3.13`, and a `ctx.set` under `withLock` back to `blocked` with 3 attempts, recorded if it is ever run.
