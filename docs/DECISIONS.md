@@ -1021,3 +1021,23 @@ verdict: PASS
 - **Evidence.** Four task attempts ended because the agent ran a long e2e command in the background and ended its turn to wait. A headless attempt that ends its turn is over. The occurrences are 2.4 r0 a3, one earlier attempt, 2.19 a2 (the transcript says the call "exceeded the 10-minute foreground limit and was moved to background automatically", because its bound was above the tool's 600 s ceiling) and 2.22 a2 (`.evidence/tasks/2.22/2.log`: when `timeout` killed bash, the orphaned Xvfb held the pipe to `tail` open, the call overran and was moved to the background, and the agent scheduled a wakeup). Until now the remedy lived only in per-task lessons and task texts, and 2.19 a2 broke its own task text's rule.
 - **Decision (Michael).** One rule in CLAUDE.md and AGENTS.md, which every agent reads: a long command runs as one foreground call bounded by `timeout 540` with the tool timeout 600000, output redirected to a file and grepped. It is never backgrounded, never waited on, and never piped into `tail` beside a backgrounded Xvfb. No runner change. Michael rejected the alternatives offered: a runner check that counts a "waiting for background" turn-end as capped (new machinery), and doing nothing.
 - **Reversal.** `git revert` of this commit (removes the line from both files and this entry).
+
+## #050-phase-3-boundary-planning-nine-tasks-before-3.1 (2026-10-05, Michael's decisions; planning commit by the principal, runner idle at the Phase 2→3 boundary, host checkout on `phase/3`, #017)
+
+- **Michael's answers at the boundary, in order.** U9's test-only task stands on his r0 word ("Backlog, task at Phase 3 boundary"). Of the 35 lines `[review-2-r0, hard stops re-pointed]` sends to `3.verify`, he made three groups into tasks: "stuck in italics" (O7, O8, O9 and his 1.9.r1 note), bytes that change on save (L9, L11, `[1.67, found outside scope]`, `[#030 product …]`), and a housekeeping group (N5, N7, I7, plus the #047 CI swap). He promoted `[review-2-r3, rename read-then-write]` to a task, on the condition that it is fixed only if it reproduces; the other two `[review-2-r3, …]` lines stay on the backlog. He asked for Shift+Enter, and for a test-only task for the `[1.46]` caret race at `editor-astral-between-runs.spec.ts:161`. Kept as they are: 2.25 check 5 stays with the Phase 6 packaging gate, and `cfg(target_os)` keeps counting (one occurrence).
+- **Found already done while planning** (closed by appended backlog lines, and no task): N5 (PRD §4's Frontend row already says React 19, #043); N7 (`ci.yml`'s `merge-logs` already carries `if: always()` on every merge step); I7 (`ralph/lib/gate.mjs:114` already fetches artifacts whatever the conclusion). The housekeeping task is therefore the CI policy swap alone.
+- **The tasks, all before `3.1`, in one chain** (3.1 now depends on 3.16):
+  - 3.8 CI policy (#047);
+  - 3.9 the caret race (test-only);
+  - 3.10 U9 (test-only);
+  - 3.11 rename read-then-write, reproduce first;
+  - 3.12 O7–O9;
+  - 3.13 adjacent same-kind runs (L11, the `~~` twin);
+  - 3.14 URL text (L9);
+  - 3.15 a soft break before inline html (#030, pre-empt route);
+  - 3.16 Shift+Enter.
+
+  The bytes group is split into three tasks (3.13–3.15) so that each fits one attempt. It goes before the modes because Reorder and Rewrite splice inline nodes (the route `[1.67]` names) and because 3.4/3.5 create goldens that would otherwise be regenerated. #030 takes the pre-empt route because it keeps the writer's line break; L9's representation is the task's to state, bounded by the writer's bytes.
+- **The other re-pointed lines** stay untaken. `3.verify`'s journal records, for each one, that no Phase 3 task discharged it (its text already allows that). The review set's reconciliation (`3.7.r0d`) gives each one a real trigger instead of moving it to `4.verify`. The review set id is `3.7`, from `ralph/tasks.json`.
+- **Graph.** EXPECTED_COUNT 329 → 338 (nine loop tasks, no new gate). `validate-tasks: OK`.
+- **Reversal.** `git revert` of this commit before the runner starts `3.8`. Once a new task has passed there is no undo; a later planning commit replaces the remainder.

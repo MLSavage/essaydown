@@ -4521,12 +4521,120 @@
   "targetBranch": "main"
  },
  {
+  "id": "3.8",
+  "model": "sonnet",
+  "description": "CI runner policy, macOS first (DECISIONS #047; made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050). In .github/workflows/ci.yml the `test` job gains `continue-on-error: ${{ matrix.os == 'windows-latest' }}`, and the `e2e-shell` job's `continue-on-error` changes from `matrix.os == 'macos-latest'` to `matrix.os == 'windows-latest'`. Linux and macOS then fail the run when red; Windows is recorded. The comment above `e2e-shell` that says macOS is continue-on-error until Phase 6 is rewritten to say Linux and macOS are required and Windows is recorded until Michael can test it (DECISIONS #047). Every matrix keeps all three OSes; every step, upload and artifact name is unchanged, so Windows results are still uploaded. No other workflow, source, manifest or lockfile change; zero new dependencies.",
+  "acceptance": "`grep -c \"continue-on-error: ${{ matrix.os == 'windows-latest' }}\" .github/workflows/ci.yml` is 2 and `grep -c \"matrix.os == 'macos-latest'\" .github/workflows/ci.yml` is 0; the count of `os: [ubuntu-latest, macos-latest, windows-latest]` lines is unchanged from the branch base (both counts recorded in the journal); a YAML parser already in the container (no new dependency) parses ci.yml, and `jobs.test` and `jobs['e2e-shell']` both carry the windows expression; `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists only .github/workflows/ci.yml, docs/lessons.md and docs/progress/journal-main.md; suite green.",
+  "dependencies": [
+   "2.close"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.9",
+  "model": "sonnet",
+  "description": "Phase 3 test-only fix, the `[1.46]` caret race at `e2e/web/editor-astral-between-runs.spec.ts:161` (made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050; macOS is a required runner from Phase 3, DECISIONS #047). The class has seven gate instances. The last two are at this step, both on macos-latest: 1.verify.r10h a1 (#042) and 2.verify.r3h a1 (#046); see the backlog lines `[1.46, evidence — sixth instance …]` and `[1.46, evidence — seventh instance …]`. The case asserts the DOM caret `{ text: \" 😀 \", offset: 1 }`, then presses `Backspace`. ProseMirror takes a native `ArrowRight` from `selectionchange` one rendering step later (the `[1.46, found outside scope]` line), so on a slow runner the Backspace can land before the editor's selection has moved, and it changes nothing. Do exactly this, in that one case: before every key the case presses after a native caret motion, poll the dev bar's selection readout (task 1.62; model the parsed helper on `e2e/web/editor-toggle-cell-code-pipe.spec.ts:74`, copied locally, not imported) until its `before` equals the paragraph text before the expected caret. Keep the DOM caret assertions already there. Take each expected value from the container run and record it in the journal; the Backspace's is expected to be `\"a. \"`. If it differs, stop and write it to the journal; do not decide. No product change, no other spec, and the seed and every byte assertion unchanged. Run every e2e spec as one foreground call per CLAUDE.md's long-command rule (DECISIONS #049).",
+  "acceptance": "In that case a readout poll precedes the `Backspace` and each later key that follows a native motion (the journal lists each poll with the step it guards and its value); the seed and every `markdown(page)` expectation in the case are byte-identical to the branch base; `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists only that spec, docs/V1.1-BACKLOG.md (one appended `[3.9, …]` line naming the step routed and the instance lines it answers), docs/lessons.md and docs/progress/journal-main.md; every e2e/web spec green in the container (count read from the directory); `tests/no-caret-chords-in-e2e.test.ts` green; suite green.",
+  "dependencies": [
+   "3.8"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.10",
+  "model": "sonnet",
+  "description": "Phase 3 test-only fix, `e2e/shell/test/robustness.spec.ts` (DECISIONS #review-2-r0 U9, Claude 2 + Sol 8; Michael at r0: \"Backlog, task at Phase 3 boundary\"; backlog line `[review-2-r0 U9, …]`; made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050). Close its five gaps. (a) The `.stfolder` and `.stversions` fixtures each hold a `.md` file, so only the dot rule keeps them out of the tree, and the spec asserts they are absent. (b) Every round writes a file under `.stfolder` and `.stversions` and asserts the tree is unchanged. (c) The console and backend-log listeners, and a `console.error` wrapper, are installed before the first navigation (`openThroughRestore`). (d) A presence case proves that a known backend line reaches the captured log, so the \"log clean\" assertion can fail. (e) The rounds run against a wall-clock budget held in one constant instead of `ROUNDS = 6`, each round under the family's per-test timeout. The spec's comment states the budget as the stand-in for PRD §7's 10-minute session, and the journal records the budget and the round count reached. The budget leaves the whole spec inside the `timeout 540` bound in the container. No product change. Run every e2e spec as one foreground call per CLAUDE.md's long-command rule (DECISIONS #049).",
+  "acceptance": "Mutations recorded in the journal, each turning its case red in the container and then reverted: the dot rule disabled in the file-tree filter → the `.stfolder`/`.stversions` absence assertion fails; the known backend line not emitted (or its capture disabled) → the presence case fails. `grep -c 'ROUNDS = 6' e2e/shell/test/robustness.spec.ts` is 0; the journal quotes the line numbers showing the listeners installed before the first `openThroughRestore`; the spec green in the container on the external driver; `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists only files under e2e/shell/, docs/lessons.md and docs/progress/journal-main.md; suite green.",
+  "dependencies": [
+   "3.9"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.11",
+  "model": "opus",
+  "description": "Phase 3 fix, rename read-then-write (DECISIONS #review-2-r3, Claude r3 risk 1; backlog line `[review-2-r3, rename read-then-write]`; promoted by Michael at the Phase 2→3 boundary, DECISIONS #050). `commitRename` (`apps/desktop/src/App.tsx`) flushes, `read_doc`s the old path and hands `rename_file` the rewritten bytes, which `rename_file_at` writes over the moved document. An asynchronous edit that lands after the barrier's last dirty check (an image paste whose `save_image` resolves late) can autosave at the old path between `read_doc` and `rename_file`. `renamed()` then reloads the disk over the editor, and the edit is lost silently. Reproduction first: a Vitest test drives the rename with the IPC mocked so that `read_doc` and `rename_file` are held by promises the test resolves. It injects an edit and fires the autosave inside that window, then asserts the edit's text is in the bytes at the new path and in the editor after `renamed()`. Michael's condition is to fix only if it reproduces: if the test cannot be made red without changing product code, stop, write what was tried to the journal, and change no product file. Fix with one of the two shapes the backlog line names, choice and reason in the journal: either the editor lock spans `commitRename` from `flush` through `setOpenPath`, or the rewrite moves inside the sync's serialised owner (`rename_file` without `rewritten`, and `renamed()` writes the rewrite). Also add the missing guard for `renamed` with a conflict standing (`document-sync.ts`, the uncovered branch): after such a rename, Keep mine writes asset URLs under the new stem. CLAUDE.md's checked-outcome rules apply: the result covers the latest generation, and the test injects the edit during the awaited write. Add one test per guard the diff adds. Run every e2e spec as one foreground call per CLAUDE.md's long-command rule (DECISIONS #049).",
+  "acceptance": "Either (fixed) the reproduction test is present and green, the journal quotes its failure at the branch base, the `renamed`-with-conflict test is present and green, the journal names the test that discharges each guard the diff adds, the shell e2e file-tree and autosave specs are green in the container, and `cargo test` is green; or (not reproduced) the journal records each attempt to make it red, and `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists no file under apps/ or packages/ outside test directories. Either way: zero new dependencies; suite green.",
+  "dependencies": [
+   "3.10"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.12",
+  "model": "opus",
+  "description": "Phase 3 fix, the mark a typed character takes at a mark's edge, the \"stuck in italics\" class (Michael's 1.9.r1 note, backlog `[review-1-r10, 1.9.r1 editing feedback]`; DECISIONS #review-1-r9 O7, O8, O9, Sol r9 findings 1–3; made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050). Three cursor-map defects in `packages/editor/src/toggle.ts` make the character typed after a toggle take different marks from the one typed directly in the rendered view. The rendered view's typed marks are the reference: the source caret moves to match them, and ProseMirror's own mark inheritance is not changed. O7: an interior boundary whose typed marks match neither neighbour is assigned to the following run (`innermostAt`). Native route: `q [ab](u)*cd* r`, caret at the link's end; direct `X` copies `q [ab](u)X*cd* r`, while toggle-then-`X` copies `q [ab](u)*Xcd* r`. Its carried-subset twin is `q *x [ab](u)* r`. O8: the dropped-whitespace shortcut (`beyondDroppedWhitespace` → `betweenNodes`) discards a mark the caret carries. Native route: `` *x `bc`* ``, ArrowUp, Delete `x`, ArrowRight past the space; direct gives `` *X`bc`* ``, toggle gives `` X\\*`bc`\\* ``. O9: the leaf-start twin of the code-span end rule. Native route: `` a`bc` ``, ArrowUp, Delete `a`; direct gives `` X`bc` ``, toggle gives `` `Xbc` ``. The backlog lines give each fix's shape, and Sol's evidence is under .evidence/reviews/1/r9/sol/; line numbers may have moved since r9. Reproduction first: each native route as a failing two-view case in the container. The rule is CLAUDE.md's cursor rule (DECISIONS #review-1-r8 N1), enumerated over every mark kind × both routes × both edges × every textblock kind with an astral member. Read the serializer's handler for each mark before touching the editor's tree (CLAUDE.md). The journal also states, with a reproduction, whether Michael's scenario (type in italics, click onto a plain line, type) still carries emphasis after the fix; if it does, write it there and do not widen scope. Run every e2e spec as one foreground call per CLAUDE.md's long-command rule (DECISIONS #049).",
+  "acceptance": "The three native routes are e2e/web cases, each red at the branch base (the journal quotes the received bytes) and green after, pane bytes asserted with `toBe`; the two-view corpus leg over every fixture asserts direct-typed and toggle-typed bytes equal at every interior boundary, dropped-whitespace and leaf-start position, seeded from parse(fixture) and from a destructive transaction (CLAUDE.md), and is green; the guard enumeration is present, with its count read from the test and recorded in the journal; `toRendered(toSource(p)) === p` and the monotonicity of `toSource` still hold over the corpus; the journal names the test that discharges each guard the diff adds; every e2e/web spec green in the container; suite green.",
+  "dependencies": [
+   "3.11"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.13",
+  "model": "opus",
+  "description": "Phase 3 fix, adjacent same-kind runs survive a save (DECISIONS #review-1-r6 L11, Claude r6 10; backlog `[review-1-r6 L11, …]` and `[1.67, found outside scope]`; made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050). Reorder (3.5) and Rewrite (3.4) splice inline nodes: that is the mdast producer the 1.67 line names as its route, so this lands before them. (a) L11: `parse(\"*x.*_y_\\n\")` holds two `emphasis` siblings; `format` writes `*x.**y*`, whose parse differs, and the next pass writes `\\*x.\\**y*`. First probe, at this tree, whether 1.67's `_`/`__` opener rule already covers the same-mark pair. Then make every pair of adjacent same-kind siblings (emphasis, strong, delete) a fixed point of parse∘format, choosing between an app handler that separates the delimiters (1.67's shape) and merging adjacent same-mark siblings before serialising; record the choice and reason in the journal and the commit body. (b) The `~~` twin: `delete(\"a.\") + delete(\"b\")` serialises as `~~a.~~~~b~~`, which parses as one run. GFM strikethrough has a single marker, so separate the runs by encoding the first character of the second run's content as a whole-scalar character reference (`codePointAt`, CLAUDE.md), or by an equivalent the journal justifies. Read the serializer's handler for each mark in the installed package first (CLAUDE.md); the position map learns every new rewrite (CLAUDE.md, #review-1-r5 K2). Add one fixture holding two adjacent same-mark runs of each kind to fixtures/markdown/ and its index.json.",
+  "acceptance": "Reproduction first: (a) and (b) each recorded red at the branch base with the received bytes. After: for each kind in {emphasis, strong, delete} × each first-run edge class {punctuation, letter, astral}, a hand-built mdast tree holding two adjacent same-kind siblings serialises to bytes whose parse has the tree's node count and text (#review-1-r7 M2) and which are a fixed point of parse∘format; the new fixture passes invariants A, B and C; the corpus identity tests stay byte-identical for every fixture; the position-map corpus case reports nothing unresolved; the journal names the test that discharges each guard; suite green.",
+  "dependencies": [
+   "3.12"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.14",
+  "model": "opus",
+  "description": "Phase 3 fix, URL-shaped text keeps the writer's bytes (DECISIONS #review-1-r6 L9, Claude r6 8; backlog `[review-1-r6 L9, …]`; made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050). Typed in the rendered view, `See https://example.com/a_b for details.` serialises as `See https\\://example.com/a\\_b for details.` (the `unsafe` patterns of `gfmAutolinkLiteralToMarkdown()` in packages/core/src/format.ts). The source view shows backslashes the writer never typed, and `parse` re-links the text anyway. The writer's bytes are the reference: typed or loaded, `See https://example.com/a_b for details.\\n` saves byte-identical and is a fixed point of parse∘format through the editor. A bare URL is never rewritten as `<…>` and never escaped. Decide the representation once and state it in the journal and the commit body. Either the editor's tree equals the parser's (a GFM autolink literal is a `link` whose serialiser writes the bare literal back), or text keeps no escapes and the fixed point holds on the re-linked form. Read the serializer's handlers in the installed package first (CLAUDE.md); the position map learns every new rewrite (#review-1-r5 K2). Run every e2e spec as one foreground call per CLAUDE.md's long-command rule (DECISIONS #049).",
+  "acceptance": "Reproduction first, recorded red at the branch base with the received bytes. After: a corpus leg types a URL into every block of every fixture through the editor (`https://example.com/a_b`, the same URL followed by `.`, and one inside emphasis) and asserts the copied bytes hold each URL exactly as typed and are a fixed point of parse∘format; an e2e/web case types the URL in the rendered view and asserts the pane bytes with `toBe`; a loaded file holding a bare URL, an angle-bracket autolink and a `[text](url)` link each saves byte-identical; the position-map corpus case reports nothing unresolved; invariants A/B/C over the corpus green; the journal names the test that discharges each guard; every e2e/web spec green in the container; suite green.",
+  "dependencies": [
+   "3.13"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.15",
+  "model": "opus",
+  "description": "Phase 3 fix, a soft line break before inline html survives a save (backlog `[#030 product, a soft or hard break before inline html]`, DECISIONS #030 Decision 1, #review-1-r7 M2; made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050). Upstream's `containerPhrasing` replaces a trailing line ending with one space before an `html` child, so `alpha\\n<i>beta</i>` is written `alpha <i>beta</i>`, and the writer's line break is lost. Take the pre-empt route the #030 line names: keep the line ending whenever the html child cannot start an html block. Only CommonMark §4.6 conditions 1–6 can interrupt a paragraph; condition 7 cannot. Do it per child, over the slice the child occupies and never over the join (CLAUDE.md, #review-1-r7 M1). A hard break before block-capable html stays the named loss task 1.58 recorded. The soft-break fixture enters fixtures/markdown/index.json byte-identical, and invariant B's comparison is unchanged. Read the serializer's handlers in the installed package first (CLAUDE.md); the position map learns the changed rewrite (#review-1-r5 K2), and the `[1.51]` and `[1.52]` lines and `hard-break-before-inline-html.md` are inputs.",
+  "acceptance": "Reproduction first, recorded red at the branch base with the received bytes. After: for each html child kind (an inline tag, a comment, a processing instruction, CDATA, a declaration, and a block-capable `<div>`) × {soft break, hard break} before it, the bytes keep the line ending when the html cannot start a block, and the parse's node count equals the tree's (#review-1-r7 M2); the block-capable members assert the recorded behaviour; the soft-break fixture is in index.json and passes invariants A, B and C byte-identical; the position-map corpus case reports nothing unresolved; the corpus identity tests stay byte-identical; the journal names the test that discharges each guard; suite green.",
+  "dependencies": [
+   "3.14"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.16",
+  "model": "sonnet",
+  "description": "Phase 3 feature, Shift+Enter inserts a hard line break in the rendered view. Michael's 2.9 note (#006-mac-sync-smoke): \"Shift+Enter doesn't insert a line break, and I'd like it to.\" Backlog `[review-2-r0, Shift+Enter — Michael]` and `[1.29, found outside scope]`; made a Phase 3 task at the Phase 2→3 boundary, DECISIONS #050. Bind `Shift-Enter` in `essaydownKeymap` (packages/editor/src/input.ts) to a command that replaces the selection with a `hard_break` and puts the caret after it. It does this in a paragraph, including one inside a list item or a blockquote. In a code block it inserts a newline, as Enter does there. In a heading or a table cell it does nothing, since neither can hold a Markdown line break. One key with Shift, the same on every OS: not a platform chord. If a hard break at a mark's edge serialises with a character reference (the `[1.30, found outside scope]` / `[review-1-r3 I1]` member), record the bytes in the journal and do not fix that here. Run every e2e spec as one foreground call per CLAUDE.md's long-command rule (DECISIONS #049).",
+  "acceptance": "Unit tests: Shift-Enter between `alpha` and `beta` in a paragraph gives the bytes `alpha`, one backslash, a line feed, `beta`, a line feed (a CommonMark hard break), a fixed point of parse∘format; the same inside a list item and a blockquote; a code block gains a newline in its text; a heading and a table cell leave the document unchanged (one test each); a non-empty selection is replaced. An e2e/web case places the caret by an arrow route (CLAUDE.md), presses `Shift+Enter`, types, and asserts the pane bytes with `toBe`. Every e2e/web spec green in the container; suite green.",
+  "dependencies": [
+   "3.15"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
   "id": "3.1",
   "model": "opus",
   "description": "Mode bar (Outline / Produce / Rewrite / Reorder, Cmd/Ctrl+1–4); store holds root, sidecar, cursor position; all mode mutations go through core pure functions and push one undo snapshot each.",
   "acceptance": "WebdriverIO: switching modes 100× never changes format(root); an injected store mutation (test-only `window.__essaydown.dispatch(moveBlock(...))`) followed by Cmd/Ctrl+Z restores the exact prior Markdown and sidecar.",
   "dependencies": [
-   "2.close"
+   "3.16"
   ],
   "phase": "3",
   "execution": "loop",
