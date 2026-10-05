@@ -61,6 +61,14 @@ export {
 export { TOKEN_CLASSES, sourceExtensions, sourceLanguage, tokenHighlightStyle } from "./source.js";
 
 export {
+  QUESTION_HINT_CLASS,
+  hintDOM,
+  questionHintDecorations,
+  questionHintsPlugin,
+  type QuestionsOf,
+} from "./question-hints.js";
+
+export {
   MDAST_TYPES,
   RAW_CLASS,
   marks,

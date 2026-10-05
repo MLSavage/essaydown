@@ -1,11 +1,12 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { attach, emptySidecar, format, parse, parseSidecar, rewriteAssetUrls, type Sidecar } from "@essaydown/core";
+import { attach, emptySidecar, format, outlineOf, parse, parseSidecar, rewriteAssetUrls, type Sidecar } from "@essaydown/core";
 import {
   bindProseMirror,
   createDocumentStore,
   editorPlugins,
+  questionHintsPlugin,
   schema,
   storePlugins,
   type DocumentStore,
@@ -13,6 +14,7 @@ import {
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
+import type { Mode } from "../modes/modes";
 import {
   createDocumentSync,
   MarkdownWritten,
@@ -89,6 +91,14 @@ interface Props {
    * list, task 3.2) read and edit the same store the editor does.
    */
   readonly onStore?: (store: DocumentStore | null) => void;
+  /** The app's current mode (PRD §6.3): a view of the store, read here only for Produce's own
+   * behaviour (the question hints and typewriter scrolling, task 3.3) — nothing it does changes
+   * the document. */
+  readonly mode: Mode;
+  /** Settings' `typewriterScroll` (task 2.7), read only while `mode` is `"produce"`. */
+  readonly typewriterScroll: boolean;
+  /** A question hint's click (§6.3: "read-only; click → Outline"). */
+  readonly onJumpToOutline: () => void;
   readonly ref?: Ref<DocumentPaneHandle>;
 }
 
@@ -116,7 +126,18 @@ function describe(error: unknown): string {
  * `current-content` (hidden) holds the text the pane believes is on disk — what it last read or
  * wrote — so the shell e2e can compare it with the file byte for byte (DECISIONS #022).
  */
-export default function DocumentPane({ root, path, initial, onUndoOpen, onError, onStore, ref }: Props) {
+export default function DocumentPane({
+  root,
+  path,
+  initial,
+  onUndoOpen,
+  onError,
+  onStore,
+  mode,
+  typewriterScroll,
+  onJumpToOutline,
+  ref,
+}: Props) {
   const host = useRef<HTMLDivElement>(null);
   const [store, setStore] = useState(() => storeFor(initial.text, initial.sidecar));
   // What the sync's I/O reads at call time: a rename moves `path` without a remount, and a reload
@@ -124,6 +145,13 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
   const pathRef = useRef(path);
   const errorRef = useRef(onError);
   const storeRef = useRef(store);
+  // Read by the question-hints plugin and the typewriter-scroll wrapper below, which both live
+  // inside an effect scoped to `[store, root]` and must not rebuild the whole `EditorView` on
+  // every mode switch or settings change.
+  const modeRef = useRef(mode);
+  const typewriterScrollRef = useRef(typewriterScroll);
+  const onJumpToOutlineRef = useRef(onJumpToOutline);
+  const viewRef = useRef<EditorView | null>(null);
   // On a change only: `rename` moves `pathRef` before the parent re-renders with the new `path`.
   useLayoutEffect(() => {
     pathRef.current = path;
@@ -131,6 +159,9 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
   useLayoutEffect(() => {
     errorRef.current = onError;
     storeRef.current = store;
+    modeRef.current = mode;
+    typewriterScrollRef.current = typewriterScroll;
+    onJumpToOutlineRef.current = onJumpToOutline;
   });
   const [known, setKnown] = useState(initial.text);
   const [conflict, setConflict] = useState(false);
@@ -279,22 +310,65 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
     if (element === null) return;
     const saveImage = async (bytes: Uint8Array, extension: string): Promise<string> =>
       invoke<string>("save_image", { docPath: pathRef.current, bytes: Array.from(bytes), extension });
+    // Produce mode's question hints (PRD §6.3, task 3.3): `modeRef`/`onJumpToOutlineRef` are read
+    // fresh on every draw, so this plugin needs no rebuild when the mode or the sidecar changes —
+    // only a redraw, which the two effects below force.
+    const questionHints = questionHintsPlugin(
+      () => modeRef.current === "produce",
+      () => outlineOf(storeRef.current.getState().document).map((section) => section.question),
+      () => onJumpToOutlineRef.current(),
+    );
     const view = new EditorView(element, {
       state: EditorState.create({
         schema,
-        plugins: [...storePlugins(store), ...editorPlugins(), imagePastePlugin(saveImage)],
+        plugins: [...storePlugins(store), ...editorPlugins(), imagePastePlugin(saveImage), questionHints],
       }),
       nodeViews: { image: createImageNodeView(root, () => pathRef.current) },
     });
+    viewRef.current = view;
     // The same two-line wiring as /dev/editor: the binding needs the view, and the view's
     // `dispatchTransaction` needs the binding.
     const binding = bindProseMirror(store, view);
-    view.setProps({ dispatchTransaction: (transaction) => binding.dispatch(transaction) });
+    view.setProps({
+      dispatchTransaction: (transaction) => {
+        binding.dispatch(transaction);
+        // Produce mode's optional typewriter scrolling (§6.3): after every transaction — a
+        // keystroke, an arrow key, a mode-forced redraw — keep the caret at the scroll
+        // container's vertical centre, only while Produce and the setting are both on.
+        if (modeRef.current !== "produce" || !typewriterScrollRef.current) return;
+        const container = element.closest<HTMLElement>('[data-testid="main"]');
+        if (container === null) return;
+        const coords = view.coordsAtPos(view.state.selection.head);
+        const rect = container.getBoundingClientRect();
+        container.scrollTop += coords.top - (rect.top + rect.height / 2);
+      },
+    });
     return () => {
+      viewRef.current = null;
       binding.destroy();
       view.destroy();
     };
   }, [store, root]);
+
+  // A mode switch draws or clears the question hints: they read `modeRef` fresh, but only a new
+  // state update makes the view redraw its decorations, so an empty transaction forces one.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view !== null) view.dispatch(view.state.tr);
+  }, [mode]);
+
+  // A question set or cleared through the Outline (task 3.2) changes the sidecar alone, which
+  // commits no ProseMirror transaction — so this store subscription is the question hints' own
+  // path to a redraw while Produce is showing them.
+  useEffect(
+    () =>
+      store.subscribe((state, previous) => {
+        if (state.document === previous.document || modeRef.current !== "produce") return;
+        const view = viewRef.current;
+        if (view !== null) view.dispatch(view.state.tr);
+      }),
+    [store],
+  );
 
   return (
     <div className="document-pane" data-testid="document" data-reloads={reloads}>

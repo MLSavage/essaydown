@@ -5,6 +5,9 @@ import { credentialStoreMessage, loadSettings, saveSettings, type SettingsIO } f
 export type SettingsDialogProps = {
   io: SettingsIO;
   onClose: () => void;
+  /** Told of every `typewriterScroll` toggle, so a caller outside this dialog (Produce mode,
+   * task 3.3) can read the setting without opening it. */
+  onTypewriterScrollChange?: (value: boolean) => void;
 };
 
 /**
@@ -14,7 +17,7 @@ export type SettingsDialogProps = {
  * the status line names it — but this dialog renders no coach configuration at all (no provider,
  * base URL, model or key field): "Does NOT render any coach UI" (acceptance).
  */
-export default function SettingsDialog({ io, onClose }: SettingsDialogProps) {
+export default function SettingsDialog({ io, onClose, onTypewriterScrollChange }: SettingsDialogProps) {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [credentialMessage, setCredentialMessage] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -44,6 +47,7 @@ export default function SettingsDialog({ io, onClose }: SettingsDialogProps) {
   const toggleTypewriterScroll = (): void => {
     const next: Settings = { ...settings, typewriterScroll: !settings.typewriterScroll };
     setSettings(next);
+    onTypewriterScrollChange?.(next.typewriterScroll);
     void saveSettings(io, next);
   };
 

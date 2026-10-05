@@ -219,6 +219,34 @@ button:disabled {
   outline: none;
 }
 
+/* Task 3.3: Produce mode (PRD §6.3) — the sidebar hidden, the editor narrowed and centred. */
+.app-shell[data-mode="produce"] .sidebar {
+  display: none;
+}
+
+.app-shell[data-mode="produce"] .document-editor {
+  max-width: 68ch;
+  margin: 0 auto;
+}
+
+/* Typewriter scrolling (the typewriterScroll setting, task 3.3's own behaviour): while typing, the
+   caret is always at the document's end, so the scroll container needs room below the last line to
+   scroll into — without it, the browser clamps scrollTop once content fills the container, pinning
+   the caret to the bottom edge instead of the vertical centre DocumentPane.tsx's dispatchTransaction
+   targets. */
+.app-shell[data-mode="produce"][data-typewriter="true"] .document-editor {
+  padding-bottom: 42vh;
+}
+
+/* Each heading's question, read-only, above it (§6.3); drawn by a ProseMirror decoration
+   (packages/editor/src/question-hints.ts), never part of the document. */
+.question-hint {
+  color: #8a8a85;
+  font-size: 0.85em;
+  margin-top: 12px;
+  cursor: pointer;
+}
+
 /* Task 2.6: a broken image's labelled placeholder ("Image not found: <relative path>"). */
 .image-placeholder {
   display: inline-block;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { rewriteAssetUrls } from "@essaydown/core";
+import { DEFAULT_SETTINGS, rewriteAssetUrls } from "@essaydown/core";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -10,7 +10,7 @@ import { DEFAULT_MODE, isMacPlatform, modeForKey, type Mode } from "./modes/mode
 import OutlinePanel from "./outline/OutlinePanel";
 import OutlineTree from "./outline/OutlineTree";
 import SettingsDialog from "./settings/SettingsDialog";
-import type { HasCoachKeyResult, SettingsIO } from "./settings/settings-sync";
+import { loadSettings, type HasCoachKeyResult, type SettingsIO } from "./settings/settings-sync";
 import ConfirmDelete from "./workspace/ConfirmDelete";
 import { decideClose } from "./workspace/close-guard";
 import ContextMenu, { type ContextMenuTarget } from "./workspace/ContextMenu";
@@ -74,11 +74,23 @@ function App() {
   const [waiting, setWaiting] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // PRD §6.3: a mode is a view of the one document store, so it lives here and never in the store.
-  const [mode, setMode] = useState<Mode>(DEFAULT_MODE);
+  const [mode, setModeState] = useState<Mode>(DEFAULT_MODE);
+  // Produce's own Esc (§6.3): the mode active just before Produce, so Esc has somewhere to go
+  // back to. Updated only on the way *into* Produce, never read until a later Esc inside it.
+  const previousModeRef = useRef<Mode>(DEFAULT_MODE);
+  const setMode = useCallback((next: Mode): void => {
+    setModeState((current) => {
+      if (next === "produce" && current !== "produce") previousModeRef.current = current;
+      return next;
+    });
+  }, []);
   // The open document's store, which the Outline's sidebar tree and question list edit beside the
   // editor (task 3.2); null when no document is open.
   const [store, setStore] = useState<DocumentStore | null>(null);
   const mac = useMemo(() => isMacPlatform(navigator.platform), []);
+  // Settings' `typewriterScroll` (task 2.7), read here only for Produce mode's own behaviour
+  // (task 3.3); the dialog still owns the setting's load/save, and reports a toggle back up here.
+  const [typewriterScroll, setTypewriterScroll] = useState(DEFAULT_SETTINGS.typewriterScroll);
 
   const settingsIO: SettingsIO = useMemo(
     () => ({
@@ -89,6 +101,18 @@ function App() {
     }),
     [],
   );
+
+  // `typewriterScroll`'s initial value (task 3.3): the dialog loads its own copy when opened, but
+  // Produce mode needs to know the setting before the dialog is ever opened in this session.
+  useEffect(() => {
+    let cancelled = false;
+    void loadSettings(settingsIO).then((settings) => {
+      if (!cancelled) setTypewriterScroll(settings.typewriterScroll);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsIO]);
 
   // The settings dialog's own trigger (task 2.7's description: Cmd/Ctrl+,), global so it opens
   // regardless of which pane has focus.
@@ -114,7 +138,20 @@ function App() {
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [mac]);
+  }, [mac, setMode]);
+
+  // Produce mode's own Esc (§6.3, task 3.3): back to whichever mode was active just before
+  // Produce. Scoped to Produce alone, so Esc does nothing to the other three modes here.
+  useEffect(() => {
+    if (mode !== "produce") return;
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setMode(previousModeRef.current);
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mode, setMode]);
 
   // The close barrier (DECISIONS #review-2-r0 U2): a close request (the title bar, Alt+F4, Cmd+W)
   // waits for the pending save instead of dropping the keystrokes inside the autosave debounce.
@@ -319,7 +356,7 @@ function App() {
   const cloudOnlyByPath = new Map(entries.map((e) => [e.path, e.cloudOnly]));
 
   return (
-    <div className="app-shell" data-testid="app-shell" data-mode={mode}>
+    <div className="app-shell" data-testid="app-shell" data-mode={mode} data-typewriter={typewriterScroll ? "true" : "false"}>
       <aside className="sidebar" data-testid="sidebar">
         <div className="sidebar-toolbar">
           <button
@@ -385,6 +422,9 @@ function App() {
             onUndoOpen={undoOpen}
             onError={setError}
             onStore={setStore}
+            mode={mode}
+            typewriterScroll={typewriterScroll}
+            onJumpToOutline={() => setMode("outline")}
           />
         )}
       </main>
@@ -414,7 +454,9 @@ function App() {
           {waiting !== null && <div data-testid="switch-waits">{waiting}</div>}
         </div>
       )}
-      {settingsOpen && <SettingsDialog io={settingsIO} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsDialog io={settingsIO} onClose={() => setSettingsOpen(false)} onTypewriterScrollChange={setTypewriterScroll} />
+      )}
     </div>
   );
 }
