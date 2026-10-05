@@ -634,3 +634,94 @@ button:disabled {
     border-color: #444;
   }
 }
+
+/* Reorder mode's right sidebar (§6.3, task 3.5). */
+.reorder-panel {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-left: 1px solid #d9d9d9;
+  background-color: #f4f4f4;
+  font-size: 0.9em;
+}
+
+.reorder-header {
+  padding: 8px;
+  border-bottom: 1px solid #d9d9d9;
+}
+
+.reorder-title {
+  font-weight: 600;
+}
+
+.reorder-error {
+  margin: 8px;
+  color: #a00;
+}
+
+.reorder-group-title {
+  margin: 8px 8px 4px;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #666;
+}
+
+.reorder-empty {
+  margin: 4px 8px;
+  color: #777;
+}
+
+.reorder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 8px;
+}
+
+.reorder-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 4px 0;
+  padding: 6px 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background-color: #fff;
+}
+
+.reorder-item-dragging {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.reorder-handle {
+  flex-shrink: 0;
+  cursor: grab;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  touch-action: none;
+}
+
+.reorder-text {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.reorder-kind {
+  margin-right: 6px;
+  font-size: 0.8em;
+  color: #777;
+}
+
+@media (prefers-color-scheme: dark) {
+  .reorder-panel {
+    background-color: #262626;
+    border-left-color: #444;
+  }
+  .reorder-item {
+    background-color: #1e1e1e;
+    border-color: #444;
+  }
+}

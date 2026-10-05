@@ -24,6 +24,7 @@ import {
 } from "@essaydown/core";
 import { cursorBlock, mdastToPM, type DocumentStore, type ModeMutation } from "@essaydown/editor";
 import { useDocumentState } from "../outline/outline-view";
+import { useStoreUndoKeys } from "../modes/undo-keys";
 
 interface Props {
   readonly store: DocumentStore;
@@ -128,26 +129,7 @@ export default function RewritePanel({ store, mac }: Props) {
     run((state) => applyReattach(state, orphan, pos));
   };
 
-  // Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z step the store while Rewrite is showing, wherever focus is —
-  // after "Use this" it is on a button, or on nothing. The editor's own keymap handles the chord
-  // first when the editor has focus and marks the event handled, and a text field keeps its native
-  // undo, so neither of those steps the store twice.
-  useEffect(() => {
-    function onKeyDown(event: globalThis.KeyboardEvent): void {
-      if (event.defaultPrevented) return;
-      const mod = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
-      if (!mod || event.altKey || event.key.toLowerCase() !== "z") return;
-      const target = event.target as HTMLElement | null;
-      if (target !== null && (target.isContentEditable || target.tagName === "TEXTAREA" || target.tagName === "INPUT")) {
-        return;
-      }
-      event.preventDefault();
-      if (event.shiftKey) store.getState().redo();
-      else store.getState().undo();
-    }
-    window.document.addEventListener("keydown", onKeyDown);
-    return () => window.document.removeEventListener("keydown", onKeyDown);
-  }, [mac, store]);
+  useStoreUndoKeys(store, mac);
 
   const activeSentence = (at: number, cards: readonly RewriteCard[]): number | null => {
     if (focus.caret === null || focus.caret.at !== at || focus.caret.offset === null) return null;
