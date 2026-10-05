@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
+import ModeBar from "./modes/ModeBar";
+import { DEFAULT_MODE, isMacPlatform, modeForKey, type Mode } from "./modes/modes";
 import SettingsDialog from "./settings/SettingsDialog";
 import type { HasCoachKeyResult, SettingsIO } from "./settings/settings-sync";
 import ConfirmDelete from "./workspace/ConfirmDelete";
@@ -68,6 +70,9 @@ function App() {
   // Beside `error`, never over it: a failed save's message stays while the switch waits.
   const [waiting, setWaiting] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // PRD §6.3: a mode is a view of the one document store, so it lives here and never in the store.
+  const [mode, setMode] = useState<Mode>(DEFAULT_MODE);
+  const mac = useMemo(() => isMacPlatform(navigator.platform), []);
 
   const settingsIO: SettingsIO = useMemo(
     () => ({
@@ -91,6 +96,19 @@ function App() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  // The mode bar's chords (task 3.1, Cmd/Ctrl+1–4), global for the same reason. The editor binds
+  // none of them, so the keydown reaches the document whichever view has focus.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      const next = modeForKey(event, mac);
+      if (next === null) return;
+      event.preventDefault();
+      setMode(next);
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mac]);
 
   // The close barrier (DECISIONS #review-2-r0 U2): a close request (the title bar, Alt+F4, Cmd+W)
   // waits for the pending save instead of dropping the keystrokes inside the autosave debounce.
@@ -295,7 +313,7 @@ function App() {
   const cloudOnlyByPath = new Map(entries.map((e) => [e.path, e.cloudOnly]));
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-testid="app-shell" data-mode={mode}>
       <aside className="sidebar" data-testid="sidebar">
         <div className="sidebar-toolbar">
           <button
@@ -344,6 +362,7 @@ function App() {
         )}
       </aside>
       <main className="workspace-main" data-testid="main">
+        <ModeBar mode={mode} onSelect={setMode} mac={mac} />
         {openPath === null || openDoc === null || root === null ? (
           <p className="workspace-empty" data-testid="workspace-empty">
             No file open

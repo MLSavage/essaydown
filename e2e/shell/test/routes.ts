@@ -173,3 +173,15 @@ export async function deleteBackward(editorSelector: string): Promise<void> {
   }, editorSelector);
   assert.ok(deleted, `execCommand('delete') did nothing in ${editorSelector}`);
 }
+
+/** The platform's Cmd/Ctrl as WebDriver names it: Cmd on macOS, Ctrl elsewhere — the same choice
+ * `prosemirror-keymap`'s `Mod-` and the app's mode chords make (apps/desktop/src/modes/modes.ts),
+ * so a chord pressed here is the one the app binds and never the other platform's. */
+const MOD_KEY = platform() === "darwin" ? "Meta" : "Control";
+
+/** Presses Cmd/Ctrl + `key` (task 3.1: the mode bar's Cmd/Ctrl+1–4 and the store's Cmd/Ctrl+Z) at
+ * the focused element. Both legs send it as WebDriver key actions: a keydown the app's own
+ * handlers read (like F2/Enter/Escape above), never a caret motion (CLAUDE.md, DECISIONS #022). */
+export async function pressModChord(key: string): Promise<void> {
+  await browser.keys([MOD_KEY, key]);
+}

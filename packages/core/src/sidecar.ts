@@ -1,6 +1,6 @@
 import type { Root, RootContent, Yaml } from "mdast";
 import { z } from "zod";
-import { blocksOf, moveSection, normalizedText } from "./blocks.js";
+import { blocksOf, moveBlock, moveSection, normalizedText } from "./blocks.js";
 import { CONTENT_ID_LENGTH, contentHash } from "./hash.js";
 import { reorderSentences, sentencesOf, type SegmentOptions } from "./sentences.js";
 
@@ -597,21 +597,18 @@ export function applyReorderSentences(
 const MOVE_TAG = "__essaydownMoveIndex";
 
 /**
- * `moveSection` (§6.1, the Outline drag of §7) with the sidecar carried along: every anchor inside
- * the moved section travels with it, and every anchor the move shifted is rebuilt at its new
- * position — so two identical H2 headings keep their own questions across an in-app move.
+ * A move of top-level children (`move`, one of `blocks.ts`'s) with the sidecar carried along:
+ * every anchor at a moved child travels with it, and every anchor the move shifted is rebuilt at
+ * its new position — so two identical items keep their own entries across an in-app move.
  *
- * The index permutation is read back out of `moveSection`'s own result (each top-level child is
- * tagged before the call and the tag is stripped after) rather than recomputed here, so the two
- * cannot drift.
- *
- * @throws the same errors as `moveSection`, before anything is changed.
+ * The index permutation is read back out of `move`'s own result (each top-level child is tagged
+ * before the call and the tag is stripped after) rather than recomputed here, so the two cannot
+ * drift.
  */
-export function applyMoveSection(
+function carryTopLevelMove(
   state: DocumentState,
-  from: number,
-  to: number,
-  options: SegmentOptions = {},
+  move: (root: Root) => Root,
+  options: SegmentOptions,
 ): DocumentState {
   const tagged: Root = {
     ...state.root,
@@ -619,7 +616,7 @@ export function applyMoveSection(
       (child, index) => ({ ...child, [MOVE_TAG]: index }) as unknown as RootContent,
     ),
   };
-  const moved = moveSection(tagged, from, to);
+  const moved = move(tagged);
 
   const oldToNew = new Map<number, number>();
   const children: RootContent[] = moved.children.map((child, index) => {
@@ -641,6 +638,37 @@ export function applyMoveSection(
     options,
   );
   return { root, sidecar };
+}
+
+/**
+ * `moveSection` (§6.1, the Outline drag of §7) with the sidecar carried along (see
+ * {@link carryTopLevelMove}): every anchor inside the moved section travels with it.
+ *
+ * @throws the same errors as `moveSection`, before anything is changed.
+ */
+export function applyMoveSection(
+  state: DocumentState,
+  from: number,
+  to: number,
+  options: SegmentOptions = {},
+): DocumentState {
+  return carryTopLevelMove(state, (root) => moveSection(root, from, to), options);
+}
+
+/**
+ * `moveBlock` (§6.1) with the sidecar carried along (see {@link carryTopLevelMove}): every anchor
+ * on the moved top-level block, its sentences included, travels with it. The mode mutation the
+ * document store's `dispatch` takes for a block move (task 3.1).
+ *
+ * @throws the same errors as `moveBlock`, before anything is changed.
+ */
+export function applyMoveBlock(
+  state: DocumentState,
+  from: number,
+  to: number,
+  options: SegmentOptions = {},
+): DocumentState {
+  return carryTopLevelMove(state, (root) => moveBlock(root, from, to), options);
 }
 
 // ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ export {
   type DocumentBinding,
   type DocumentStore,
   type DocumentStoreState,
+  type ModeMutation,
 } from "./store.js";
 
 export {

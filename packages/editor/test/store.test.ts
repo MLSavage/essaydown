@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Root } from "mdast";
-import { canRedo, canUndo, emptySidecar, format, parse, type Sidecar } from "@essaydown/core";
+import {
+  applyMoveBlock,
+  candidatesOf,
+  canRedo,
+  canUndo,
+  emptySidecar,
+  format,
+  parse,
+  parseSidecar,
+  type DocumentState,
+  type Sidecar,
+} from "@essaydown/core";
 import { EditorState, Selection, TextSelection, type Transaction } from "prosemirror-state";
 import type { EditorView as PMEditorView } from "prosemirror-view";
 import { EditorState as CMState } from "@codemirror/state";
@@ -231,6 +242,177 @@ describe("bindProseMirror: store -> view", () => {
     context.binding.destroy();
     context.store.getState().undo();
     expect(context.view.markdown()).toBe("x\n");
+  });
+});
+
+/** A sidecar holding one paragraph-scoped coach entry per paragraph of `root`, so a block move
+ * has anchors to carry and an undo has a sidecar to restore. */
+function coachSidecar(root: Root): Sidecar {
+  return parseSidecar({
+    version: 1,
+    coach: candidatesOf(root)
+      .filter((one) => one.kind === "paragraph")
+      .map((one) => ({
+        anchor: { ...one, pos: [...one.pos] },
+        scope: "paragraph",
+        question: `about ${one.text}`,
+        askedAt: "2026-10-05T00:00:00Z",
+      })),
+  });
+}
+
+/** A store and bound view whose sidecar carries one anchor per paragraph. */
+function boundWithSidecar(source: string) {
+  const root = parse(source);
+  const store = createDocumentStore(root, coachSidecar(root));
+  const view = new FakeView(root);
+  const clock = { at: 1_000 };
+  const binding = bindProseMirror(store, view, { now: () => clock.at });
+  return { store, view, clock, binding, root };
+}
+
+describe("dispatch: mode mutations (task 3.1)", () => {
+  const move = (from: number, to: number) => (state: DocumentState) => applyMoveBlock(state, from, to);
+
+  it("pushes the mutation's result as exactly one snapshot holding both halves", () => {
+    const context = boundWithSidecar("One.\n\nTwo.\n");
+    const before = context.store.getState().document;
+    context.store.getState().dispatch(move(0, 1));
+    const { stack, document } = context.store.getState();
+    expect(stack.entries).toHaveLength(2);
+    expect(format(document.root)).toBe("Two.\n\nOne.\n");
+    expect(document.sidecar).not.toBe(before.sidecar);
+    expect(document.sidecar.coach.map((entry) => [entry.question, entry.anchor.pos])).toEqual([
+      ["about One.", [1]],
+      ["about Two.", [0]],
+    ]);
+  });
+
+  it("is undone in one step, back to the exact prior root and sidecar, and redone after it", () => {
+    const context = boundWithSidecar("One.\n\nTwo.\n\nThree.\n");
+    const before = context.store.getState().document;
+    context.store.getState().dispatch(move(2, 0));
+    const after = context.store.getState().document;
+    context.store.getState().undo();
+    expect(context.store.getState().document.root).toBe(before.root);
+    expect(context.store.getState().document.sidecar).toBe(before.sidecar);
+    expect(canUndo(context.store.getState().stack)).toBe(false);
+    context.store.getState().redo();
+    expect(context.store.getState().document).toBe(after);
+  });
+
+  it("never merges with the typing burst before it or the one after it, however close in time", () => {
+    const context = boundWithSidecar("One.\n\nTwo.\n");
+    type(context, "a", 1_000);
+    context.store.getState().dispatch(move(0, 1));
+    type(context, "b", 1_001);
+    expect(context.store.getState().stack.entries).toHaveLength(4);
+    context.store.getState().undo();
+    expect(context.view.markdown()).toBe("Two.a\n\nOne.\n");
+    context.store.getState().undo();
+    expect(context.view.markdown()).toBe("One.\n\nTwo.a\n");
+  });
+
+  it("makes two mutations two undo steps", () => {
+    const context = boundWithSidecar("One.\n\nTwo.\n\nThree.\n");
+    context.store.getState().dispatch(move(0, 1));
+    context.store.getState().dispatch(move(0, 2));
+    expect(context.store.getState().stack.entries).toHaveLength(3);
+    context.store.getState().undo();
+    expect(format(context.store.getState().document.root)).toBe("Two.\n\nOne.\n\nThree.\n");
+  });
+
+  it("pushes nothing for a mutation that returns the snapshot it was given", () => {
+    const context = boundWithSidecar("One.\n\nTwo.\n");
+    const notified = vi.fn();
+    context.store.subscribe(notified);
+    context.store.getState().dispatch((state) => state);
+    expect(context.store.getState().stack.entries).toHaveLength(1);
+    expect(notified).not.toHaveBeenCalled();
+  });
+
+  it("pushes a mutation that changes the sidecar alone", () => {
+    const context = boundWithSidecar("One.\n");
+    const before = context.store.getState().document;
+    context.store.getState().dispatch((state) => ({ ...state, sidecar: emptySidecar() }));
+    expect(context.store.getState().stack.entries).toHaveLength(2);
+    expect(context.store.getState().document.root).toBe(before.root);
+    context.store.getState().undo();
+    expect(context.store.getState().document.sidecar).toBe(before.sidecar);
+  });
+
+  it("is pulled into the bound view, and its undo is pulled back", () => {
+    const context = boundWithSidecar("One.\n\nTwo.\n");
+    context.store.getState().dispatch(move(1, 0));
+    expect(context.view.markdown()).toBe("Two.\n\nOne.\n");
+    context.store.getState().undo();
+    expect(context.view.markdown()).toBe("One.\n\nTwo.\n");
+  });
+
+  it("leaves the store unchanged when the mutation throws", () => {
+    const context = boundWithSidecar("One.\n");
+    const before = context.store.getState().document;
+    expect(() => context.store.getState().dispatch(move(0, 5))).toThrow(RangeError);
+    expect(context.store.getState().document).toBe(before);
+    expect(context.store.getState().stack.entries).toHaveLength(1);
+  });
+});
+
+describe("cursor (task 3.1)", () => {
+  it("is null in a store no view has reported to", () => {
+    expect(createDocumentStore(parse("a\n"), SIDECAR).getState().cursor).toBeNull();
+  });
+
+  it("is reported by the binding as soon as it is bound, even with nothing to pull", () => {
+    const context = bound("abc\n");
+    expect(context.view.applied).toHaveLength(0);
+    expect(context.store.getState().cursor).toBe(context.view.state.selection.head);
+  });
+
+  it("follows a selection-only transaction without pushing a snapshot", () => {
+    const context = bound("abcdef\n");
+    const { state } = context.view;
+    context.binding.dispatch(state.tr.setSelection(TextSelection.create(state.doc, 4)));
+    expect(context.store.getState().cursor).toBe(4);
+    expect(context.store.getState().stack.entries).toHaveLength(1);
+  });
+
+  it("follows a typing transaction to the caret after the typed text", () => {
+    const context = bound("ab\n");
+    const { state } = context.view;
+    // Position 3 is after "ab" (1 opens the paragraph); typing "cd" there leaves the caret at 5.
+    context.binding.dispatch(state.tr.setSelection(TextSelection.create(state.doc, 3)).insertText("cd"));
+    expect(context.store.getState().stack.entries).toHaveLength(2);
+    expect(context.store.getState().cursor).toBe(5);
+  });
+
+  it("follows the view's caret through a pull (an undo that shortens the document)", () => {
+    const context = bound("");
+    type(context, "first", 1_000);
+    type(context, " second", 2_500);
+    const typedEnd = context.store.getState().cursor;
+    context.store.getState().undo();
+    expect(context.store.getState().cursor).toBe(context.view.state.selection.head);
+    expect(context.store.getState().cursor).not.toBe(typedEnd);
+  });
+
+  it("does not wake a subscriber when the caret is already where it is reported", () => {
+    const context = bound("abc\n");
+    const notified = vi.fn();
+    context.store.subscribe(notified);
+    context.store.getState().setCursor(context.store.getState().cursor as number);
+    expect(notified).not.toHaveBeenCalled();
+    context.store.getState().setCursor(2);
+    expect(notified).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not part of a snapshot: an undo does not restore a cursor the view did not move", () => {
+    const store = createDocumentStore(parse("One.\n\nTwo.\n"), SIDECAR);
+    store.getState().setCursor(3);
+    store.getState().dispatch((state) => applyMoveBlock(state, 0, 1));
+    store.getState().setCursor(7);
+    store.getState().undo();
+    expect(store.getState().cursor).toBe(7);
   });
 });
 

@@ -95,6 +95,7 @@ export {
   reanchor,
   applyReorderSentences,
   applyMoveSection,
+  applyMoveBlock,
   FRONT_MATTER_KEYS,
   FRONT_MATTER_UNSUPPORTED,
   readFrontMatter,

@@ -32,7 +32,8 @@ import { mdastToPM, pmToMdast } from "./schema.js";
  *
  * **Direction of travel.** The store is the document; a view is a projection of it. An edit goes
  * view → store ({@link DocumentBinding.dispatch}), and every other change of the current snapshot
- * — an undo, a redo, later a mode mutation — goes store → view, pulled by the subscription
+ * — an undo, a redo, a mode mutation ({@link DocumentStoreState.dispatch}) — goes store → view,
+ * pulled by the subscription
  * {@link bindProseMirror} installs. The two are told apart by *reference*: the binding remembers
  * the `Root` object the view is currently showing, and `push` stores a root by reference, so a
  * store change whose root is that same object is the binding's own commit coming back and is
@@ -49,7 +50,17 @@ import { mdastToPM, pmToMdast } from "./schema.js";
 /** §6.5's typing burst: every doc-changing ProseMirror transaction carries this coalescing key. */
 export const TYPING_KEY = "typing";
 
-/** The store's state: the stack, the snapshot it currently shows, and the four store actions. */
+/**
+ * A mode mutation (PRD §6.3, §6.5): one of `core`'s pure `DocumentState → DocumentState` functions
+ * (`applyMoveBlock`, `applyMoveSection`, `applyReorderSentences`, …) with its arguments bound. The
+ * store hands it the snapshot it currently shows and pushes what it returns, so a mode never
+ * builds a root itself and every mode edit is one undo step holding both halves.
+ */
+export type ModeMutation = (state: DocumentState) => DocumentState;
+
+/**
+ * The store's state: the stack, the snapshot it currently shows, the cursor, and the store actions.
+ */
 export interface DocumentStoreState {
   /** The whole history. `document` is always `current(stack)`. */
   readonly stack: UndoStack;
@@ -58,6 +69,20 @@ export interface DocumentStoreState {
    * it directly. Its identity is the stack entry's, so it changes only when the snapshot does.
    */
   readonly document: DocumentState;
+  /**
+   * The rendered view's caret as a ProseMirror position (`selection.head`; PRD §6.1: the store
+   * tracks the cursor by ProseMirror position), or `null` before a view has reported one. Not part
+   * of any snapshot: a cursor move is not an edit, so it never pushes and an undo never restores it.
+   */
+  readonly cursor: number | null;
+  /** Record the caret; a no-op when it is already there, so a subscriber is not woken for nothing. */
+  setCursor(position: number): void;
+  /**
+   * Apply a {@link ModeMutation} to the current snapshot and push its result as one undo step: no
+   * coalescing key, so it never merges with a typing burst or with the next mode mutation. A
+   * mutation that returns the snapshot it was given (both halves, by reference) pushes nothing.
+   */
+  dispatch(mutation: ModeMutation): void;
   /** Push a committed mutation (`core`'s `push`, with this store's stack). */
   commit(root: Root, sidecar: Sidecar, options?: PushOptions): void;
   /** Step back one snapshot. */
@@ -85,6 +110,16 @@ export function createDocumentStore(
     return {
       stack: seed,
       document: current(seed),
+      cursor: null,
+      setCursor: (position) => {
+        if (get().cursor !== position) set({ cursor: position });
+      },
+      dispatch: (mutation) => {
+        const before = get().document;
+        const after = mutation(before);
+        if (after.root === before.root && after.sidecar === before.sidecar) return;
+        move(push(get().stack, after.root, after.sidecar));
+      },
       commit: (nextRoot, nextSidecar, pushOptions) =>
         move(push(get().stack, nextRoot, nextSidecar, pushOptions)),
       undo: () => move(undo(get().stack)),
@@ -166,7 +201,8 @@ export interface DocumentBinding {
  * what the store holds rather than whatever it was constructed with.
  *
  * A transaction that leaves the document alone (a selection move, a decoration refresh) is applied
- * and nothing is pushed: §6.5 pushes *committed mutations*, and a cursor move is not one.
+ * and nothing is pushed: §6.5 pushes *committed mutations*, and a cursor move is not one. Every
+ * transaction and every pull reports the view's caret to the store ({@link DocumentStoreState.cursor}).
  *
  * The pull replaces the whole document in one step rather than rebuilding the `EditorState`, so
  * the view keeps its plugins and its plugin state across an undo.
@@ -186,9 +222,11 @@ export function bindProseMirror(
     const { doc } = mdastToPM(root);
     // The initial pull of a view already built from this root, and a re-entrant notification for
     // a snapshot that happens to hold the same document, both land here with nothing to do.
-    if (doc.eq(view.state.doc)) return;
-    const transaction = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
-    view.updateState(view.state.apply(transaction));
+    if (!doc.eq(view.state.doc)) {
+      const transaction = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
+      view.updateState(view.state.apply(transaction));
+    }
+    store.getState().setCursor(view.state.selection.head);
   };
 
   pull(shown);
@@ -200,11 +238,13 @@ export function bindProseMirror(
     dispatch(transaction) {
       const next = view.state.apply(transaction);
       view.updateState(next);
-      if (!transaction.docChanged) return;
-      const { document, commit } = store.getState();
-      const root = pmToMdast({ doc: next.doc, frontMatter: frontMatterOf(document.root) });
-      shown = root;
-      commit(root, document.sidecar, { coalesceKey, at: now() });
+      if (transaction.docChanged) {
+        const { document, commit } = store.getState();
+        const root = pmToMdast({ doc: next.doc, frontMatter: frontMatterOf(document.root) });
+        shown = root;
+        commit(root, document.sidecar, { coalesceKey, at: now() });
+      }
+      store.getState().setCursor(next.selection.head);
     },
     destroy: unsubscribe,
   };

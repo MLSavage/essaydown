@@ -18,6 +18,7 @@ import { createImageNodeView } from "./image-view";
 import { imagePastePlugin } from "./image-paste";
 import { sidecarPathFor, stemOf } from "./paths";
 import { createSidecarBaseline } from "./sidecar-sync";
+import { installTestHook, type TestHookHost } from "./test-hook";
 
 /** What `loadDocument` read for one path: the file's bytes and its sidecar. */
 export interface LoadedDocument {
@@ -194,7 +195,18 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
     };
   }, [initial]);
 
-  useEffect(() => store.subscribe(() => syncRef.current?.edited()), [store]);
+  // A snapshot change only: the store also notifies when the caret moves (`cursor`), which is not
+  // an edit and must not schedule a save.
+  useEffect(
+    () =>
+      store.subscribe((state, previous) => {
+        if (state.document !== previous.document) syncRef.current?.edited();
+      }),
+    [store],
+  );
+
+  // The shell e2e's handle on this pane's store (task 3.1; ./test-hook.ts).
+  useEffect(() => installTestHook(window as TestHookHost, store), [store]);
 
   // A rename re-reads the document at the new path inside the sync's chain, so the next save does
   // not find the disk changed (DECISIONS #review-2-r0 U20), and its image-URL rewrite is written

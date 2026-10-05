@@ -170,6 +170,18 @@ button:disabled {
   color: #666;
 }
 
+/* Task 3.1: the mode bar (PRD §6.3); the pressed button is the current mode. */
+.mode-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.mode-button[aria-pressed="true"] {
+  background-color: #dfe5f7;
+  font-weight: 600;
+}
+
 .workspace-current-file {
   font-weight: 600;
   margin-bottom: 12px;
