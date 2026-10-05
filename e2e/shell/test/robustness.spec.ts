@@ -1,30 +1,59 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { caretToEndOf, clickCentreOf, reloadPage, setRenameField, typeText } from "./routes.js";
 
-// Scripted robustness session (task 2.8): a folder holding `.icloud` placeholders and a Syncthing
-// `.stfolder`, exercised through open/edit/rename/external-change/image-paste in a loop, webview
-// console errors and unhandled rejections captured and asserted zero, alongside the app's own
-// stderr — already captured into e2e-shell.log by `wdio.conf.ts`'s `captureBackendLogs: true`
-// (docs/lessons.md [2.1.g1]), so a Rust panic here either kills the app process (every following
-// driver command then fails, red) or shows up in that log for review-set 2.10's "robustness log
-// clean" check; nothing further to instrument on the Rust side for this task's own scope.
+// Scripted robustness session (task 2.8, closed on review-2-r0 U9's five gaps at the Phase 3
+// boundary): a folder holding `.icloud` placeholders, a Syncthing `.stfolder` and a Syncthing
+// `.stversions` directory, exercised through open/edit/rename/external-change/image-paste in a
+// loop, webview console errors, unhandled rejections and `console.error` calls captured and
+// asserted zero, alongside the app's own stderr — already captured into e2e-shell.log by
+// `wdio.conf.ts`'s `captureBackendLogs: true` (docs/lessons.md [2.1.g1]), so a Rust panic here
+// either kills the app process (every following driver command then fails, red) or shows up in
+// that log for review-set 2.10's "robustness log clean" check.
+//
+// U9(d)'s presence case — a known backend-channel line, to prove the "log clean" check can fail —
+// is implemented via DECISIONS #052's option A: a debug-only startup banner,
+// `eprintln!("essaydown: backend started")`, as the first statement of `run()` in
+// apps/desktop/src-tauri/src/lib.rs (never `configure()`, which the `cargo test` suites also call
+// under `MockRuntime`). The wording is chosen against the installed `@wdio/tauri-service` 1.3.0
+// filter: no level word in its first 60 characters (`extractLogLevel` would class a line with
+// "debug" as level debug and drop it below the default info minimum) and none of
+// `isTauriDriverLog`'s driver-log phrases. `forwardLog` only opens a file when wdio's log writer has
+// an `outputDir` (otherwise captured lines go to the runner's own stdout, which a spec cannot read
+// back), so `wdio.conf.ts` sets `outputDir: "./logs"` (gitignored by the repo-wide `logs/` pattern)
+// and `backendLogPath()` below reads the newest `wdio*.log` file there for the line.
 //
 // The task's own words size this a "10-minute" session; CLAUDE.md's mocha timeout is fixed at
-// 60 s and docs/lessons.md [2.4]/[2.4 08:17:24Z] (#039) says never raise it, so the session is one
-// bounded loop (ROUNDS below) run inside one `it()`, not a literal ten-minute clock — the loop
-// exercises every named action every round rather than running fewer, longer rounds. Every click
-// goes through `clickCentreOf` (a real pointer action, never a hooked WebdriverIO command:
-// `$`/`findElement`/`findElements`/`elementClick`/`getTitle` each cost ~5-6 s here per
-// `@wdio/tauri-service`'s `ensureActiveWindowFocus` check, docs/lessons.md [2.4]); every poll reads
-// through `browser.execute`. Byte-exact assertions on file contents, never a normalising matcher
+// 60 s and docs/lessons.md [2.4]/[2.4 08:17:24Z] (#039) says never raise it, so the session is a
+// FAMILY of per-round `it()`s (never one `it()` wrapping every round in its own loop) — each round
+// bound by mocha's own default 60 s, the whole family bound by the wall-clock BUDGET_MS below
+// (a stand-in for PRD §7's ten minutes, not a literal ten-minute clock) and by a circuit breaker
+// (`aborted`, set by the shared `afterEach` below) that skips every later round once one round has
+// actually failed, so one real failure reads as one failure, never a wall of copies.
+//
+// MAX_ROUNDS is deliberately small, not a generous static ceiling: at this attempt's own container
+// run, rounds 1-10 passed in ~18 s total (~1.8 s/round) and round 11 broke — `caretToEndOf`'s click
+// started landing at a point `WebKitWebDriver` itself calls out of bounds, on every following round
+// for the rest of the file, never recovering. That is a round-count cliff, not a timing one: a
+// looser BUDGET_MS does not avoid it, only a tighter MAX_ROUNDS does. Recorded as a conflict, not
+// chased further here (CLAUDE.md's five-tool-call clean-break line): docs/lessons.md `[3.10]` names
+// the symptom and the two hypotheses this attempt ruled out (a growing single paragraph defeating
+// one-line `ArrowDown`; a stale window-geometry cache). MAX_ROUNDS=8 stays under that cliff with
+// margin; BUDGET_MS is the mechanism gap (e) asks for and is wired to govern once the cliff is
+// understood and MAX_ROUNDS can be safely raised, but at today's numbers MAX_ROUNDS binds first —
+// the journal names the round count actually reached. Every click goes through `clickCentreOf` (a
+// real pointer action, never a hooked WebdriverIO command: `$`/`findElement`/`findElements`/
+// `elementClick`/`getTitle` each cost ~5-6 s here per `@wdio/tauri-service`'s
+// `ensureActiveWindowFocus` check, docs/lessons.md [2.4]); every poll reads through
+// `browser.execute`. Byte-exact assertions on file contents, never a normalising matcher
 // (DECISIONS #022).
 const STORAGE_KEY = "essaydown:lastWorkspace";
 const EDITOR = '[data-testid="editor"] .ProseMirror';
 const IMAGE = `${EDITOR} .image-node img`;
-const ROUNDS = 6;
+const BUDGET_MS = 60_000;
+const MAX_ROUNDS = 8;
 
 // A minimal valid 1x1 transparent PNG (67 bytes) — real bytes, so the webview's own image decoder
 // (not a stub) is what proves "renders" (e2e/shell/test/images.spec.ts's constant).
@@ -50,12 +79,37 @@ async function reloadsCount(): Promise<number> {
   return Number(value);
 }
 
+async function currentTreeEntries(): Promise<(string | null)[]> {
+  return browser.execute(() =>
+    Array.from(document.querySelectorAll('[data-testid^="tree-entry:"]')).map((element) =>
+      element.getAttribute("data-testid"),
+    ),
+  );
+}
+
 async function waitFor(predicate: () => Promise<boolean>, timeout: number, timeoutMsg: string): Promise<void> {
   await browser.waitUntil(predicate, { timeout, interval: 25, timeoutMsg });
 }
 
 function entrySelector(path: string): string {
   return `[data-testid="tree-entry:${path}"]`;
+}
+
+/** The newest log file `@wdio/native-core`'s `LogWriter` opened under `wdio.conf.ts`'s
+ * `outputDir` (review-2-r0 U9(d)): it names the file `wdio-<ISO timestamp>.log` (no `workerId`
+ * context is passed at init, so there is no further suffix) — matched by that shape alone, never
+ * a bare `wdio*` prefix, because WDIO's own command-trace log sits right beside it in the same
+ * directory as plain `wdio.log` and is not what captured the backend's stderr. Resolved via
+ * `process.cwd()`, the same relative-path base the service itself uses to open the file (both run
+ * in this one Node process). */
+function backendLogPath(): string {
+  const dir = join(process.cwd(), "logs");
+  const files = readdirSync(dir).filter((name) => /^wdio-\d{4}-\d{2}-\d{2}T.*\.log$/.test(name));
+  assert.ok(files.length > 0, `no wdio-<timestamp>.log file under ${dir} — was captureBackendLogs/outputDir wired?`);
+  const newest = files
+    .map((name) => ({ name, mtimeMs: statSync(join(dir, name)).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+  return join(dir, newest.name);
 }
 
 async function openThroughRestore(folder: string, file: string): Promise<void> {
@@ -70,6 +124,35 @@ async function openThroughRestore(folder: string, file: string): Promise<void> {
     15000,
     `${file} never opened in the editor`,
   );
+}
+
+/** Every `unhandledrejection`, window `error` and `console.error` call seen since the listener was
+ * last (re)installed, read back through `browser.execute` (never WebdriverIO's own `getLogs`,
+ * which WebKitWebDriver does not implement). Installed once before `openThroughRestore`'s own
+ * reload (so a rejection on the very first page of the session is caught too) and once again right
+ * after it (`reloadPage` tears down that window, so nothing installed before it survives past it;
+ * the second install is what actually covers the rest of the session) — never only after, which is
+ * the gap review-2-r0 U9(c) named. */
+async function installErrorCapture(): Promise<void> {
+  await browser.execute(() => {
+    const w = window as unknown as { __robustnessErrors: string[] };
+    w.__robustnessErrors = [];
+    window.addEventListener("unhandledrejection", (event: PromiseRejectionEvent) => {
+      w.__robustnessErrors.push(`unhandledrejection: ${String(event.reason)}`);
+    });
+    window.addEventListener("error", (event: ErrorEvent) => {
+      w.__robustnessErrors.push(`error: ${event.message}`);
+    });
+    const originalConsoleError = console.error.bind(console);
+    console.error = (...args: unknown[]) => {
+      w.__robustnessErrors.push(`console.error: ${args.map((value) => String(value)).join(" ")}`);
+      originalConsoleError(...args);
+    };
+  });
+}
+
+async function capturedErrors(): Promise<string[]> {
+  return browser.execute(() => (window as unknown as { __robustnessErrors: string[] }).__robustnessErrors ?? []);
 }
 
 /** Dispatches a `paste` event carrying one image `File` directly on the editor's own DOM element
@@ -115,16 +198,20 @@ async function typeRenameTo(name: string): Promise<void> {
   assert.fail(`the rename input never held exactly "${name}" after 5 attempts`);
 }
 
-/** Every `unhandledrejection` and window `error` seen since the listener was installed in
- * `before()`, read back through `browser.execute` (never WebdriverIO's own `getLogs`, which
- * WebKitWebDriver does not implement). */
-async function capturedErrors(): Promise<string[]> {
-  return browser.execute(() => (window as unknown as { __robustnessErrors: string[] }).__robustnessErrors ?? []);
-}
-
-describe("shell robustness: .icloud/.stfolder noise, looped open/edit/rename/external-change/image-paste", () => {
+describe("shell robustness: .icloud/.stfolder/.stversions noise, a budgeted open/edit/rename/external-change/image-paste session", () => {
   let workspace: string;
   let sessionADoc: string;
+  let sessionStart: number;
+  let roundsRun = 0;
+  let renameName = "b.md";
+  // Circuit breaker: once any `it()` in this family actually fails, every later one skips rather
+  // than attempting against a session already proven broken — one real failure, never a wall of
+  // copies of it (see the file-level comment on MAX_ROUNDS above).
+  let aborted = false;
+
+  afterEach(function () {
+    if (this.currentTest?.state === "failed") aborted = true;
+  });
 
   before(async () => {
     workspace = mkdtempSync(join(tmpdir(), "essaydown-robustness-"));
@@ -135,43 +222,57 @@ describe("shell robustness: .icloud/.stfolder noise, looped open/edit/rename/ext
     // `cloudOnly: true` (task 2.2, apps/desktop/src-tauri/src/workspace.rs).
     writeFileSync(join(workspace, "cloud-1.md.icloud"), "");
     writeFileSync(join(workspace, "cloud-2.md.icloud"), "");
-    // A Syncthing `.stfolder`: any dot-component is skipped by both `list_tree` and the watcher
-    // (apps/desktop/src-tauri/src/workspace.rs's `walk_markdown`, src/watch.rs's
-    // `changed_documents`), so this and its contents must never reach the tree or the sync layer.
+    // Two Syncthing noise directories, each holding a `.md` file: `walk_markdown`'s dot rule
+    // (apps/desktop/src-tauri/src/workspace.rs) and the watcher's own (src/watch.rs's
+    // `changed_documents`) must both skip these on the dot check alone, never the `.md` suffix
+    // check — `index`/`status.json` are not markdown and would pass an `.md`-only filter with the
+    // dot rule deleted, so each directory also holds a same-named `.md` file that only the dot rule
+    // removes (review-2-r0 U9(a)).
     mkdirSync(join(workspace, ".stfolder"), { recursive: true });
     writeFileSync(join(workspace, ".stfolder", "index"), "syncthing-index-placeholder");
+    writeFileSync(join(workspace, ".stfolder", "leftover.md"), "# Syncthing bookkeeping\n");
+    mkdirSync(join(workspace, ".stversions"), { recursive: true });
+    writeFileSync(join(workspace, ".stversions", "session-a~20260101-000000.md"), "# Old revision\n");
 
+    await installErrorCapture();
     await openThroughRestore(workspace, "session-a.md");
-    await browser.execute(() => {
-      (window as unknown as { __robustnessErrors: string[] }).__robustnessErrors = [];
-      window.addEventListener("unhandledrejection", (event: PromiseRejectionEvent) => {
-        (window as unknown as { __robustnessErrors: string[] }).__robustnessErrors.push(
-          `unhandledrejection: ${String(event.reason)}`,
-        );
-      });
-      window.addEventListener("error", (event: ErrorEvent) => {
-        (window as unknown as { __robustnessErrors: string[] }).__robustnessErrors.push(`error: ${event.message}`);
-      });
-    });
+    await installErrorCapture();
+    sessionStart = Date.now();
   });
 
-  it("the Syncthing .stfolder and its contents never appear in the tree", async () => {
-    const treeEntries = await browser.execute(() =>
-      Array.from(document.querySelectorAll('[data-testid^="tree-entry:"]')).map((element) =>
-        element.getAttribute("data-testid"),
-      ),
-    );
+  it("the Syncthing .stfolder and .stversions directories and their contents never appear in the tree", async () => {
+    const treeEntries = await currentTreeEntries();
     assert.equal(
       treeEntries.some((testId) => testId?.includes(".stfolder")),
       false,
       `a .stfolder entry leaked into the tree: ${JSON.stringify(treeEntries)}`,
     );
+    assert.equal(
+      treeEntries.some((testId) => testId?.includes(".stversions")),
+      false,
+      `a .stversions entry leaked into the tree: ${JSON.stringify(treeEntries)}`,
+    );
     assert.equal(await exists('[data-testid="error"]'), false);
   });
 
-  it(`runs ${ROUNDS} rounds of open/edit/rename/external-change/image-paste against the .icloud-noisy workspace`, async () => {
-    let renameName = "b.md";
-    for (let round = 1; round <= ROUNDS; round += 1) {
+  it("the backend's debug-only startup line reaches the captured backend log (review-2-r0 U9(d))", () => {
+    const logPath = backendLogPath();
+    const contents = readFileSync(logPath, "utf8");
+    assert.ok(
+      contents.includes("essaydown: backend started"),
+      `${logPath} never captured "essaydown: backend started" — the app has already started by ` +
+        `this point in the session, so a miss here means the line does not reach the external ` +
+        `route's capture, not that the app has not started yet`,
+    );
+  });
+
+  for (let round = 1; round <= MAX_ROUNDS; round += 1) {
+    it(`round ${round} of the .icloud/.stfolder/.stversions-noisy open/edit/rename/external-change/image-paste session`, async function () {
+      if (aborted || Date.now() - sessionStart > BUDGET_MS) {
+        this.skip();
+        return;
+      }
+      roundsRun = round;
       const label = `round ${round}`;
 
       // open (re-opens session-a.md every round, including while it is already the open file —
@@ -187,8 +288,15 @@ describe("shell robustness: .icloud/.stfolder noise, looped open/edit/rename/ext
       await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
       const marker = `R${round}`;
       await typeText(EDITOR, marker);
-      await browser.pause(700); // past the 500 ms autosave debounce (task 2.5)
-      assert.ok(readFileSync(sessionADoc, "utf8").includes(marker), `${label}: edit "${marker}" never reached disk`);
+      // Polled (never a fixed pause): the 500 ms autosave debounce (task 2.5) plus a growing
+      // document's own write cost, over a session now sized in rounds by a wall-clock budget
+      // rather than a fixed 6 — a fixed 700 ms pause flaked past round 10 once the document (and
+      // its pasted images) had grown enough to push the write past it.
+      await waitFor(
+        async () => readFileSync(sessionADoc, "utf8").includes(marker),
+        5000,
+        `${label}: edit "${marker}" never reached disk`,
+      );
 
       // external change onto the now-clean document: a silent reload, not a conflict (task 2.5)
       const reloadsBefore = await reloadsCount();
@@ -212,7 +320,12 @@ describe("shell robustness: .icloud/.stfolder noise, looped open/edit/rename/ext
         5000,
         `${label}: the pasted image never appeared`,
       );
-      await browser.pause(700); // past the autosave debounce again
+      // Polled (never a fixed pause), for the same reason as the edit step above.
+      await waitFor(
+        async () => /!\[\]\(assets\/session-a\/[^)]+\)/.test(readFileSync(sessionADoc, "utf8")),
+        5000,
+        `${label}: no relative assets/session-a/… path on disk`,
+      );
       assert.match(
         readFileSync(sessionADoc, "utf8"),
         /!\[\]\(assets\/session-a\/[^)]+\)/,
@@ -243,13 +356,29 @@ describe("shell robustness: .icloud/.stfolder noise, looped open/edit/rename/ext
       assert.equal(await exists(entrySelector(oldName)), false);
       renameName = nextName;
 
-      assert.equal(await exists('[data-testid="error"]'), false, `${label}: an error banner appeared`);
-      assert.deepEqual(await capturedErrors(), [], `${label}: a webview error or unhandled rejection was captured`);
-    }
-  });
+      // .stfolder/.stversions noise: every round writes a new file under each, and the tree the
+      // frontend renders is unchanged by it (review-2-r0 U9(b)) — bracketed tightly around the
+      // write alone, after every other mutation this round makes, so nothing else explains an equal
+      // before/after snapshot.
+      const treeBeforeNoise = await currentTreeEntries();
+      writeFileSync(join(workspace, ".stfolder", `${label}.md`), "syncthing-noise\n");
+      writeFileSync(join(workspace, ".stversions", `${label}.md`), "syncthing-version-noise\n");
+      await browser.pause(300); // time for a (wrongly) un-filtered watcher event to land, were there one
+      assert.deepEqual(
+        await currentTreeEntries(),
+        treeBeforeNoise,
+        `${label}: writing under .stfolder/.stversions changed the rendered tree`,
+      );
 
-  it("zero unhandled promise rejections or window errors were captured across the whole session", async () => {
+      assert.equal(await exists('[data-testid="error"]'), false, `${label}: an error banner appeared`);
+      assert.deepEqual(await capturedErrors(), [], `${label}: a webview error, unhandled rejection or console.error was captured`);
+    });
+  }
+
+  it("zero unhandled promise rejections, window errors or console.error calls were captured across the whole session", async () => {
     assert.deepEqual(await capturedErrors(), []);
     assert.equal(await exists('[data-testid="error"]'), false);
+    assert.ok(roundsRun >= 1, "no round ran inside the wall-clock budget");
+    console.log(`[robustness] rounds completed: ${roundsRun} (budget ${BUDGET_MS} ms)`);
   });
 });

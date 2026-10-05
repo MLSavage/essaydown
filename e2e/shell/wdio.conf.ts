@@ -42,6 +42,11 @@ export const config: WebdriverIO.Config = {
       browserName: "tauri",
     },
   ],
+  // The log writer only opens a file when this is set (otherwise captured lines go to the
+  // runner's own stdout, which a spec cannot read back) — review-2-r0 U9(d)'s presence case
+  // reads this directory (robustness.spec.ts), so it is set under e2e/shell/, gitignored by
+  // the repo-wide `logs/` pattern.
+  outputDir: "./logs",
   logLevel: "info",
   framework: "mocha",
   reporters: ["spec"],

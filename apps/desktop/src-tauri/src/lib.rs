@@ -78,6 +78,12 @@ pub(crate) fn context<R: tauri::Runtime>() -> tauri::Context<R> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Reachable stderr line for the shell e2e's backend-log-capture presence case
+    // (DECISIONS #052 gap (d), option A): a debug-only startup banner, never a product
+    // diagnostic. Never in `configure()`, which `cargo test`'s `MockRuntime` suites also call.
+    #[cfg(debug_assertions)]
+    eprintln!("essaydown: backend started");
+
     let builder = configure(tauri::Builder::default());
 
     // macOS only (Linux and Windows keep no menu bar): tauri's default menu with its Quit replaced
