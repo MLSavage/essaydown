@@ -13,7 +13,7 @@ import {
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
-import { createDocumentSync, type DocumentSync, type FlushResult } from "./document-sync";
+import { createDocumentSync, type DocumentSync, type FlushResult, type RenameOutcome } from "./document-sync";
 import { createImageNodeView } from "./image-view";
 import { imagePastePlugin } from "./image-paste";
 import { sidecarPathFor, stemOf } from "./paths";
@@ -58,13 +58,19 @@ export interface DocumentPaneHandle {
    * drops or moves the document only on `clean` or `saved` (document-sync.ts).
    */
   flush(): Promise<FlushResult>;
+  /**
+   * Rename the open document to `newPath` inside its sync's chain (document-sync.ts `renamed`):
+   * `move` is the IPC that moves the files; the pane rewrites the document's image URLs to the new
+   * stem and writes them, and reads and writes `newPath` from the move on.
+   */
+  rename(newPath: string, move: () => Promise<void>): Promise<RenameOutcome>;
 }
 
 interface Props {
   /** The canonical absolute folder `open_folder` returned, for resolving an image's relative `src`
    * against the document's directory (PRD §6.4). */
   readonly root: string;
-  /** Workspace-relative; changes in place on a rename, without a remount. */
+  /** Workspace-relative; changes in place on a rename (after `rename` moved it), without a remount. */
   readonly path: string;
   readonly initial: LoadedDocument;
   /** §6.1's Undo-open: the user declined the first open of a non-canonical file. */
@@ -105,8 +111,11 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
   const pathRef = useRef(path);
   const errorRef = useRef(onError);
   const storeRef = useRef(store);
+  // On a change only: `rename` moves `pathRef` before the parent re-renders with the new `path`.
   useLayoutEffect(() => {
     pathRef.current = path;
+  }, [path]);
+  useLayoutEffect(() => {
     errorRef.current = onError;
     storeRef.current = store;
   });
@@ -187,20 +196,29 @@ export default function DocumentPane({ root, path, initial, onUndoOpen, onError,
 
   useEffect(() => store.subscribe(() => syncRef.current?.edited()), [store]);
 
-  useImperativeHandle(ref, () => ({ flush: async () => (await syncRef.current?.flush()) ?? "clean" }), []);
-
-  // A rename changes `path` without a remount, and `rename_file` may have rewritten the document's
-  // image URLs: re-read it at the new path, so the next save does not find the disk changed
-  // (DECISIONS #review-2-r0 U20), and apply the same rewrite to an edit made since the flush
-  // (DECISIONS #review-2-r2 W2).
-  const pathSeen = useRef(path);
-  useEffect(() => {
-    if (pathSeen.current === path) return;
-    const oldStem = stemOf(pathSeen.current);
-    const newStem = stemOf(path);
-    pathSeen.current = path;
-    void syncRef.current?.renamed((text) => rewriteAssetUrls(text, oldStem, newStem));
-  }, [path]);
+  // A rename re-reads the document at the new path inside the sync's chain, so the next save does
+  // not find the disk changed (DECISIONS #review-2-r0 U20), and its image-URL rewrite is written
+  // there too, never read before the move and written after it (DECISIONS #review-2-r3, task 3.11).
+  useImperativeHandle(
+    ref,
+    () => ({
+      flush: async () => (await syncRef.current?.flush()) ?? "clean",
+      rename: async (newPath, move) => {
+        const sync = syncRef.current;
+        if (sync === null) return { moved: false, result: "failed" };
+        const oldStem = stemOf(pathRef.current);
+        const newStem = stemOf(newPath);
+        return sync.renamed(
+          (text) => rewriteAssetUrls(text, oldStem, newStem),
+          async () => {
+            await move();
+            pathRef.current = newPath;
+          },
+        );
+      },
+    }),
+    [],
+  );
 
   useEffect(() => {
     const element = host.current;

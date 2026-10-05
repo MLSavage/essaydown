@@ -226,18 +226,24 @@ function App() {
       if (trimmed === "" || trimmed === basenameOf(oldPath)) return;
       const newPath = joinRelative(dirnameOf(oldPath), trimmed);
       try {
-        // A save still pending under the old name would recreate that file after the rename.
-        if (openPath === oldPath) {
-          const waits = switchWaits((await pane.current?.flush()) ?? "clean");
-          setWaiting(waits);
-          if (waits !== null) return;
+        const openPane = openPath === oldPath ? pane.current : null;
+        if (openPane !== null) {
+          // The open document saves, moves and has its image URLs rewritten inside its sync's chain,
+          // so no autosave lands between a read of the old path and the write of its rewrite, nor
+          // recreates the old name after the move (DECISIONS #review-2-r3, task 3.11).
+          const outcome = await openPane.rename(newPath, () => invoke("rename_file", { oldPath, newPath }));
+          setWaiting(outcome.moved ? null : switchWaits(outcome.result));
+          if (!outcome.moved) return;
+          // The pane reported a failed post-move write itself; it stays on screen.
+          if (outcome.result !== "failed") setError(null);
+        } else {
+          // The rewritten bytes are computed before the first move, so a failed read changes nothing.
+          const source = await invoke<string>("read_doc", { path: oldPath });
+          const next = rewriteAssetUrls(source, stemOf(oldPath), stemOf(newPath));
+          await invoke("rename_file", { oldPath, newPath, rewritten: next === source ? undefined : next });
+          setError(null);
         }
-        // The rewritten bytes are computed before the first move, so a failed read changes nothing.
-        const source = await invoke<string>("read_doc", { path: oldPath });
-        const next = rewriteAssetUrls(source, stemOf(oldPath), stemOf(newPath));
-        await invoke("rename_file", { oldPath, newPath, rewritten: next === source ? undefined : next });
         await refreshTree();
-        setError(null);
         if (openPath === oldPath) {
           setOpenPath(newPath);
           if (root !== null) writeLastWorkspace({ folder: root, file: newPath });

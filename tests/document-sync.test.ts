@@ -332,7 +332,9 @@ describe("external changes", () => {
     expect(await h.sync.keepMine()).toBe("failed");
     await h.sync.reload();
     expect(await h.sync.flush()).toBe("failed");
-    await h.sync.renamed();
+    let moves = 0;
+    expect(await h.sync.renamed((t) => t, async () => void (moves += 1))).toEqual({ moved: false, result: "failed" });
+    expect(moves).toBe(0);
     await vi.advanceTimersByTimeAsync(shrinkHoldMs * 2);
     expect(h.writes).toEqual([]);
     expect(h.reloads).toEqual([]);
@@ -478,58 +480,104 @@ describe("flush results and the in-flight write", () => {
   });
 });
 
+// Task 3.11 (DECISIONS #review-2-r3): the rename runs inside the chain — barrier, move, re-read,
+// rewrite and its write in one operation. `h.disk` is the one file; `move` stands for
+// `rename_file` (the bytes are unchanged unless the case says another writer touched them). One
+// test per guard `renamed` adds.
+const toB = (text: string): string => rewriteAssetUrls(text, "a", "b");
+
 describe("after a rename", () => {
-  it("the same bytes as known change nothing", async () => {
+  it("the same bytes as known with nothing to rewrite change nothing", async () => {
     const h = harness("a\n");
-    await h.sync.renamed();
+    let moves = 0;
+    expect(await h.sync.renamed(toB, async () => void (moves += 1))).toEqual({ moved: true, result: "clean" });
+    expect(moves).toBe(1);
     expect(h.reads).toBe(1);
+    expect(h.writes).toEqual([]);
     expect(h.reloads).toEqual([]);
     expect(h.known).toEqual([]);
   });
 
-  it("rewritten bytes reload a clean document and never conflict", async () => {
-    const h = harness("![](assets/a/x.png)\n");
-    h.disk.text = "![](assets/b/x.png)\n";
-    await h.sync.renamed();
-    expect(h.reloads).toEqual(["![](assets/b/x.png)\n"]);
-    expect(h.conflicts).toBe(0);
-    edit(h, "![](assets/b/x.png)Q\n");
+  it("a clean document's image URLs are rewritten from the disk's own bytes, reloaded and written, never a conflict", async () => {
+    // Non-canonical bytes (`*` emphasis) stay as they are: the clean rewrite is the disk's, not the editor's format.
+    const h = harness("*e* ![](assets/a/x.png)\n");
+    expect(await h.sync.renamed(toB, async () => {})).toEqual({ moved: true, result: "saved" });
+    expect(h.reloads).toEqual(["*e* ![](assets/b/x.png)\n"]);
+    expect(h.writes).toEqual(["*e* ![](assets/b/x.png)\n"]);
+    expect(h.sync.dirty).toBe(false);
+    edit(h, "*e* ![](assets/b/x.png)Q\n");
     await vi.advanceTimersByTimeAsync(saveDelayMs);
     expect(h.conflicts).toBe(0);
-    expect(h.disk.text).toBe("![](assets/b/x.png)Q\n");
+    expect(h.disk.text).toBe("*e* ![](assets/b/x.png)Q\n");
   });
 
-  // DECISIONS #review-2-r2 W2 (task 2.27): the rename's rewrite reaches the dirty editor.
-  it("rewritten image URLs under an edit reach the editor, stay dirty, and the next save writes the edit with the new stem", async () => {
+  it("a clean document changed by another writer during the move reloads the new bytes", async () => {
+    const h = harness("a\n");
+    const outcome = await h.sync.renamed(toB, async () => void (h.disk.text = "z\n"));
+    expect(outcome).toEqual({ moved: true, result: "clean" });
+    expect(h.reloads).toEqual(["z\n"]);
+    expect(h.known).toEqual(["z\n"]);
+    expect(h.writes).toEqual([]);
+  });
+
+  it("a pending edit is saved at the old path before the move, and the move waits for it", async () => {
     const h = harness("![image](assets/a/x.png)\n");
     edit(h, "![image](assets/a/x.png) later edit\n");
-    h.disk.text = "![image](assets/b/x.png)\n";
-    await h.sync.renamed((text) => rewriteAssetUrls(text, "a", "b"));
-    expect(h.reloads).toEqual(["![image](assets/b/x.png) later edit\n"]);
+    const order: string[] = [];
+    h.afterWrite = () => order.push(`write ${h.disk.text}`);
+    await h.sync.renamed(toB, async () => void order.push("move"));
+    expect(order).toEqual([
+      "write ![image](assets/a/x.png) later edit\n",
+      "move",
+      "write ![image](assets/b/x.png) later edit\n",
+    ]);
     expect(h.editor.text).toBe("![image](assets/b/x.png) later edit\n");
-    expect(h.sync.dirty).toBe(true);
-    expect(h.conflicts).toBe(0);
-    expect(h.known).toEqual(["![image](assets/b/x.png)\n"]);
-    await vi.advanceTimersByTimeAsync(saveDelayMs);
-    expect(h.conflicts).toBe(0);
-    expect(h.disk.text).toBe("![image](assets/b/x.png) later edit\n");
-    expect(h.disk.text).not.toContain("assets/a/");
     expect(h.sync.dirty).toBe(false);
   });
 
-  it("an edit the rename's rewrite leaves alone is not handed back to the editor and stays dirty", async () => {
+  it("refused with a conflict standing: nothing moves", async () => {
     const h = harness("a\n");
-    edit(h, "aQ\n");
-    h.disk.text = "b\n";
-    await h.sync.renamed((text) => rewriteAssetUrls(text, "a", "b"));
-    expect(h.reloads).toEqual([]);
-    expect(h.sync.dirty).toBe(true);
-    expect(h.conflicts).toBe(0);
-    await vi.advanceTimersByTimeAsync(saveDelayMs);
-    expect(h.disk.text).toBe("aQ\n");
+    edit(h, "ab\n");
+    h.disk.text = "z\n";
+    h.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    expect(h.sync.conflict).toBe(true);
+    let moves = 0;
+    expect(await h.sync.renamed(toB, async () => void (moves += 1))).toEqual({ moved: false, result: "conflict" });
+    expect(moves).toBe(0);
   });
 
-  it("a failed read reports the error and changes nothing", async () => {
+  it("refused when the barrier's save finds the disk changed: conflict, nothing moves", async () => {
+    const h = harness("a\n");
+    edit(h, "ab\n");
+    h.disk.text = "z\n";
+    let moves = 0;
+    expect(await h.sync.renamed(toB, async () => void (moves += 1))).toEqual({ moved: false, result: "conflict" });
+    expect(moves).toBe(0);
+    expect(h.writes).toEqual([]);
+  });
+
+  it("refused when the barrier's save fails: failed, nothing moves, the edit dirty", async () => {
+    const h = harness("a\n", DEFAULT_SYNC_OPTIONS, true);
+    edit(h, "ab\n");
+    let moves = 0;
+    expect(await h.sync.renamed(toB, async () => void (moves += 1))).toEqual({ moved: false, result: "failed" });
+    expect(moves).toBe(0);
+    expect(h.sync.dirty).toBe(true);
+  });
+
+  it("a move that rejects is rethrown, and nothing is read or written after it", async () => {
+    const h = harness("![](assets/a/x.png)\n");
+    await expect(h.sync.renamed(toB, () => Promise.reject(new Error("exists")))).rejects.toThrow("exists");
+    expect(h.reads).toBe(0);
+    expect(h.writes).toEqual([]);
+    // The chain is not broken: a later save still runs.
+    edit(h, "![](assets/a/x.png)Q\n");
+    await vi.advanceTimersByTimeAsync(saveDelayMs);
+    expect(h.disk.text).toBe("![](assets/a/x.png)Q\n");
+  });
+
+  it("a failed read after the move reports the error: moved, failed, nothing written", async () => {
     const failures: unknown[] = [];
     const reloads: string[] = [];
     const sync = createDocumentSync(
@@ -538,9 +586,92 @@ describe("after a rename", () => {
       { serialize: () => "a\n", reloaded: (t) => reloads.push(t), conflicted: () => {}, knownChanged: () => {}, failed: (e) => failures.push(e) },
       { setTimeout, clearTimeout: (x) => clearTimeout(x as ReturnType<typeof setTimeout>), now: Date.now },
     );
-    await sync.renamed();
+    expect(await sync.renamed(toB, async () => {})).toEqual({ moved: true, result: "failed" });
     expect(failures).toHaveLength(1);
     expect(reloads).toEqual([]);
+  });
+
+  it("disposed during the read after the move: an edit made during the move is reported failed, not written", async () => {
+    const h = harness("a\n");
+    const outcome = h.sync.renamed(toB, async () => {
+      edit(h, "ab\n");
+      h.sync.dispose();
+    });
+    expect(await outcome).toEqual({ moved: true, result: "failed" });
+    expect(h.writes).toEqual([]);
+  });
+
+  it("disposed during the move: clean when nothing was edited", async () => {
+    const h = harness("a\n");
+    expect(await h.sync.renamed(toB, async () => h.sync.dispose())).toEqual({ moved: true, result: "clean" });
+    expect(h.writes).toEqual([]);
+  });
+
+  it("an edit during the move that the rewrite leaves alone is written at the new path, not handed back", async () => {
+    const h = harness("a\n");
+    expect(await h.sync.renamed(toB, async () => edit(h, "aQ\n"))).toEqual({ moved: true, result: "saved" });
+    expect(h.reloads).toEqual([]);
+    expect(h.disk.text).toBe("aQ\n");
+    expect(h.sync.dirty).toBe(false);
+  });
+
+  // DECISIONS #review-2-r2 W2 (task 2.27), kept: the rename's rewrite reaches the dirty editor.
+  it("an edit during the move has its image URLs rewritten in the editor and on disk", async () => {
+    const h = harness("![image](assets/a/x.png)\n");
+    const outcome = await h.sync.renamed(toB, async () => edit(h, "![image](assets/a/x.png) later edit\n"));
+    expect(outcome).toEqual({ moved: true, result: "saved" });
+    expect(h.reloads).toEqual(["![image](assets/b/x.png) later edit\n"]);
+    expect(h.disk.text).toBe("![image](assets/b/x.png) later edit\n");
+    expect(h.disk.text).not.toContain("assets/a/");
+    expect(h.sync.dirty).toBe(false);
+    expect(h.conflicts).toBe(0);
+  });
+
+  // The checked outcome covers the latest generation (DECISIONS #review-2-r2 W1): the edit lands
+  // during the rewrite's own awaited write.
+  it("an edit during the rewrite's write: saved only after the later edit is on disk", async () => {
+    const { wait, release } = gated();
+    const h = harness("![](assets/a/x.png)\n", DEFAULT_SYNC_OPTIONS, false, wait);
+    let result: unknown = null;
+    const renamed = h.sync.renamed(toB, async () => {}).then((r) => (result = r));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.started).toEqual(["![](assets/b/x.png)\n"]);
+    edit(h, "![](assets/b/x.png) later\n");
+    release();
+    await renamed;
+    expect(result).toEqual({ moved: true, result: "saved" });
+    expect(h.writes).toEqual(["![](assets/b/x.png)\n", "![](assets/b/x.png) later\n"]);
+    expect(h.sync.dirty).toBe(false);
+  });
+
+  it("a failed rewrite write: moved, failed, the rewrite kept dirty in the editor", async () => {
+    const h = harness("![](assets/a/x.png)\n");
+    h.failWrite = true;
+    expect(await h.sync.renamed(toB, async () => {})).toEqual({ moved: true, result: "failed" });
+    expect(h.editor.text).toBe("![](assets/b/x.png)\n");
+    expect(h.sync.dirty).toBe(true);
+    h.failWrite = false;
+    expect(await h.sync.flush()).toBe("saved");
+    expect(h.disk.text).toBe("![](assets/b/x.png)\n");
+  });
+
+  // The missing guard `[review-2-r3, rename read-then-write]` names: `renamed` with a conflict
+  // standing after the move. Another writer changed the file while an edit was pending; the edit is
+  // kept with the new stem behind the banner, and Keep mine writes the new stem.
+  it("renamed with a conflict standing: Keep mine writes asset URLs under the new stem", async () => {
+    const h = harness("![image](assets/a/x.png)\n");
+    const outcome = await h.sync.renamed(toB, async () => {
+      edit(h, "![image](assets/a/x.png) mine\n");
+      h.disk.text = "![image](assets/b/x.png) theirs\n";
+    });
+    expect(outcome).toEqual({ moved: true, result: "conflict" });
+    expect(h.sync.conflict).toBe(true);
+    expect(h.conflicts).toBe(1);
+    expect(h.writes).toEqual([]);
+    expect(h.editor.text).toBe("![image](assets/b/x.png) mine\n");
+    expect(await h.sync.keepMine()).toBe("saved");
+    expect(h.disk.text).toBe("![image](assets/b/x.png) mine\n");
+    expect(h.disk.text).not.toContain("assets/a/");
   });
 });
 
