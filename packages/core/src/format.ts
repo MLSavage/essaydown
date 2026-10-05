@@ -447,33 +447,43 @@ const TRAILING_LINE_ENDING = /(\r?\n|\r)$/;
 const SPACE = " ";
 
 /**
- * Whether a hard `break` written with its line ending kept still reads as a `break` directly
- * before this `html` sibling — the criterion the whole of {@link repairBreakBeforeHtml} turns on,
- * and the round trip itself rather than a hand list of tag names (lesson [1.10.r6d]).
+ * Whether a line ending written before this `html` sibling still reads as a paragraph continuation
+ * — the criterion the whole of {@link repairBreakBeforeHtml} and {@link repairLineEndingBeforeHtml}
+ * turn on, and the round trip itself rather than a hand list of tag names (lesson [1.10.r6d]).
  *
- * `breakOutput` is what the `break` handler returned (`\\` + a line ending,
- * `mdast-util-to-markdown/lib/handle/break.js`), `htmlValue` what the `html` handler returned
- * (the bytes the parser captured, {@link opaqueHandlers}). The probe puts the pair between text
- * on both sides — `x` before, ` y` after, so the line the html starts is not also the paragraph's
- * last — and asks the app's own parser: one block, a paragraph, holding a `break` whose next
- * sibling is an `html`. An inline tag (`<i>`, `<span>`, `<b>`) is CommonMark §4.6 condition 7,
- * which cannot interrupt a paragraph, so the pair survives and the answer is `true`; a value that
- * can open an html block — conditions 1–6, `<div>`, `<!-- c -->`, `<script>`, `<?x?>`,
- * `<![CDATA[x]]>` — ends the paragraph at the break instead, so the probe holds two blocks (or a
- * paragraph with no such pair) and the answer is `false`.
+ * `lineEnded` is what precedes the html on the probe's first line: for a `break`, what its handler
+ * returned (`\\` + a line ending, `mdast-util-to-markdown/lib/handle/break.js`); for a `text`
+ * child, its trailing line ending alone, because whether a line opens an html block is decided by
+ * that line's start and nothing before it. `htmlValue` is what the `html` handler returned (the
+ * bytes the parser captured, {@link opaqueHandlers}). The probe puts the pair between text on both
+ * sides — `x` before, ` y` after, so the line the html starts is not also the paragraph's last —
+ * and asks the app's own parser: one block, a paragraph, holding a `break` (or a `text` ending in a
+ * line ending, as `type` says) whose next sibling is an `html`. An inline tag (`<i>`, `<span>`,
+ * `<b>`) is CommonMark §4.6 condition 7, which cannot interrupt a paragraph, so the pair survives
+ * and the answer is `true`; a value that can open an html block — conditions 1–6, `<div>`,
+ * `<!-- c -->`, `<script>`, `<?x?>`, `<!DOCTYPE x>`, `<![CDATA[x]]>` — ends the paragraph at the
+ * line ending instead, so the probe holds two blocks (or a paragraph with no such pair) and the
+ * answer is `false`.
  *
  * `parse` is imported from `./parse.js`, which imports nothing from this file, so there is no
- * cycle; the probe runs only for a `break` whose next sibling is `html` and whose emission the
+ * cycle; the probe runs only for a child whose next sibling is `html` and whose emission the
  * assembler actually rewrote, which no fixture reaches more than three times.
  */
-function breakSurvivesBeforeHtml(breakOutput: string, htmlValue: string): boolean {
-  const root = parse(`x${breakOutput}${htmlValue} y\n`);
+function lineEndingSurvivesBeforeHtml(
+  lineEnded: string,
+  htmlValue: string,
+  type: "break" | "text",
+): boolean {
+  const root = parse(`x${lineEnded}${htmlValue} y\n`);
   if (root.children.length !== 1) return false;
   const block = root.children[0];
   if (block.type !== "paragraph") return false;
   const { children } = block;
   return children.some(
-    (child, index) => child.type === "break" && children[index + 1]?.type === "html",
+    (child, index) =>
+      child.type === type &&
+      (child.type !== "text" || TRAILING_LINE_ENDING.test(child.value)) &&
+      children[index + 1]?.type === "html",
   );
 }
 
@@ -484,7 +494,7 @@ function breakSurvivesBeforeHtml(breakOutput: string, htmlValue: string): boolea
  * That branch replaces the *previous result's* trailing line ending whatever node wrote it, so the
  * `break` handler's `\\` + line ending became `\\` + a space — a literal backslash the user never
  * wrote, rendered as text, with the break itself gone from the reparse (invariant B fails on the
- * parser's own tree). Two answers replace it, chosen by {@link breakSurvivesBeforeHtml}:
+ * parser's own tree). Two answers replace it, chosen by {@link lineEndingSurvivesBeforeHtml}:
  *
  * - the break's own output, the line ending kept, exactly when the pair reparses to a `break`
  *   directly followed by an `html` — the inline-tag case, where the assembler's worry (html read
@@ -498,7 +508,24 @@ function breakSurvivesBeforeHtml(breakOutput: string, htmlValue: string): boolea
  * The `html` child's own bytes are never touched either way.
  */
 function repairBreakBeforeHtml(breakOutput: string, htmlValue: string): string {
-  return breakSurvivesBeforeHtml(breakOutput, htmlValue) ? breakOutput : SPACE;
+  return lineEndingSurvivesBeforeHtml(breakOutput, htmlValue, "break") ? breakOutput : SPACE;
+}
+
+/**
+ * The byte a `text` child's last position gets in the join when `container-phrasing.js` lines
+ * 60–80 rewrote its trailing line ending to one space before an `html` sibling (task 3.15;
+ * docs/V1.1-BACKLOG.md `[#030 product, a soft or hard break before inline html]`).
+ *
+ * The assembler's rewrite is safe and over-broad: it changes a text value (`alpha\n<i>beta</i>`
+ * written `alpha <i>beta</i>`) for every html sibling, where only the values of CommonMark §4.6
+ * conditions 1–6 can interrupt a paragraph. The app pre-empts it: `lineEnding` — the value's own
+ * trailing line ending — is written back exactly when {@link lineEndingSurvivesBeforeHtml} says the
+ * html on the next line is still read as a continuation (condition 7, an inline tag), and the
+ * space is kept otherwise — the recorded behaviour for a block-capable value, where the line
+ * ending would open an html block. The `html` child's own bytes are never touched either way.
+ */
+function repairLineEndingBeforeHtml(lineEnding: string, htmlValue: string): string {
+  return lineEndingSurvivesBeforeHtml(lineEnding, htmlValue, "text") ? lineEnding : SPACE;
 }
 
 /** The marker a mark handler writes on each side of its `containerPhrasing` result, by node type.
@@ -540,6 +567,8 @@ interface EmissionForm {
   tailEncoded: boolean;
   /** Whether this form is the one region 4 wrote: the trailing line ending replaced by one space. */
   eolAsSpace: boolean;
+  /** The line ending region 4 replaced when `eolAsSpace`, and `""` otherwise. */
+  lineEnding: string;
 }
 
 /** Where one child's emission sits in the join — the half-open slice `[start, end)` — and its edges. */
@@ -550,6 +579,8 @@ interface LocatedChild {
   tailEncoded: boolean;
   /** Whether the form found at that slice is region 4's: the line ending written as one space. */
   eolAsSpace: boolean;
+  /** The line ending region 4 replaced there when `eolAsSpace`, and `""` otherwise. */
+  lineEnding: string;
 }
 
 /**
@@ -591,7 +622,8 @@ export interface Edit {
  * punctuation. So a non-text child has its plain output and, when the next child is `html`, the
  * line-ending form region 4 rewrites it into; the only non-text child whose output ends in a line
  * ending is a `break`, and the form's `eolAsSpace` flag is how the walk knows region 4 fired on it
- * ({@link repairBreakBeforeHtml}, DECISIONS #review-1-r7 M2).
+ * ({@link repairBreakBeforeHtml}, DECISIONS #review-1-r7 M2) — on a `text` child too, where the
+ * form's `lineEnding` is what region 4 took away ({@link repairLineEndingBeforeHtml}, task 3.15).
  */
 function emissionForms(
   node: HandledNode,
@@ -604,6 +636,7 @@ function emissionForms(
     headEncoded: boolean,
     tailEncoded: boolean,
     eolAsSpace: boolean,
+    lineEnding = "",
   ): void => {
     const existing = forms.find((form) => form.text === text);
     if (existing) {
@@ -614,7 +647,7 @@ function emissionForms(
       existing.eolAsSpace ||= eolAsSpace;
       return;
     }
-    forms.push({ text, headEncoded, tailEncoded, eolAsSpace });
+    forms.push({ text, headEncoded, tailEncoded, eolAsSpace, lineEnding });
   };
   add(value, false, false, false);
   if (node.type === "text" && value.length > 0) {
@@ -625,8 +658,15 @@ function emissionForms(
   }
   if (!beforeHtml) return forms;
   for (const form of [...forms]) {
-    if (!TRAILING_LINE_ENDING.test(form.text)) continue;
-    add(form.text.replace(TRAILING_LINE_ENDING, SPACE), form.headEncoded, form.tailEncoded, true);
+    const lineEnding = TRAILING_LINE_ENDING.exec(form.text);
+    if (lineEnding === null) continue;
+    add(
+      form.text.replace(TRAILING_LINE_ENDING, SPACE),
+      form.headEncoded,
+      form.tailEncoded,
+      true,
+      lineEnding[0],
+    );
   }
   return forms;
 }
@@ -653,6 +693,7 @@ function locateChild(
       headEncoded: form.headEncoded,
       tailEncoded: form.tailEncoded,
       eolAsSpace: form.eolAsSpace,
+      lineEnding: form.lineEnding,
     };
   }
   return undefined;
@@ -753,7 +794,17 @@ function duplicates(edit: Edit, taken: Edit): boolean {
  * ending kept, or one space with no backslash. The assembler wrote a literal backslash there and
  * lost the break.
  *
- * Both are per child and positional, never over the join. `children` is what this parent's
+ * **The soft line break before inline html (task 3.15; DECISIONS #030 Decision 1, its backlog line
+ * `[#030 product, a soft or hard break before inline html]`).** A `text` child located at region
+ * 4's form — its trailing line ending written as one space, so `alpha\n<i>beta</i>` came out
+ * `alpha <i>beta</i>` — gets one edit over its own slice's last byte, that space, which
+ * {@link repairLineEndingBeforeHtml} decides: the value's own line ending back when the html
+ * cannot open an html block (CommonMark §4.6 condition 7), the space kept when it can (conditions
+ * 1–6). The space is the slice's last byte because region 4 rewrites only a form that ended in the
+ * line ending; the edit is disjoint from the widening's, whose tail anchor needs a form ending in a
+ * reference and whose head anchor a pair at the slice's start.
+ *
+ * All three are per child and positional, never over the join. `children` is what this parent's
  * handlers emitted, in order, as recorded by {@link installSurrogateWidening}; the join is walked
  * with a cursor and each child's slice located by {@link locateChild}. The widening's positions:
  *
@@ -799,12 +850,24 @@ export function widenSplitSurrogateReferences(
       record({ reason: "unlocatable-child", index, type: node.type });
       break;
     }
-    const { start, end, headEncoded, tailEncoded, eolAsSpace } = located;
+    const { start, end, headEncoded, tailEncoded, eolAsSpace, lineEnding } = located;
     if (node.type === "break" && eolAsSpace && next !== undefined) {
       edits.push({
         start,
         end,
         replacement: repairBreakBeforeHtml(value, next.value),
+        index,
+        type: node.type,
+      });
+    }
+    // Region 4's form of a `text` child is its plain or head form with the trailing line ending as
+    // the slice's last byte, one space; the tail forms end in a reference, never a line ending, so
+    // this one-byte edit at `end - 1` is disjoint from the tail edit, which needs `tailEncoded`.
+    if (node.type === "text" && eolAsSpace && next !== undefined) {
+      edits.push({
+        start: end - 1,
+        end,
+        replacement: repairLineEndingBeforeHtml(lineEnding, next.value),
         index,
         type: node.type,
       });

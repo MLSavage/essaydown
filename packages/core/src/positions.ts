@@ -87,9 +87,10 @@ export interface PositionMap {
  * its two one-unit spellings. Every other rule in {@link spellingOffsets} consumes at least one
  * character.
  *
- * **Line ending as space.** A `text` value ending in a line ending whose next sibling is `html`
- * has that line ending written as one space by the parent (`container-phrasing.js` 66–75, the
- * third branch {@link rewrittenEmissions} names). The line ending is one UTF-16 unit (`\n`, the
+ * **Line ending as space.** A `text` value ending in a line ending whose next sibling is a
+ * block-capable `html` (CommonMark §4.6 conditions 1–6; before an inline tag task 3.15 writes the
+ * line ending back) has that line ending written as one space by the parent
+ * (`container-phrasing.js` 66–75, the third branch {@link rewrittenEmissions} names). The line ending is one UTF-16 unit (`\n`, the
  * only one `parse` leaves in a value) and the space is one unit, so the space is recorded as the
  * line ending's spelling at the same offset — one unit for one unit — and every offset before and
  * after it is unchanged. A `\r\n` value ending (never produced by `parse`, but a tree is any
@@ -750,6 +751,15 @@ function locateEmission(
  * `encode-character-reference.js` and the wrapper spell it: `&#x`, the code point in upper-case
  * hexadecimal without padding, `;`.
  *
+ * What reaches the bytes for a `text` child before `html` is `format.ts`'s answer, not branch 3's
+ * (task 3.15, the pre-empt route of docs/V1.1-BACKLOG.md `[#030 product, a soft or hard break
+ * before inline html]`): the line ending is written back exactly when the html cannot open an html
+ * block (CommonMark §4.6 condition 7, an inline tag), which is the value as its handler returned
+ * it, so {@link locateEmission} finds it as the plain candidate — the first, and the earliest match
+ * — and spells the line ending by itself; the fourth candidate below reaches the bytes only before
+ * a block-capable value (conditions 1–6), and both are guarded in
+ * `positions-html-eol-inline-code.test.ts`.
+ *
  * Branch 3 gives the fourth candidate, tried only when `beforeHtml` says the child's next
  * sibling is `html` (the flag is passed from {@link placeChildren}, which sees the siblings): the
  * value with its trailing line ending replaced by one space. Branch 3 can combine with branch 1
@@ -768,7 +778,8 @@ function locateEmission(
  * instead; one space is not the spelling of any value, so that form is no candidate here and the
  * break stays unresolved, with no characters for the map to spell — the case named in
  * `positions-html-eol-inline-code.test.ts` and in `positions.test.ts`. No `text` child's
- * candidates change either way.
+ * candidates change either way, and task 3.15's repair adds none: its two answers are the plain
+ * candidate and the fourth.
  */
 function rewrittenEmissions(value: string, beforeHtml: boolean): Candidate[] {
   const points = [...value];

@@ -1377,10 +1377,10 @@ describe("cursorMap: toRendered ∘ toSource is the identity over every text pos
     expect(map.toRendered({ line: 1, ch: 4 })).toBe(4);
   });
 
-  it("`alpha\\n<i>beta</i>`: the caret before the soft line break names the column of the space (the L3 reproduction)", () => {
+  it("`alpha\\n<i>beta</i>`: the caret before the soft line break names the column of the kept line ending (the L3 reproduction; task 3.15 keeps the line ending)", () => {
     const { root, doc } = pair("alpha\n<i>beta</i>\n");
     const map = cursorMap(root, doc);
-    expect(formatWithMap(root).text).toBe("alpha <i>beta</i>\n");
+    expect(formatWithMap(root).text).toBe("alpha\n<i>beta</i>\n");
     expect(charAt(doc, 6)).toBe("\n");
     expect(map.toSource(6)).toEqual({ line: 1, ch: 5 });
     expect(map.toRendered({ line: 1, ch: 5 })).toBe(6);

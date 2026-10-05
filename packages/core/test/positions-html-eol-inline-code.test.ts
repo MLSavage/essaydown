@@ -15,6 +15,12 @@ import {
  * **Two node classes the position map could not place a caret in** (task 1.51, DECISIONS
  * #review-1-r6 L3 and L4 — Claude findings 2 and 3, Sol finding 2).
  *
+ * Task 3.15 pre-empts that branch for a `text` child before an html value that cannot open an
+ * html block (CommonMark §4.6 condition 7): the line ending is written back, so the three sources
+ * below are now byte-identical and spelled by the plain candidate; the space form is guarded on
+ * the same values before a block-capable value ({@link BLOCK_CAPABLE}), where it still reaches
+ * the bytes.
+ *
  * L3: `mdast-util-to-markdown/lib/util/container-phrasing.js` (2.1.2) has a third branch that
  * rewrites a child's string after its handler returned — lines 60–80, the line ending before an
  * `html` sibling replaced by one space — and `rewrittenEmissions` enumerated only the two edge
@@ -40,7 +46,7 @@ import {
 interface HtmlCase {
   /** The source, as the task lists it. */
   source: string;
-  /** The path of the text node whose trailing line ending the parent wrote as a space. */
+  /** The path of the text node whose trailing line ending comes right before the html. */
   path: string;
   /** That text node's `value`. */
   value: string;
@@ -52,6 +58,27 @@ const HTML_CASES: HtmlCase[] = [
   { source: "alpha\n<i>beta</i>\n", path: "0.0", value: "alpha\n" },
   { source: "*a*\n<b>x</b>\n", path: "0.1", value: "\n" },
 ];
+
+/**
+ * A value of CommonMark §4.6 condition 2, which can open an html block, so a line ending before it
+ * is still written as one space (task 3.15 keeps branch 3's space for these values only).
+ */
+const BLOCK_CAPABLE = "<!-- c -->";
+
+/**
+ * The parser's tree of `source` with the html node right after `path` holding
+ * {@link BLOCK_CAPABLE}: the shape no source spells (the parser reads such a line as flow html),
+ * and the one where branch 3's space still reaches the bytes after task 3.15.
+ */
+function withBlockCapableHtml(source: string, path: string): Root {
+  const root = parse(source);
+  const [block, child] = path.split(".").map(Number);
+  const paragraph = root.children[block] as { children: { type: string; value?: string }[] };
+  const html = paragraph.children[child + 1];
+  expect(html.type).toBe("html");
+  html.value = BLOCK_CAPABLE;
+  return root;
+}
 
 /** A root holding one paragraph: the text `a`, a hard `break`, and one inline `html` node. */
 function breakBeforeHtml(html: string): Root {
@@ -77,20 +104,56 @@ function expectMonotone(table: SpellingTable): void {
   }
 }
 
-describe("a text child's line ending before inline html is placed (task 1.51, L3)", () => {
+describe("a text child's line ending before inline html is kept and spelled by itself (task 3.15)", () => {
   for (const { source, path, value } of HTML_CASES) {
     const title = JSON.stringify(source.trimEnd());
 
-    it(`${title}: the bytes hold the space for the line ending, are a fixed point, and nothing is unresolved`, () => {
+    it(`${title}: the bytes are the source, a fixed point, and nothing is unresolved`, () => {
       const root = parse(source);
       const { text, map } = formatWithMap(root);
-      expect(text).toBe(source.replace(/\n(?=<)/, " "));
+      expect(text).toBe(source);
       expect(formatWithMap(parse(text)).text).toBe(text);
       expect(map.unresolved).toEqual([]);
     });
 
-    it(`${title}: the text node at ${path} covers its bytes with the space, and nodeAt inside it answers it`, () => {
-      const { text, map } = formatWithMap(parse(source));
+    it(`${title}: the spelling table spells the line ending by the line ending, every unit at its own offset`, () => {
+      const { text, map, spellings, lineStarts } = formatWithMap(parse(source));
+      const table = spellings[path];
+      expect(table).toBeDefined();
+      if (table === undefined) return;
+      const start = text.indexOf(value);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const eol = start + value.length - 1;
+      expect(text[eol]).toBe("\n");
+      expect(table.starts).toHaveLength(value.length + 1);
+      for (let index = 0; index < value.length; index += 1) {
+        expect(table.starts[index]).toBe(start + index);
+        expect(table.ends[index]).toBe(start + index + 1);
+      }
+      expect(table.starts[value.length]).toBe(eol + 1);
+      expectMonotone(table);
+      // The cursor after the line ending is the next line's first column, where the html starts.
+      expect(spellingPoint(lineStarts, table, value.length)).toMatchObject({ line: 2, column: 1 });
+      expect(nodeAt(map, 2, 1)?.node.type).toBe("html");
+    });
+  }
+});
+
+describe("a text child's line ending before block-capable html is the space, and is placed; the branch combinations by html kind (task 1.51, L3; task 3.15)", () => {
+  for (const { source, path, value } of HTML_CASES) {
+    const title = JSON.stringify(source.trimEnd());
+
+    it(`${title} with ${BLOCK_CAPABLE}: the bytes hold the space for the line ending, are a fixed point, and nothing is unresolved`, () => {
+      const root = withBlockCapableHtml(source, path);
+      const { text, map } = formatWithMap(root);
+      expect(text).toContain(`${value.replace(/\n$/, " ")}${BLOCK_CAPABLE}`);
+      expect(text.split("\n")).toHaveLength(2);
+      expect(formatWithMap(parse(text)).text).toBe(text);
+      expect(map.unresolved).toEqual([]);
+    });
+
+    it(`${title} with ${BLOCK_CAPABLE}: the text node at ${path} covers its bytes with the space, and nodeAt inside it answers it`, () => {
+      const { text, map } = formatWithMap(withBlockCapableHtml(source, path));
       const entry = map.entries.find((candidate) => candidate.path === path);
       expect(entry).toBeDefined();
       if (entry === undefined) return;
@@ -98,7 +161,7 @@ describe("a text child's line ending before inline html is placed (task 1.51, L3
       expect((entry.node as { value: string }).value).toBe(value);
       // The written form: the value with its line ending as a space, found at its own offset.
       const written = value.replace(/\n$/, " ");
-      const start = text.indexOf(written);
+      const start = text.indexOf(written + BLOCK_CAPABLE);
       expect(start).toBeGreaterThanOrEqual(0);
       expect(entry).toMatchObject({
         startLine: 1,
@@ -115,13 +178,13 @@ describe("a text child's line ending before inline html is placed (task 1.51, L3
       expect(nodeAt(map, 1, start + written.length + 1)?.node.type).toBe("html");
     });
 
-    it(`${title}: the spelling table spells the line ending as the space, one unit for one unit`, () => {
-      const { text, spellings, lineStarts } = formatWithMap(parse(source));
+    it(`${title} with ${BLOCK_CAPABLE}: the spelling table spells the line ending as the space, one unit for one unit`, () => {
+      const { text, spellings, lineStarts } = formatWithMap(withBlockCapableHtml(source, path));
       const table = spellings[path];
       expect(table).toBeDefined();
       if (table === undefined) return;
       const written = value.replace(/\n$/, " ");
-      const start = text.indexOf(written);
+      const start = text.indexOf(written + BLOCK_CAPABLE);
       const space = start + written.length - 1;
       expect(text[space]).toBe(" ");
       expect(table.starts).toHaveLength(value.length + 1);
@@ -213,36 +276,66 @@ describe("a text child's line ending before inline html is placed (task 1.51, L3
     expect(spellings["0.0"]).toEqual({ starts: [0, 1, 2], ends: [1, 2] });
   });
 
-  it("branch 3 combines with branch 1: a child after a run and before html gets both rewrites", () => {
-    // `x *a *b\n<b>y</b>`: the run `*a *` has whitespace inside its closing edge, so the `b`
-    // after it is encoded (branch 1, the head form), and the same child's line ending before the
-    // html is the space (branch 3).
+  for (const { html, kept } of [
+    { html: "<b>y</b>", kept: true },
+    { html: BLOCK_CAPABLE, kept: false },
+  ]) {
+    it(`branch 3 combines with branch 1 before ${html}: a child after a run and before html gets both rewrites${kept ? ", and task 3.15 gives the line ending back" : ""}`, () => {
+      // `x *a *b\n<html>`: the run `*a *` has whitespace inside its closing edge, so the `b`
+      // after it is encoded (branch 1, the head form), and the same child's line ending before the
+      // html is the space (branch 3) — given back by task 3.15 before an inline tag, which cannot
+      // open an html block, and kept before a value that can.
+      const root: Root = {
+        type: "root",
+        children: [
+          {
+            type: "paragraph",
+            children: [
+              { type: "text", value: "x " },
+              { type: "emphasis", children: [{ type: "text", value: "a " }] },
+              { type: "text", value: "b\n" },
+              { type: "html", value: html },
+            ],
+          },
+        ],
+      };
+      const { text, map, spellings } = formatWithMap(root);
+      expect(text).toContain(`&#x62;${kept ? "\n" : " "}${html}`);
+      expect(map.unresolved).toEqual([]);
+      const reference = text.indexOf("&#x62;");
+      const end = reference + "&#x62;".length;
+      expect(spellings["0.2"]).toEqual({ starts: [reference, end, end + 1], ends: [end, end + 1] });
+    });
+  }
+
+  it("in a blockquote, the continuation prefix and the kept line ending are both carried (task 3.15)", () => {
+    const source = "> a\n> <b>x</b>\n";
+    const { text, map, spellings } = formatWithMap(parse(source));
+    expect(text).toBe(source);
+    expect(map.unresolved).toEqual([]);
+    expect(spellings["0.0.0"]).toEqual({ starts: [2, 3, 4], ends: [3, 4] });
+  });
+
+  it("in a blockquote, the continuation prefix and the space before block-capable html are both carried", () => {
     const root: Root = {
       type: "root",
       children: [
         {
-          type: "paragraph",
+          type: "blockquote",
           children: [
-            { type: "text", value: "x " },
-            { type: "emphasis", children: [{ type: "text", value: "a " }] },
-            { type: "text", value: "b\n" },
-            { type: "html", value: "<b>y</b>" },
+            {
+              type: "paragraph",
+              children: [
+                { type: "text", value: "a\n" },
+                { type: "html", value: BLOCK_CAPABLE },
+              ],
+            },
           ],
         },
       ],
     };
     const { text, map, spellings } = formatWithMap(root);
-    expect(text).toContain("&#x62; <b>y</b>");
-    expect(map.unresolved).toEqual([]);
-    const reference = text.indexOf("&#x62;");
-    const end = reference + "&#x62;".length;
-    expect(spellings["0.2"]).toEqual({ starts: [reference, end, end + 1], ends: [end, end + 1] });
-  });
-
-  it("in a blockquote, the continuation prefix and the space are both carried", () => {
-    const source = "> a\n> <b>x</b>\n";
-    const { text, map, spellings } = formatWithMap(parse(source));
-    expect(text).toBe("> a <b>x</b>\n");
+    expect(text).toBe(`> a ${BLOCK_CAPABLE}\n`);
     expect(map.unresolved).toEqual([]);
     expect(spellings["0.0.0"]).toEqual({ starts: [2, 3, 4], ends: [3, 4] });
   });

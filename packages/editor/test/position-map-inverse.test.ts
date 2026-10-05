@@ -743,9 +743,9 @@ describe("cursor map inverse: the named members (guards on top of the corpus pro
     assertInverse("# h `c`\n");
   });
 
-  it("`alpha beta\\n<span>x</span> gamma` (task 1.51's fourth candidate, L3)", () => {
+  it("`alpha beta\\n<span>x</span> gamma` (task 1.51's fourth candidate, L3; the line ending kept since task 3.15)", () => {
     const { root } = assertInverse("alpha beta\n<span>x</span> gamma\n");
-    expect(formatWithMap(root).text).toBe("alpha beta <span>x</span> gamma\n");
+    expect(formatWithMap(root).text).toBe("alpha beta\n<span>x</span> gamma\n");
   });
 
   it("`*a.*&#x1F600;*(b)*` (task 1.49, the astral character between two runs)", () => {

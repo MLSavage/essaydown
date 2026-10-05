@@ -13,8 +13,10 @@ import { format, parse } from "../../packages/core/src/index.js";
  * paragraph's start. Sol's route: `alpha\n<i>beta</i>`, the rendered caret after `alpha` (before
  * the soft line break), toggle, type `X` — the pane read `Xalpha <i>beta</i>`. This is that route,
  * driven from a real browser: the caret placed by a click and arrows, the toggle chord, `X`, the
- * toggle back, Copy Markdown — the bytes are `alphaX <i>beta</i>\n`, a fixed point, and the
- * rendered paragraph reads `alphaX` first.
+ * toggle back, Copy Markdown — the bytes are `alphaX\n<i>beta</i>\n`, a fixed point, and the
+ * rendered paragraph reads `alphaX` first. Since task 3.15 the soft line break before the inline
+ * tag is kept (CommonMark §4.6 condition 7 cannot interrupt a paragraph; until then the bytes
+ * were `alphaX <i>beta</i>\n`), so the seed is its own canonical form.
  *
  * A copy case asserts the string the app handed `navigator.clipboard.writeText`, recorded by an
  * init-script spy, never the OS clipboard read back (task 1.28, DECISIONS #021).
@@ -141,11 +143,11 @@ test.describe("a toggle to source with the caret before a soft line break that p
     const seed = "alpha\n<i>beta</i>\n";
     await openRendered(page);
     await load(page, "toggle-inline-html.md", seed);
-    // The seed is not a fixed point: the rendered editor's first serialisation writes the soft
-    // line break before the inline tag as one space (container-phrasing.js 60–80), so the pane
-    // shows the canonical bytes while the ProseMirror text node still holds `alpha\n`.
+    // The seed is a fixed point (task 3.15): container-phrasing.js 60–80 writes the soft line
+    // break before the inline tag as one space, and format.ts writes the line ending back because
+    // an inline tag cannot open an html block; the ProseMirror text node holds `alpha\n`.
     const canonical = format(parse(seed));
-    expect(canonical).toBe("alpha <i>beta</i>\n");
+    expect(canonical).toBe(seed);
     await expect.poll(() => markdown(page)).toBe(canonical);
     expect(await page.locator(".ProseMirror p").count()).toBe(1);
 
@@ -172,7 +174,7 @@ test.describe("a toggle to source with the caret before a soft line break that p
     await expect(page.getByTestId("mode")).toHaveText("source");
     await page.locator(".cm-content").waitFor();
     await page.keyboard.type("X", { delay: 10 });
-    const bytes = "alphaX <i>beta</i>\n";
+    const bytes = "alphaX\n<i>beta</i>\n";
     await expect.poll(() => markdown(page)).toBe(bytes);
 
     await page.keyboard.press("ControlOrMeta+/");

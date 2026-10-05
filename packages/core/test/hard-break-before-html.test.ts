@@ -28,7 +28,8 @@ import { formatWithMap } from "../src/positions.js";
  *   link, after an html node, inside a blockquote and inside a list item;
  * - the space group, the html values CommonMark §4.6 conditions 1–6 let open an html block, where
  *   keeping the line ending would turn the next line into one and the break is a documented loss;
- * - the 1.51 control: a *soft* break before html is still written as one space, unchanged.
+ * - the 1.51 control: a *soft* break before inline html, written as one space until task 3.15
+ *   pre-empted that rewrite too (soft-break-before-html.test.ts), now keeps its line ending.
  */
 
 /** Every `break` anywhere in `tree`, counted by a walk rather than by a pattern over the bytes. */
@@ -151,20 +152,16 @@ describe("a hard break before block-capable html is written as one space: the br
   }
 });
 
-/* ------------------------------------------------------------------- the 1.51 control, unchanged -- */
+/* ------------------------------------------- the 1.51 control, now kept (task 3.15, #030 product) -- */
 
-describe("a soft break before inline html is still one space (task 1.51, unchanged)", () => {
-  const CASES = [
-    { source: "alpha\n<i>beta</i>\n", expected: "alpha <i>beta</i>\n" },
-    { source: "alpha beta\n<span>x</span> gamma\n", expected: "alpha beta <span>x</span> gamma\n" },
-    { source: "*a*\n<b>x</b>\n", expected: "*a* <b>x</b>\n" },
-  ];
-  for (const { source, expected } of CASES) {
-    it(`${JSON.stringify(source)} is unchanged`, () => {
+describe("a soft break before inline html keeps its line ending (task 3.15; was one space at 1.51)", () => {
+  const CASES = ["alpha\n<i>beta</i>\n", "alpha beta\n<span>x</span> gamma\n", "*a*\n<b>x</b>\n"];
+  for (const source of CASES) {
+    it(`${JSON.stringify(source)} is byte-identical`, () => {
       const tree = parse(source);
       expect(breakCount(tree)).toBe(0);
       const out = format(tree);
-      expect(out).toBe(expected);
+      expect(out).toBe(source);
       expect(format(parse(out))).toBe(out);
       expect(formatWithMap(tree).map.unresolved).toEqual([]);
     });
