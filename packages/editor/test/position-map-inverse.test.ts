@@ -14,7 +14,11 @@ import {
 } from "../src/schema.js";
 import { cursorMap, type CursorMap } from "../src/toggle.js";
 import { blockAlone } from "./block-alone";
-import { deleteAtEveryBlockEnd, deleteBesideEveryMarkedRun } from "./typing-legs.js";
+import {
+  deleteAtEveryBlockEnd,
+  deleteAtEveryBlockStart,
+  deleteBesideEveryMarkedRun,
+} from "./typing-legs.js";
 
 /**
  * The cursor map's own round-trip family, asserted as a property over the corpus (task 1.52,
@@ -379,38 +383,6 @@ function keptIn(block: PMNode): ReturnType<typeof keptCharacters> {
 }
 
 /**
- * A third destructive transaction for the editor-seeded legs (task 1.64, DECISIONS #review-1-r8
- * N2), and the one the reconciliation used to find N2: the **first character** of every textblock
- * outside a fenced code block deleted, applied back-to-front so each deletion leaves the ranges
- * still to come unmoved. `tr.delete` is the call a Delete keystroke makes.
- *
- * It is the shortest route to a tree the parser cannot produce *and* that the conversion has to
- * narrow: a block whose first character was followed by a space is left with a **leading space**,
- * which `stripUnparsableWhitespace` drops — so the live document holds a character the bytes do
- * not, and every position after it is one the correspondence has to place through the
- * kept-character map rather than through the normalised tree's widths.
- *
- * One character is one code point (`typing-legs.ts`'s rule for the whole family), so an astral
- * lead is deleted whole and never split between its two UTF-16 units.
- */
-function deleteAtEveryBlockStart(doc: PMNode): { doc: PMNode; blocks: number } {
-  const ranges: [number, number][] = [];
-  doc.descendants((node, pos) => {
-    if (!node.isTextblock) return true;
-    if (node.type === schema.nodes.code_block) return false;
-    const first = node.firstChild;
-    if (first !== null && first.isText) {
-      const character = [...(first.text as string)][0] as string;
-      ranges.push([pos + 1, pos + 1 + character.length]);
-    }
-    return false;
-  });
-  let tr = EditorState.create({ doc }).tr;
-  for (const [from, to] of [...ranges].reverse()) tr = tr.delete(from, to);
-  return { doc: tr.doc, blocks: ranges.length };
-}
-
-/**
  * The bytes the **rendered** view writes when `X` is typed at `pos`. `insertText` with no stored
  * marks is the click route's own call — prosemirror-state 1.4.4 gives the text
  * `storedMarks ?? $from.marks()` — so the letter takes exactly the marks a click there leaves.
@@ -470,7 +442,7 @@ interface LineShift {
  * are non-empty — a run in which every block lost its lead would never exercise the identity half,
  * which is the half that says the change is a no-op where nothing is dropped.
  *
- * **The exclusions, positively bounded (DECISIONS #032)** — three recorded classes, each position
+ * **The exclusions, positively bounded (DECISIONS #032)** — two recorded classes, each position
  * asserted to be a member of its class rather than merely skipped, and none narrowed:
  *
  * - `[1.53, a raw source keystroke before or after a punctuation-edged run]`: the rendered view
@@ -481,14 +453,12 @@ interface LineShift {
  *   leaves the editor holding a `link` whose text is no longer its destination, so the rendered
  *   bytes are a `[text](url)` link while the source keystroke edits the `<…>` autolink in place.
  *   Asserted: the rendered bytes hold the resource form and the source bytes the autolink form.
- * - `[1.64, a block-final mark whose last child is a link]` — found by this leg, outside this
- *   task's scope (it reproduces unchanged at the branch base, in blocks where the conversion
- *   drops nothing), filed in `docs/V1.1-BACKLOG.md` with its revisit trigger and hard stop: at
- *   the end of a block ending in `*…[text](url)*`, the rendered caret takes `[emphasis]` (the
- *   `link` mark is not inclusive, the `emphasis` is) and types **inside** the run, while
- *   `toSource` answers the column **after** the run's closing delimiter, where the raw keystroke
- *   dissolves the run. Asserted: the source bytes escape the run's delimiters where the rendered
- *   bytes keep them.
+ *
+ * Task 1.64 recorded a third class here, `[1.64, a block-final mark whose last child is a link]`:
+ * the caret after a link that ends a run, with plain text after the run, takes `[emphasis]` in the
+ * rendered view while `toSource` answered past the run's closing delimiter. It is O7's
+ * carried-subset twin (DECISIONS #review-1-r9 O7), and task 3.12's `interiorBoundary`
+ * (`toggle.ts`) discharges it, so those positions are now asserted to agree.
  */
 describe("cursor map: the two views write the same bytes, and toRendered ∘ toSource settles by the kept-character rule, at every text position of the editor's own output after a third destructive transaction (deleteAtEveryBlockStart, task 1.64)", () => {
   const names = Object.keys(fixtureIndex());
@@ -514,7 +484,6 @@ describe("cursor map: the two views write the same bytes, and toRendered ∘ toS
 
   const PUNCTUATION_EDGED = "[1.53] a raw source keystroke beside a punctuation-edged run";
   const AUTOLINK_LITERAL = "[review-1-r6 L9] a character typed inside an autolink literal's text";
-  const MARK_ENDING_IN_A_LINK = "[1.64] a block-final mark whose last child is a link";
 
   /** Which recorded class a disagreement belongs to, or `null` when it belongs to none. */
   function classify(rendered: string, written: string): string | null {
@@ -523,9 +492,6 @@ describe("cursor map: the two views write the same bytes, and toRendered ∘ toS
     // source keystroke edits the `<…>` destination in place, the rendered one splits text from it.
     if (/\]\(/.test(rendered) && !/\]\(/.test(written) && /<[^\s>]+>/.test(written))
       return AUTOLINK_LITERAL;
-    // The source keystroke landed outside the run and its delimiters are escaped there.
-    if (/\\[*~_]/.test(written) && !/\\[*~_]/.test(rendered) && /\]\(/.test(rendered))
-      return MARK_ENDING_IN_A_LINK;
     return null;
   }
 
@@ -656,9 +622,9 @@ describe("cursor map: the two views write the same bytes, and toRendered ∘ toS
     expect(positionsAgreeing).toBeGreaterThan(positionsInsideDropped);
     // Every position whose bytes were compared was compared on a block bridged to the document.
     expect(positionsBridged).toBe(positionsAgreeing + excluded.length);
-    // The exclusions are exactly the three recorded classes, each reached and each a minority.
+    // The exclusions are exactly the two recorded classes, each reached and each a minority.
     expect(new Set(excluded.map((member) => member.klass))).toEqual(
-      new Set([PUNCTUATION_EDGED, AUTOLINK_LITERAL, MARK_ENDING_IN_A_LINK]),
+      new Set([PUNCTUATION_EDGED, AUTOLINK_LITERAL]),
     );
     expect(excluded.length).toBeLessThan(positionsAgreeing);
   }, START_LEG_TIMEOUT_MS);

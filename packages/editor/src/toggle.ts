@@ -342,64 +342,25 @@ function settled(block: InlineBlock, pos: number): number {
 }
 
 /**
- * Whether the caret at `pos` sits **after whitespace the conversion dropped and no kept node
- * covers** — a hole in the correspondence: the block's start before a stripped lead, or the space
- * between two kept nodes that a line start took — *and* belongs outside the node that follows it.
+ * Whether the caret at `pos` sits **after whitespace the conversion dropped whole, between two
+ * kept nodes** — a hole in the correspondence: the space a line start took between a hard break
+ * and the node after it, which no kept node covers. The block's start before a stripped lead is
+ * not this clause's: nothing kept precedes it, so it is the block's `"start"` edge ({@link
+ * blockEdge}) and the edge rules answer it.
  *
- * Which of the two the caret is, is the marks a character typed there receives ({@link
- * typedMarks}), read against the live node after it, exactly as {@link innermostAt} reads them
- * against the node before at a boundary: with the dropped whitespace gone from the bytes, the
- * node after is the first thing the source line holds, and a character whose marks are that
- * node's joins it (`a `+backtick+`cd`+backtick+` b` with its lead stripped and stored marks
- * carrying `inline_code`: inside the fence), while a character whose marks are not is written
- * before it, where the dropped whitespace was (the same caret after a click: `$pos.marks()` is
- * the whitespace's own, empty, so `X`+backtick+`cd`+backtick+` b`). Only the second is this
- * clause's: the caret is then answered as a position *between* nodes, which is the block entry's
- * own rule ({@link lastNodeEnd} from the block's start, the block's first column where nothing
- * precedes it).
+ * The caret there names the boundary between the last kept node before the hole and the first
+ * kept node after it, and which side of their delimiters it takes is the typed marks' to decide
+ * ({@link boundaryPoint}) exactly as at a boundary with nothing dropped — the hole's own marks are
+ * already in them, because `$pos.marks()` reads the dropped node before the caret (DECISIONS
+ * #review-1-r9 O8: the shortcut this replaces answered the hole outside every enclosing mark
+ * whatever the caret carried).
  */
-function beyondDroppedWhitespace(
-  block: InlineBlock,
-  doc: PMNode,
-  pos: number,
-  marks: readonly Mark[],
-): boolean {
+function inDroppedGap(block: InlineBlock, pos: number): boolean {
   const { chars, contentStart } = block;
   const before = pos - contentStart - 1;
   if (before < 0 || chars.keeps(before)) return false;
   if (chars.ranges.some((range) => range.start <= before && before < range.end)) return false;
-  const after = doc.resolve(pos).nodeAfter;
-  return after !== null && !Mark.sameSet(marks, after.marks);
-}
-
-/** The innermost entered block covering `pos` (`entries` is pre-order, so the last one). */
-function enclosingBlock(entries: readonly Correspondence[], pos: number): Correspondence | null {
-  let best: Correspondence | null = null;
-  for (const entry of entries) {
-    if (isEntered(entry.node) && entry.pmStart <= pos && pos <= entry.pmEnd) best = entry;
-  }
-  return best;
-}
-
-/**
- * The source caret *between* two of a block's inline nodes: the end of the last of its
- * descendants that ends at or before `pos` ({@link lastNodeEnd} from the block's own start) and,
- * where none does, the **start of its first inline child** — never the block's own start, which
- * is where its marker is (`# `, `- `, a cell's pipe and padding) and not where its text begins.
- * `entries` is in pre-order, so the first entry under the block's path is that child.
- */
-function betweenNodes(
-  entries: readonly Correspondence[],
-  map: PositionMap,
-  block: Correspondence,
-  pos: number,
-): SourcePosition | null {
-  const before = lastNodeEnd(entries, map, pos, block.pmStart);
-  if (before !== null) return before;
-  const prefix = `${block.path}.`;
-  const first = entries.find((entry) => entry.path.startsWith(prefix));
-  const range = map.ranges[first === undefined ? block.path : first.path];
-  return range === undefined ? null : { line: range.startLine, ch: range.startCol - 1 };
+  return chars.offsetOf(before) > 0;
 }
 
 /**
@@ -672,10 +633,9 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
       const pos = block === null ? rendered : settled(block, rendered);
       const marks = typedMarks(doc, pos, storedMarks);
       const boundary = inlineBoundary(doc, pos, marks);
-      if (block !== null && marks !== null && beyondDroppedWhitespace(block, doc, pos, marks)) {
-        const enclosing = enclosingBlock(entries, pos);
-        const between = enclosing === null ? null : betweenNodes(entries, map, enclosing, pos);
-        if (between !== null) return between;
+      if (block !== null && boundary !== null) {
+        const point = interiorBoundary(entries, map, spellings, lineStarts, block, pos, boundary);
+        if (point !== null) return point;
       }
       const inside = innermostAt(entries, pos, boundary);
       if (inside !== null) {
@@ -685,6 +645,13 @@ export function cursorMap(root: Root, doc: PMNode): CursorMap {
         if (edge !== null) {
           const outside = markEdgePoint(entries, map, inside, pos, marks ?? [], edge);
           if (outside !== null) return outside;
+        }
+        if (
+          edge === "start" &&
+          range !== undefined &&
+          isLeafStart(inside, pos, table !== undefined, marks)
+        ) {
+          return { line: range.startLine, ch: range.startCol - 1 };
         }
         if (range !== undefined && isLeafEnd(inside, pos, boundary, table !== undefined, marks)) {
           return { line: range.endLine, ch: range.endCol - 1 };
@@ -757,6 +724,144 @@ function isLeafEnd(
   if (!hasTable) return true;
   if (boundary !== null) return false;
   return !(marks ?? []).some((mark) => mark.type === schema.marks.inline_code);
+}
+
+/**
+ * **The leaf-start twin of {@link isLeafEnd}** (DECISIONS #review-1-r9 O9, the `[1.63, found
+ * outside scope]` mirror clause). At a block's `"start"` edge a leaf *with* a spelling table — an
+ * `inlineCode` run, found innermost at its own `pmStart` — is answered by that table (offset 0,
+ * past the opening fence, where a typed character joins the run) only when the typed marks carry
+ * `schema.marks.inline_code`, and by the leaf's own start, *before* the opening fence, when they
+ * do not: the rendered view then types plain text before the span (a Delete of the block's first
+ * character leaves stored marks `[]`, so `` a`bc` `` becomes `` X`bc` ``, never `` `Xbc` ``). A
+ * leaf without a table (an atom) is answered with its start either way, and a `text` leaf's start
+ * is its table's start already. {@link markEdgePoint} runs first: this decides the leaf, that
+ * decides how far out of the marks around the leaf the caret sits.
+ */
+function isLeafStart(
+  entry: Correspondence,
+  pos: number,
+  hasTable: boolean,
+  marks: readonly Mark[] | null,
+): boolean {
+  if (entry.node.type === "text" || isEntered(entry.node) || pos !== entry.pmStart) return false;
+  if (!hasTable) return false;
+  return !(marks ?? []).some((mark) => mark.type === schema.marks.inline_code);
+}
+
+/**
+ * The name a typed mark has for `node` when the node is one the rendered view spells with a mark:
+ * a mark node's own type (the schema's mark names are the mdast types), `inline_code` for a code
+ * span; `null` for text and the atoms, which carry no mark of their own.
+ */
+function markNameOf(node: Nodes): string | null {
+  if (isMark(node.type)) return node.type;
+  return node.type === "inlineCode" ? schema.marks.inline_code.name : null;
+}
+
+/**
+ * **An interior boundary resolved per carried mark** (DECISIONS #review-1-r9 O7, O8). Between two
+ * kept inline nodes the serializer writes, in order, the closing delimiters of every marked node
+ * that ends there (innermost first: `*`, `](u)`, a closing fence) and then the opening delimiters
+ * of every marked node that starts there (outermost first). A character typed at one column of
+ * that run of delimiters is inside every mark common to both sides, inside the *outer* part of the
+ * marks that end there (those not yet closed) and inside the *outer* part of the marks that start
+ * there (those already opened) — and nowhere else. The source caret goes to the column whose marks
+ * are the typed marks, `storedMarks ?? $pos.marks()` ({@link typedMarks}):
+ *
+ * - **opening side** — the outermost mark starting here is carried: after the opening delimiter of
+ *   each leading carried mark, before the first one not carried (its range start), or at the
+ *   following leaf's own start when every one is carried;
+ * - **closing side** — otherwise: past the closing delimiter of each mark ending here that is not
+ *   carried, from the innermost outward and stopping at the first carried one (the outermost of
+ *   that run's range end); at the preceding leaf's own end when the innermost is carried; before
+ *   the first mark starting here when nothing ends here; and, with no mark node on either side,
+ *   `null` — the following leaf owns the caret, which is {@link innermostAt}'s answer already
+ *   (its `pmStart` is the caret, gap or not).
+ *
+ * {@link innermostAt}'s two answers are the two cases where the typed marks equal one neighbour's,
+ * and they are left to it unchanged; this answers the boundary only where the typed marks match
+ * **neither** neighbour (O7: after a non-inclusive link, `$pos.marks()` drops the link and the
+ * following run's mark is not in it either — `q [ab](u)X*cd* r` — and the carried subset
+ * `q *x [ab](u)X* r`) and in a **dropped gap** ({@link inDroppedGap}, O8), where the node before
+ * the caret is whitespace the conversion dropped and the kept neighbour before it is found by its
+ * live end, `liveEndOf` of the caret's output offset. `null` hands the position back to the
+ * clauses after it: a boundary that is neither of these, an edge of the block in kept terms, and a
+ * caret with no textblock marks.
+ */
+function interiorBoundary(
+  entries: readonly Correspondence[],
+  map: PositionMap,
+  spellings: ReturnType<typeof formatWithMap>["spellings"],
+  lineStarts: ReturnType<typeof formatWithMap>["lineStarts"],
+  block: InlineBlock,
+  pos: number,
+  boundary: InlineBoundary,
+): SourcePosition | null {
+  const { chars, contentStart } = block;
+  const gap = inDroppedGap(block, pos);
+  const { marks } = boundary;
+  if (
+    !gap &&
+    (Mark.sameSet(marks, boundary.before.marks) || Mark.sameSet(marks, boundary.after.marks))
+  ) {
+    return null;
+  }
+  const offset = chars.offsetOf(pos - contentStart);
+  if (offset <= 0 || offset >= chars.width) return null;
+  const keptEnd = contentStart + chars.liveEndOf(offset);
+
+  const carried = new Set(marks.map((mark) => mark.type.name));
+  const isCarried = (entry: Correspondence): boolean =>
+    carried.has(markNameOf(entry.node) as string);
+  /** Marked nodes ending at the kept boundary and starting at it, outermost first (pre-order). */
+  const ending: Correspondence[] = [];
+  const starting: Correspondence[] = [];
+  let endLeaf: Correspondence | null = null;
+  let startLeaf: Correspondence | null = null;
+  for (const entry of entries) {
+    if (entry.inline === undefined) continue;
+    if (entry.pmStart < keptEnd && entry.pmEnd === keptEnd) {
+      endLeaf = entry;
+      if (markNameOf(entry.node) !== null) ending.push(entry);
+    }
+    if (entry.pmStart === pos && entry.pmEnd > pos) {
+      startLeaf = entry;
+      if (markNameOf(entry.node) !== null) starting.push(entry);
+    }
+  }
+  if (endLeaf === null || startLeaf === null) return null;
+
+  const startOf = (entry: Correspondence): SourcePosition | null => {
+    const range = map.ranges[entry.path];
+    return range === undefined ? null : { line: range.startLine, ch: range.startCol - 1 };
+  };
+  const endOf = (entry: Correspondence): SourcePosition | null => {
+    const range = map.ranges[entry.path];
+    return range === undefined ? null : { line: range.endLine, ch: range.endCol - 1 };
+  };
+  /** Inside a leaf at `at`: through its spelling table, or its own edge for an atom. */
+  const inLeaf = (entry: Correspondence, at: number, edge: "start" | "end"): SourcePosition | null => {
+    const table = spellings[entry.path];
+    if (table === undefined) return edge === "start" ? startOf(entry) : endOf(entry);
+    const { line, column } = spellingPoint(lineStarts, table, leafOffset(entry, at));
+    return { line, ch: column - 1 };
+  };
+
+  const first = starting[0];
+  if (first !== undefined && isCarried(first)) {
+    const open = starting.find((entry) => !isCarried(entry));
+    return open === undefined ? inLeaf(startLeaf, pos, "start") : startOf(open);
+  }
+  let outermost: Correspondence | null = null;
+  for (const entry of [...ending].reverse()) {
+    if (isCarried(entry)) break;
+    outermost = entry;
+  }
+  if (outermost !== null) return endOf(outermost);
+  if (ending.length > 0) return inLeaf(endLeaf, keptEnd, "end");
+  if (first !== undefined) return startOf(first);
+  return null;
 }
 
 /**

@@ -568,3 +568,35 @@ export function punctuateThenDeleteAfterEveryMarkedRun(doc: PMNode): MarkNeighbo
   }
   return { doc: tr.doc, punctuated: ordered.length };
 }
+
+/**
+ * A third destructive transaction for the editor-seeded legs (task 1.64, DECISIONS #review-1-r8
+ * N2), and the one the reconciliation used to find N2: the **first character** of every textblock
+ * outside a fenced code block deleted, applied back-to-front so each deletion leaves the ranges
+ * still to come unmoved. `tr.delete` is the call a Delete keystroke makes.
+ *
+ * It is the shortest route to a tree the parser cannot produce *and* that the conversion has to
+ * narrow: a block whose first character was followed by a space is left with a **leading space**,
+ * which `stripUnparsableWhitespace` drops — so the live document holds a character the bytes do
+ * not, and every position after it is one the correspondence has to place through the
+ * kept-character map rather than through the normalised tree's widths.
+ *
+ * One character is one code point (`typing-legs.ts`'s rule for the whole family), so an astral
+ * lead is deleted whole and never split between its two UTF-16 units.
+ */
+export function deleteAtEveryBlockStart(doc: PMNode): { doc: PMNode; blocks: number } {
+  const ranges: [number, number][] = [];
+  doc.descendants((node, pos) => {
+    if (!node.isTextblock) return true;
+    if (node.type === schema.nodes.code_block) return false;
+    const first = node.firstChild;
+    if (first !== null && first.isText) {
+      const character = [...(first.text as string)][0] as string;
+      ranges.push([pos + 1, pos + 1 + character.length]);
+    }
+    return false;
+  });
+  let tr = EditorState.create({ doc }).tr;
+  for (const [from, to] of [...ranges].reverse()) tr = tr.delete(from, to);
+  return { doc: tr.doc, blocks: ranges.length };
+}

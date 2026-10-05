@@ -1877,10 +1877,10 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
    * placeholder `block+` needs, which no correspondence covers) has no inline node on either
    * side, so it has no edge in this sense and no enclosing mark either.
    *
-   * **The two named exclusions, each positively bounded and each asserted non-empty** (DECISIONS
-   * #032: never a test marked as expected to fail, never a narrowing). A position the leg
-   * excludes is asserted to *be* a member of its class and to actually disagree; every other
-   * position is asserted to agree.
+   * **The one named exclusion, positively bounded and asserted non-empty** (DECISIONS #032: never
+   * a test marked as expected to fail, never a narrowing). A position the leg excludes is asserted
+   * to *be* a member of its class and to actually disagree; every other position is asserted to
+   * agree.
    *
    * 1. `[1.53, a raw source keystroke before a punctuation-edged run]`, the after side
    *    (DECISIONS #review-1-r8 N8). On the `[]` route at a block end whose last inline node
@@ -1892,13 +1892,12 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
    *    keystroke in the source view dissolves the run (`a \~\~(b)\~\~X`). The caret is in the
    *    same place in both; only the bytes differ, and which bytes each view writes is each view's
    *    own rule. In scope for this leg only as a bounded member.
-   * 2. **Found by this leg, outside this task's scope** and filed in `docs/V1.1-BACKLOG.md` with
-   *    a revisit trigger: the block-*start* twin of 1.60's block-end inline-code rule. On the
-   *    `[]` route at a block start whose first inline node is an `inline_code` run and carries no
-   *    other mark, the rendered view types plain text *before* the span while `toSource` answers
-   *    inside the run's value — `isLeafEnd` (`toggle.ts`) is a rule for a leaf's *end* and has no
-   *    start twin, and this task's rule is about the marks *enclosing* a leaf, which a run at a
-   *    block's start has none of. Three positions in two fixtures.
+   *
+   * Task 1.63 bounded a second class here, the block-*start* twin of 1.60's block-end inline-code
+   * rule (`[1.63, found outside scope]`, DECISIONS #review-1-r9 O9). Task 3.12's `isLeafStart`
+   * (`toggle.ts`) discharges it: those positions — the `[]` route at a block start whose first
+   * inline node is a bare `inline_code` run — are now asserted to **agree**, and counted as a named
+   * guard ({@link isInlineCodeRunStart}) so the leg proves it still reaches them.
    */
   describe("the block-edge rule over the corpus", () => {
     const index = fixtureIndex();
@@ -1953,7 +1952,7 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       return last !== undefined && PUNCTUATION.test(last);
     }
 
-    /** Exclusion 2: the block-start twin of 1.60's leaf rule — a bare `inline_code` run first. */
+    /** The guard task 3.12 turned exclusion 2 into: a bare `inline_code` run first, `[]` route. */
     function isInlineCodeRunStart(
       doc: ReturnType<typeof mdastToPM>["doc"],
       { pos, edge }: Edge,
@@ -2038,13 +2037,11 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
             continue;
           }
           if (isInlineCodeRunStart(doc, edge, storedMarks)) {
-            // Positively bounded: the views disagree, and the mapped column is *inside* the code
-            // span — past its opening fence, which is the whole of the defect.
-            expect(typed, where).not.toBe(rendered);
+            // The leaf-start rule (task 3.12, O9): the mapped column is *before* the opening
+            // fence, where the rendered view's plain character goes, and the two views agree.
             const line = alone.text.split("\n")[inBlock.line - 1];
-            expect(line.slice(0, inBlock.ch), where).toMatch(/`+$/);
+            expect(line.slice(inBlock.ch), where).toMatch(/^`/);
             inlineCodeStarts.push(where);
-            continue;
           }
           expect(typed, where).toBe(rendered);
           agreements += 1;
@@ -2067,12 +2064,14 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       // as a literal, and is recorded in the journal.
       expect(punctuationEdged.length).toBeGreaterThan(0);
       expect(new Set(punctuationEdged.map((where) => where.split(" ")[0])).size).toBeGreaterThan(1);
-      // Exclusion 2 is non-empty too — the class this leg found outside the task's scope.
+      // The leaf-start guard (task 3.12, formerly exclusion 2) is reached, and every member of it
+      // is among the agreements.
       expect(inlineCodeStarts.length).toBeGreaterThan(0);
-      // …and neither exclusion swallowed the leg: agreements outnumber them by far.
-      expect(agreements).toBeGreaterThan(punctuationEdged.length + inlineCodeStarts.length);
+      expect(agreements).toBeGreaterThan(inlineCodeStarts.length);
+      // …and the exclusion did not swallow the leg: agreements outnumber it by far.
+      expect(agreements).toBeGreaterThan(punctuationEdged.length);
       // Every edge × route pair compared was bridged from the block alone back to the document.
-      expect(edgesBridged).toBe(agreements + punctuationEdged.length + inlineCodeStarts.length);
+      expect(edgesBridged).toBe(agreements + punctuationEdged.length);
     });
   });
 
@@ -2231,56 +2230,22 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       return { doc, root, text: format(root), map: cursorMap(root, doc), block, chars: charsOf(block) };
     }
 
-    /**
-     * **A class this task's assertions found outside its scope, filed in `docs/V1.1-BACKLOG.md`
-     * with a revisit trigger and bounded positively here (DECISIONS #032, #review-1-r1).** The
-     * caret straight after a `hard_break` inside a container that writes a continuation prefix — a
-     * list item's indentation, a blockquote's `> ` — is answered with the break's own range end,
-     * which is column 1 of the next line, *before* that prefix; the rendered view types after the
-     * prefix. It is not this task's: the same position disagrees in the parsed document with
-     * nothing dropped at all (`- a\` + newline + `  *bc* d`, no transaction), so it is the
-     * position map's rule for a break's end in an indented container, not the correspondence's
-     * for dropped whitespace. Asserted, never skipped: the position is one whose `nodeBefore` is
-     * a break, whose block sits in a `list_item` or `blockquote`, and whose answer is column 0 of
-     * a line whose own bytes begin with that container's prefix.
+    /*
+     * Task 1.64 bounded one class here, positively: the caret straight after a `hard_break` inside
+     * an indented container (a list item, a blockquote), answered before the continuation prefix.
+     * Every member this enumeration reached was the caret after a space dropped *whole* behind the
+     * break — a dropped gap — and task 3.12's gap resolution (`interiorBoundary`, DECISIONS
+     * #review-1-r9 O8) answers it at the following node's start, after the prefix, where the
+     * rendered view types. With no member left the exclusion is gone, so every position here is
+     * asserted; the nothing-dropped member of the class (`[1.10.r7d, hard break inside a
+     * container]`) is outside this enumeration and unchanged.
      */
-    function afterBreakInIndentedContainer(seeded: Seeded, pos: number): boolean {
-      // Back over whitespace the conversion dropped: every position of a dropped run answers the
-      // same column (the ownership rule), so the class is the break's wherever in the run the
-      // caret is — the run is what the break's own line start took.
-      let kept = pos;
-      while (kept > seeded.block.start && !seeded.chars.keeps(kept - 1 - seeded.block.start))
-        kept -= 1;
-      const before = seeded.doc.resolve(kept).nodeBefore;
-      if (before === null || before.type !== schema.nodes.hard_break) return false;
-      const $pos = seeded.doc.resolve(pos);
-      let indented = false;
-      for (let depth = $pos.depth; depth > 0; depth -= 1) {
-        const type = $pos.node(depth).type;
-        if (type === schema.nodes.list_item || type === schema.nodes.blockquote) indented = true;
-      }
-      if (!indented) return false;
-      const at = seeded.map.toSource(pos);
-      const line = seeded.text.split("\n")[at.line - 1];
-      expect(at.ch, `the excluded position ${pos} is column 0 of its line`).toBe(0);
-      expect(line, `the excluded position ${pos} is on a prefixed continuation line`).toMatch(
-        /^(?:\s{2,}|> )/,
-      );
-      return true;
-    }
-
-    /** Whether `pos` is a member of the backlog class *and* the two views actually part there. */
-    function excluded(seeded: Seeded, pos: number, parted: boolean): boolean {
-      return parted && afterBreakInIndentedContainer(seeded, pos);
-    }
 
     /** What one case reached: the dropped characters, and the positions of each kind. */
     interface Reach {
       dropped: number[];
       settled: number[];
       insideDropped: number[];
-      /** The positions the backlog class above took out of both assertions. */
-      excluded: number[];
       /** Whether the dropped whitespace is a whole node between two kept ones (a gap). */
       gap: boolean;
     }
@@ -2292,7 +2257,7 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
      */
     function assertBothViews(seeded: Seeded): Reach {
       const { doc, text, map, block, chars } = seeded;
-      const reach: Reach = { dropped: [], settled: [], insideDropped: [], excluded: [], gap: false };
+      const reach: Reach = { dropped: [], settled: [], insideDropped: [], gap: false };
       for (let live = 0; live < chars.liveWidth; live += 1) {
         if (!chars.keeps(live)) reach.dropped.push(live);
       }
@@ -2311,10 +2276,6 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
         const rendered = typedInRendered(doc, pos);
         const typed = typedInSource(text, at);
         const back = map.toRendered(at);
-        if (excluded(seeded, pos, typed !== rendered || back !== pos)) {
-          reach.excluded.push(pos);
-          continue;
-        }
         expect(typed, `the two views at ${pos} (${at.line}:${at.ch}) of ${JSON.stringify(text)}`).toBe(
           rendered,
         );
@@ -2322,10 +2283,6 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       }
       for (const pos of reach.insideDropped) {
         const next = block.start + chars.liveOf(chars.offsetOf(pos - block.start));
-        if (excluded(seeded, pos, map.toRendered(map.toSource(pos)) !== next)) {
-          reach.excluded.push(pos);
-          continue;
-        }
         expect(
           map.toSource(pos),
           `the ownership rule at ${pos}: the next kept character's column`,
@@ -2337,12 +2294,7 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       const outside = textPositions(doc).filter(
         (pos) => pos < block.start || pos > block.start + chars.liveWidth,
       );
-      const failures: number[] = [];
-      for (const pos of outside) {
-        if (map.toRendered(map.toSource(pos)) === pos) continue;
-        if (excluded(seeded, pos, true)) reach.excluded.push(pos);
-        else failures.push(pos);
-      }
+      const failures = outside.filter((pos) => map.toRendered(map.toSource(pos)) !== pos);
       expect(failures, "the inverse outside the seeded block").toEqual([]);
       return reach;
     }
@@ -2450,7 +2402,6 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
     let gaps = 0;
     let insideNodes = 0;
     let droppedPositions = 0;
-    let excludedPositions = 0;
     const reached: string[] = [];
 
     for (const { whitespace, needs, nodes, lines, seed: transact } of CLASSES) {
@@ -2462,7 +2413,6 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
             const reach = assertBothViews(seeded);
             cases += 1;
             droppedPositions += reach.insideDropped.length;
-            excludedPositions += reach.excluded.length;
             if (reach.gap) gaps += 1;
             else insideNodes += 1;
             reached.push(`${whitespace} | ${node} | ${container}`);
@@ -2484,7 +2434,6 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
         const reach = assertBothViews(seeded);
         cases += 1;
         droppedPositions += reach.insideDropped.length;
-        excludedPositions += reach.excluded.length;
         if (reach.gap) gaps += 1;
         else insideNodes += 1;
         reached.push(`a line-ending run (CELL_LINE_ENDING) | ${node} | table cell`);
@@ -2565,9 +2514,6 @@ describe("a boundary between marked and unmarked text is resolved by `$pos.marks
       expect(gaps + insideNodes).toBe(cases);
       // The excluded positions are the dropped ones, and there is at least one per case.
       expect(droppedPositions).toBeGreaterThanOrEqual(cases);
-      // The backlog class above is reached, and it is a minority of what the enumeration asserts.
-      expect(excludedPositions).toBeGreaterThan(0);
-      expect(excludedPositions).toBeLessThan(droppedPositions);
     });
   });
 
