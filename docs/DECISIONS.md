@@ -1041,3 +1041,18 @@ verdict: PASS
 - **The other re-pointed lines** stay untaken. `3.verify`'s journal records, for each one, that no Phase 3 task discharged it (its text already allows that). The review set's reconciliation (`3.7.r0d`) gives each one a real trigger instead of moving it to `4.verify`. The review set id is `3.7`, from `ralph/tasks.json`.
 - **Graph.** EXPECTED_COUNT 329 → 338 (nine loop tasks, no new gate). `validate-tasks: OK`.
 - **Reversal.** `git revert` of this commit before the runner starts `3.8`. Once a new task has passed there is no undo; a later planning commit replaces the remainder.
+
+## #051-3.1-started-from-the-pre-050-cached-spec-manual-reset (2026-10-05, principal; Michael's OK for the reset; manual procedure, runner stopped, host checkout on `phase/3`, #017)
+
+- **What happened.** The boundary commits #047–#050 regenerated `ralph/tasks.json`, but nobody ran `ralph/ralph.sh sync-state`. The runner schedules from its cached spec (`.evidence/state/spec.json`), which `sync-state` refreshes only when a reconciliation or planning commit integrates (`ralph/lib/run.mjs:202`, `:252`) or when the command is run by hand. So `ralph run --phase 3` started `3.1` from the old graph, where it depended on `2.close`.
+  - Attempt 1 (40 s) read the committed `tasks.json` and saw that `3.16` had not passed. It committed only journal lines and `wip(3.1): blocked — dependency 3.16 not passed`, and printed no DONE.
+  - The runner then started attempt 2, and the principal stopped the runner and its container. No 3.1 product code was written.
+- **The contradiction.** `sync-state` refuses a planning change to a `running` task's fingerprint (`state.mjs`, `MUTABLE_OK`), and no runner command moves `running` back to `pending`. `retry` takes only blocked or integration-failed tasks, and `abandon` is destructive. Following #023 and #038, the fix is cut to a manual procedure rather than new machinery.
+- **The procedure, done with the runner stopped and Michael's OK:**
+  1. `.evidence/state/tasks.json` was backed up to the session scratchpad.
+  2. A node script called the runner's own `ctx.set` under `withLock`, putting 3.1 back to `pending` with 0 attempts. Audit line: `transition 3.1 running -> pending (principal manual reset, DECISIONS #051)`.
+  3. `.evidence/tasks/3.1/{1,2}.log` were moved to `*.pre051` (#027).
+  4. `.wt/3.1` was removed (clean tree) and `task/3.1` renamed to `attic/3.1-pre051`, kept as evidence. Its two `- [3.1]` journal lines never reached `phase/3`.
+  5. `ralph/ralph.sh sync-state` (9 added, 338 total), then `doctor: clean`, and `run --phase 3 --dry-run` gives `next: 3.8`.
+- **Rule for every boundary planning commit made outside the runner:** run `ralph/ralph.sh sync-state` and then `ralph/ralph.sh run --phase N --dry-run` before restarting, and restart only when the dry run names the expected first task.
+- **Reversal.** This entry: `git revert`. The state reset has no exact undo, because 3.1's old record was a stale `running` from the wrong graph. The backup in the scratchpad holds the pre-reset record.
