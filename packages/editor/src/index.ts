@@ -82,3 +82,5 @@ export {
 export function placeholder(): string {
   return "editor";
 }
+
+export { cursorBlock, type CursorBlock } from "./cursor-block.js";

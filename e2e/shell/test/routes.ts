@@ -131,6 +131,127 @@ export async function placeCaret(editorSelector: string, blockSelector: string, 
   );
 }
 
+/** The viewport point at plain-text offset `offset` of `blockSelector` (the left edge of the
+ * character there, or the right edge of the one before it at the block's end), vertically centred
+ * on its line, after the block is scrolled to the viewport's centre. Computed from a DOM Range over
+ * the block's text nodes, so a click there is "a click at a computed point" (DECISIONS #022). */
+async function textPoint(blockSelector: string, offset: number): Promise<{ x: number; y: number }> {
+  const point = await browser.execute(
+    (sel, at) => {
+      const block = document.querySelector(sel);
+      if (block === null) return null;
+      block.scrollIntoView({ block: "center" });
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      const nodes: Node[] = [];
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) nodes.push(node);
+      let seen = 0;
+      for (const [index, node] of nodes.entries()) {
+        const length = node.textContent?.length ?? 0;
+        if (at < seen + length || (at === seen + length && index === nodes.length - 1)) {
+          const local = at - seen;
+          const range = document.createRange();
+          const atEnd = local === length;
+          range.setStart(node, atEnd ? local - 1 : local);
+          range.setEnd(node, atEnd ? local : local + 1);
+          const rect = range.getClientRects()[0];
+          if (rect === undefined) return null;
+          return { x: atEnd ? rect.right : rect.left, y: rect.top + rect.height / 2 };
+        }
+        seen += length;
+      }
+      return null;
+    },
+    blockSelector,
+    offset,
+  );
+  assert.ok(point !== null, `offset ${offset} is not in ${blockSelector}`);
+  return { x: Math.round(point.x), y: Math.round(point.y) };
+}
+
+/** Sets the DOM selection to plain-text offsets `[from, to)` of `blockSelector` and polls until it
+ * holds (the embedded leg's caret route; see `placeCaret` for why it is re-applied). */
+async function selectDomText(editorSelector: string, blockSelector: string, from: number, to: number): Promise<void> {
+  await browser.execute((editorSel) => (document.querySelector(editorSel) as HTMLElement | null)?.focus(), editorSelector);
+  await browser.waitUntil(
+    () =>
+      browser.execute(
+        (sel, start, end) => {
+          const block = document.querySelector(sel);
+          const selection = window.getSelection();
+          if (block === null || selection === null) return false;
+          const locate = (at: number): [Node, number] | null => {
+            const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+            let seen = 0;
+            for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+              const length = node.textContent?.length ?? 0;
+              if (at <= seen + length) return [node, at - seen];
+              seen += length;
+            }
+            return null;
+          };
+          const a = locate(start);
+          const b = locate(end);
+          if (a === null || b === null) return false;
+          const range = document.createRange();
+          range.setStart(a[0], a[1]);
+          range.setEnd(b[0], b[1]);
+          if (selection.rangeCount === 1 && selection.toString() === range.toString()) {
+            const held = selection.getRangeAt(0);
+            if (held.compareBoundaryPoints(Range.START_TO_START, range) === 0 && held.compareBoundaryPoints(Range.END_TO_END, range) === 0) {
+              return true;
+            }
+          }
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return false;
+        },
+        blockSelector,
+        from,
+        to,
+      ),
+    { timeout: 5000, interval: 50, timeoutMsg: `the selection never held at ${from}..${to} of ${blockSelector}` },
+  );
+}
+
+/** Puts the caret at plain-text offset `offset` of `blockSelector` (task 3.4). external: a native
+ * click at the computed point of that offset. embedded: the DOM selection collapsed there. */
+export async function caretAtText(editorSelector: string, blockSelector: string, offset: number): Promise<void> {
+  if (!embedded) {
+    const point = await textPoint(blockSelector, offset);
+    await browser
+      .action("pointer", { parameters: { pointerType: "mouse" } })
+      .move({ x: point.x, y: point.y, origin: "viewport" })
+      .down({ button: 0 })
+      .up({ button: 0 })
+      .perform();
+    return;
+  }
+  await selectDomText(editorSelector, blockSelector, offset, offset);
+}
+
+/** Selects plain-text offsets `[from, to)` of `blockSelector` (task 3.4's "retype the sentence").
+ * external: a native press at the computed point of `from`, a move to the point of `to` and a
+ * release — Blink extends the selection itself. embedded: the DOM selection set over the range. */
+export async function selectText(editorSelector: string, blockSelector: string, from: number, to: number): Promise<void> {
+  if (!embedded) {
+    const start = await textPoint(blockSelector, from);
+    const end = await textPoint(blockSelector, to);
+    await browser
+      .action("pointer", { parameters: { pointerType: "mouse" } })
+      .move({ x: start.x, y: start.y, origin: "viewport" })
+      .down({ button: 0 })
+      .pause(80)
+      .move({ x: Math.round((start.x + end.x) / 2), y: Math.round((start.y + end.y) / 2), origin: "viewport" })
+      .pause(80)
+      .move({ x: end.x, y: end.y, origin: "viewport" })
+      .pause(80)
+      .up({ button: 0 })
+      .perform();
+    return;
+  }
+  await selectDomText(editorSelector, blockSelector, from, to);
+}
+
 /** Types `text` at the editor's caret. external: native key presses. embedded: WebDriver element
  * send-keys on the editor, which the provider turns into `execCommand('insertText')` at the
  * current selection. The caret route leaves the editor focused. */

@@ -503,3 +503,134 @@ button:disabled {
   display: flex;
   gap: 8px;
 }
+
+/* Rewrite mode's right sidebar (§6.3, task 3.4). */
+.rewrite-panel {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-left: 1px solid #d9d9d9;
+  background-color: #f4f4f4;
+  font-size: 0.9em;
+}
+
+.rewrite-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  border-bottom: 1px solid #d9d9d9;
+}
+
+.rewrite-title {
+  font-weight: 600;
+}
+
+.rewrite-error {
+  margin: 8px;
+  color: #a00;
+}
+
+.rewrite-empty,
+.rewrite-nested {
+  padding: 8px;
+  color: #666;
+}
+
+.rewrite-paragraph,
+.rewrite-orphans {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rewrite-sentence {
+  margin: 8px;
+  padding: 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background-color: #fff;
+}
+
+.rewrite-sentence-active {
+  border-color: #4a7bd0;
+}
+
+.rewrite-sentence-over {
+  background-color: #e8f0fc;
+}
+
+.rewrite-sentence-text {
+  margin: 0 0 6px;
+}
+
+.rewrite-duplicate,
+.rewrite-in-use {
+  margin-left: 6px;
+  font-size: 0.8em;
+  color: #666;
+}
+
+.rewrite-variants {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+
+.rewrite-add {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+
+.rewrite-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.rewrite-unattached {
+  margin-top: auto;
+  border-top: 1px solid #d9d9d9;
+}
+
+.rewrite-unattached-title {
+  margin: 8px;
+  font-size: 1em;
+}
+
+.rewrite-orphan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 8px;
+  padding: 6px;
+  border: 1px dashed #aaa;
+  border-radius: 6px;
+  background-color: #fff;
+}
+
+.rewrite-orphan-handle {
+  cursor: grab;
+  touch-action: none;
+}
+
+.rewrite-orphan-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .rewrite-panel {
+    background-color: #262626;
+    border-left-color: #444;
+  }
+  .rewrite-sentence,
+  .rewrite-orphan {
+    background-color: #1e1e1e;
+    border-color: #444;
+  }
+}

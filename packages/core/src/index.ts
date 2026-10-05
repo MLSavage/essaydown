@@ -54,6 +54,7 @@ export {
   paragraphText,
   replaceSentence,
   reorderSentences,
+  sentenceMarkdown,
   ABBREVIATIONS,
   type Sentence,
   type SentenceRange,
@@ -141,6 +142,18 @@ export {
   NEW_QUESTION_DEPTH,
   type OutlineItem,
 } from "./outline.js";
+
+export {
+  rewriteCards,
+  unattachedRewrites,
+  resolvedSidecar,
+  applyAddVariant,
+  applyUseVariant,
+  applyReattach,
+  applyDeleteOrphan,
+  type RewriteCard,
+  type UnattachedRewrite,
+} from "./rewrite.js";
 
 export {
   COALESCE_WINDOW_MS,

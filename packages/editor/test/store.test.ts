@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Root } from "mdast";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
+  applyAddVariant,
   applyMoveBlock,
+  applyUseVariant,
   candidatesOf,
   canRedo,
   canUndo,
@@ -781,4 +785,84 @@ describe("createFormatCache", () => {
     store.getState().undo();
     expect(cache(store.getState().document.root)).toBe("one\n");
   });
+});
+
+describe("store -> view keeps the caret where the document did not change (task 3.4)", () => {
+  const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
+  const names = Object.keys(
+    JSON.parse(readFileSync(`${FIXTURES}/index.json`, "utf8")) as Record<string, unknown>,
+  ).sort();
+
+  /** "Use this" on sentence `index` of the paragraph at root index `at`, as one mode mutation. */
+  const use = (at: number, index: number, text: string) => (state: DocumentState) =>
+    applyUseVariant(applyAddVariant(state, [at, index], text, "t"), [at, index], 0, "t");
+
+  function caretAt(context: ReturnType<typeof bound>, position: number): void {
+    context.binding.dispatch(
+      context.view.state.tr.setSelection(TextSelection.create(context.view.state.doc, position)),
+    );
+  }
+
+  it("a caret in a block before the change keeps its position, through the mutation and its undo", () => {
+    const context = bound("Alpha one.\n\nBeta two. Gamma three.\n");
+    caretAt(context, 4);
+    context.store.getState().dispatch(use(1, 1, "Delta *four*."));
+    expect(context.view.markdown()).toBe("Alpha one.\n\nBeta two. Delta *four*.\n");
+    expect(context.view.state.selection.head).toBe(4);
+    expect(context.store.getState().cursor).toBe(4);
+    context.store.getState().undo();
+    expect(context.view.markdown()).toBe("Alpha one.\n\nBeta two. Gamma three.\n");
+    expect(context.view.state.selection.head).toBe(4);
+  });
+
+  it("a caret on the edge of the change goes to the end of the new range (a load into an empty view)", () => {
+    const context = bound("\n");
+    expect(context.view.state.selection.head).toBe(1);
+    context.store.getState().dispatch((state) => ({ root: parse("Loaded text.\n"), sidecar: state.sidecar }));
+    expect(context.view.markdown()).toBe("Loaded text.\n");
+    expect(context.view.state.selection.head).toBe(1 + "Loaded text.".length);
+  });
+
+  it("a caret in a block after the change moves by the change in size", () => {
+    const context = bound("Beta two. Gamma three.\n\nOmega.\n");
+    const omega = context.view.state.doc.child(0).nodeSize + 1 + "Om".length;
+    caretAt(context, omega);
+    context.store.getState().dispatch(use(0, 1, "Delta."));
+    const $head = context.view.state.doc.resolve(context.view.state.selection.head);
+    expect($head.index(0)).toBe(1);
+    expect($head.parentOffset).toBe("Om".length);
+  });
+
+  it("a caret inside the replaced sentence stays in its paragraph", () => {
+    const context = bound("Alpha one.\n\nBeta two. Gamma three.\n\nOmega.\n");
+    const second = context.view.state.doc.child(0).nodeSize;
+    caretAt(context, second + 1 + "Beta two. Gam".length);
+    context.store.getState().dispatch(use(1, 1, "Delta."));
+    const $head = context.view.state.doc.resolve(context.view.state.selection.head);
+    expect($head.index(0)).toBe(1);
+    expect($head.parent.textContent).toBe("Beta two. Delta.");
+  });
+
+  it("the view holds exactly the store's document after a block move and a block removal (corpus)", () => {
+    let checked = 0;
+    for (const name of names) {
+      const root = parse(readFileSync(`${FIXTURES}/${name}`, "utf8"));
+      if (root.children.some((child) => child.type === "yaml") || root.children.length < 2) continue;
+      const context = bound(format(root));
+      const last = context.store.getState().document.root.children.length - 1;
+      context.store.getState().dispatch(move(0, last));
+      expect(context.view.state.doc.eq(mdastToPM(context.store.getState().document.root).doc), name).toBe(true);
+      const removed: Root = { ...root, children: root.children.slice(1) };
+      context.store.getState().dispatch((state) => ({ root: removed, sidecar: state.sidecar }));
+      expect(context.view.state.doc.eq(mdastToPM(removed).doc), name).toBe(true);
+      context.store.getState().undo();
+      context.store.getState().undo();
+      expect(context.view.state.doc.eq(mdastToPM(context.store.getState().document.root).doc), name).toBe(true);
+      expect(context.view.markdown()).toBe(format(root));
+      checked += 1;
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  const move = (from: number, to: number) => (state: DocumentState) => applyMoveBlock(state, from, to);
 });

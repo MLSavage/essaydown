@@ -9,6 +9,7 @@ import ModeBar from "./modes/ModeBar";
 import { DEFAULT_MODE, isMacPlatform, modeForKey, type Mode } from "./modes/modes";
 import OutlinePanel from "./outline/OutlinePanel";
 import OutlineTree from "./outline/OutlineTree";
+import RewritePanel from "./rewrite/RewritePanel";
 import SettingsDialog from "./settings/SettingsDialog";
 import { loadSettings, type HasCoachKeyResult, type SettingsIO } from "./settings/settings-sync";
 import ConfirmDelete from "./workspace/ConfirmDelete";
@@ -428,6 +429,7 @@ function App() {
           />
         )}
       </main>
+      {mode === "rewrite" && store !== null && openDoc !== null && <RewritePanel store={store} mac={mac} />}
       {contextMenu !== null && (
         <ContextMenu
           target={contextMenu}

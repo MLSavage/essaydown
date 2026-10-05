@@ -17,7 +17,7 @@ import {
 import type { Extension } from "@codemirror/state";
 import { keymap as codeMirrorKeymap, type KeyBinding } from "@codemirror/view";
 import { keymap as proseMirrorKeymap } from "prosemirror-keymap";
-import type { Command, EditorState, Plugin, Transaction } from "prosemirror-state";
+import { Selection, type Command, type EditorState, type Plugin, type Transaction } from "prosemirror-state";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { mdastToPM, pmToMdast } from "./schema.js";
 
@@ -218,6 +218,35 @@ export interface DocumentBinding {
  * The pull replaces the whole document in one step rather than rebuilding the `EditorState`, so
  * the view keeps its plugins and its plugin state across an undo.
  */
+/**
+ * The transaction that turns `state.doc` into `doc` — the whole content replaced, so the view
+ * holds exactly the store's document — with the caret placed by where the two documents differ
+ * (`Fragment.findDiffStart`/`findDiffEnd`) rather than mapped through the whole-document
+ * replacement, which would send it to the end of the document. The rule is the mapping of a
+ * replace step over just the changed range: a caret before it keeps its position, one after it
+ * moves by the change in size, and one inside it or on its edge goes to the end of the new range
+ * (so a load into an empty view still leaves the caret after the loaded text, as before). So a mode mutation that rewrites one sentence (task 3.4's "Use this"), or an undo of
+ * it, leaves the caret in the paragraph it was in, and Rewrite's sidebar on that paragraph.
+ *
+ * Called only for documents that differ (`bindProseMirror`'s `pull` checks `eq` first), so both
+ * diff ends exist.
+ */
+function replaceKeepingCaret(state: EditorState, doc: EditorState["doc"]): Transaction {
+  const transaction = state.tr.replaceWith(0, state.doc.content.size, doc.content);
+  const start = state.doc.content.findDiffStart(doc.content) as number;
+  const end = state.doc.content.findDiffEnd(doc.content) as { a: number; b: number };
+  const head = state.selection.head;
+  // A diff whose ends overlap (a repeated run inserted or removed) ends no earlier than it starts.
+  const endA = Math.max(end.a, start);
+  const position =
+    head < start
+      ? head
+      : head > endA
+        ? head + doc.content.size - state.doc.content.size
+        : Math.max(end.b, start);
+  return transaction.setSelection(Selection.near(transaction.doc.resolve(position)));
+}
+
 export function bindProseMirror(
   store: DocumentStore,
   view: BoundView,
@@ -233,10 +262,7 @@ export function bindProseMirror(
     const { doc } = mdastToPM(root);
     // The initial pull of a view already built from this root, and a re-entrant notification for
     // a snapshot that happens to hold the same document, both land here with nothing to do.
-    if (!doc.eq(view.state.doc)) {
-      const transaction = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
-      view.updateState(view.state.apply(transaction));
-    }
+    if (!doc.eq(view.state.doc)) view.updateState(view.state.apply(replaceKeepingCaret(view.state, doc)));
     store.getState().setCursor(view.state.selection.head);
   };
 
