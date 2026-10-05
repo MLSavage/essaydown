@@ -1056,3 +1056,43 @@ verdict: PASS
   5. `ralph/ralph.sh sync-state` (9 added, 338 total), then `doctor: clean`, and `run --phase 3 --dry-run` gives `next: 3.8`.
 - **Rule for every boundary planning commit made outside the runner:** run `ralph/ralph.sh sync-state` and then `ralph/ralph.sh run --phase N --dry-run` before restarting, and restart only when the dry run names the expected first task.
 - **Reversal.** This entry: `git revert`. The state reset has no exact undo, because 3.1's old record was a stale `running` from the wrong graph. The backup in the scratchpad holds the pre-reset record.
+
+## #052-3.10-stuck-replaced-by-3.17 (2026-10-05, principal; Michael's answers and his OK for the route; Fable consulted on STUCK after three attempts; manual procedure, runner idle mid-phase, planning commit on the host checkout on `phase/3`, #017)
+
+- **What happened.** 3.10 (U9 robustness, from #050) was `STUCK` after 3 attempts.
+  - Attempt 1 hit the turn cap.
+  - Attempts 2 and 3 completed gaps (a), (b), (c) and (e), green in the container, and each stopped on the same conflict. Gap (d)'s presence case needs a backend stderr line, and no action reachable on Linux prints one:
+    - `menu.rs`'s `eprintln!` is wired only under `cfg(target_os = "macos")`;
+    - `workspace.rs`'s rollback `eprintln!` needs the `fault()` seam, which is `cfg(test)`-only;
+    - the crate has no `log` or `tracing` dependency.
+  - The task said "No product change", and its acceptance limited the diff to `e2e/shell/` and docs. The acceptance binds, so the text was unmeetable as written. Evidence: `.evidence/tasks/3.10/{1,2,3}.log` and the three `[3.10]` lessons lines.
+- **Michael's answers (2026-10-05).**
+  - Gap (d), option A: one debug-only startup line, scoped to the replacement task. He asked for two confirmations:
+    - the e2e binary is a debug build on every CI OS;
+    - the backend-log capture reads stderr on macOS.
+  - The proposed text `essaydown: debug build started` would never be captured. The installed `@wdio/tauri-service` 1.3.0 `extractLogLevel` classes a line by a level word in its first 60 characters, so the line would be level debug and dropped below the default `info` minimum. Michael chose `essaydown: backend started` instead.
+  - The round-11 cliff: backlog it, but 3.17's spec comment and journal state that the 8-round cap comes from the cliff, not the budget, and falls short of PRD §7's 10-minute session (a recorded cut). U9 itself had been an unrecorded cut.
+  - Two additions to 3.17's text:
+    - `lib.rs` is in scope for that one line, and acceptance requires its removal to turn the presence case red;
+    - the spec's `this.skip()` uses are stated as skipping only after a red round or at the budget, never to get green.
+- **The gap in the runner (not a contradiction).** RUNNER-SPEC §4.5 says an abandoned task's "dependents stay blocked until a planning commit replaces it". But plan requests come only from gate outcomes (§2), so a STUCK loop task's replacement has a named outcome and no named vehicle. The code agrees:
+  - `sync-state` refuses to mutate or delete a `blocked` or `abandoned` task (`state.mjs`, `MUTABLE_OK`; `allowSupersede` is passed only by plan resolution);
+  - `satisfied()` counts `superseded` and never `abandoned`;
+  - `selectNext` ends a phase only when every task is `passed`, `superseded` or `abandoned`, so a 3.10 left `blocked` would end Phase 3 in `STUCK`.
+
+  §2's three namespaces (`a<n>`, `.g<n>`, `.r<n>`) do not cover a loop task's replacement, so it takes the next number, as #050 did. Following #023 and #051, this is a manual procedure, not new machinery.
+- **The procedure.**
+  1. `ralph/ralph.sh abandon 3.10 --reason …`. `.wt/3.10` had a clean tree and was removed; `task/3.10` was renamed `abandoned/3.10`, tip `89ad5f554c4258ef9d7bf92661b8be960506ea92`. Audit: `transition 3.10 blocked -> abandoned (abandon)`.
+  2. This planning commit, on `phase/3` from the host checkout while the runner is idle (#017).
+     - **Why `phase/3` and not `handoff/062`:** `startTask` cuts the task's worktree from `phase/3`'s head, and the agent reads its row from that tree's `ralph/tasks.json`. `sync-state` without `--ref` regenerates from the host working tree.
+     - **What it changes:**
+       - PRD §8 gains `3.17` (depends on `3.9`). Its first step checks out the spec from `89ad5f5`, and gap (d) is option A.
+       - 3.11 now depends on `3.17`, and 3.10's row is byte-identical.
+       - `tasks.json` regenerated; `EXPECTED_COUNT` 338 → 339; `validate-tasks: OK 339`.
+       - The three `[3.10]` lessons lines are carried verbatim, so 3.17's agent orients from them.
+       - The backlog line `[#052, robustness round-11 cliff]`.
+     - **What it does not carry:** 3.10's three `- [3.10]` journal lines stay on `abandoned/3.10`, since 3.10 never integrated (as with 3.1's at #051). The spec itself reaches `phase/3` only through 3.17's suite-gated candidate.
+  3. `ralph/ralph.sh sync-state`, `doctor`, then `ralph/ralph.sh run --phase 3 --dry-run`, which must name `3.17`; only then the restart (#051's rule).
+- **Reversal.**
+  - This commit: before the runner starts 3.17, `git revert`, then `ralph/ralph.sh sync-state` (the pending 3.17 record is dropped and 3.11's old dependency is accepted, since 3.11 is pending). After 3.17 has started: none.
+  - The abandon has no runner reversal (`retry` and `resume` take only `blocked`). The manual route is `git branch -m abandoned/3.10 task/3.10`, `git worktree add .wt/3.10 task/3.10`, and a `ctx.set` under `withLock` back to `blocked` with 3 attempts (#051's step-2 shape), recorded if it is ever run.
