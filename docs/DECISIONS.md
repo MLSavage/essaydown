@@ -998,3 +998,14 @@ verdict: PASS
 - **Handoff stack.** The 3 commits of `phase/2..handoff/059` (handoffs 058 and 059, `next-prompt.md`, #046; `docs/**` only) were cherry-picked into this worktree before this entry, with no conflict (deviation 29).
 - **Graph.** Unchanged. `2.close` already depends on `2.10.r3d` (the r2 planning); `EXPECTED_COUNT` 329 equals the 329 tasks in `ralph/tasks.json`. For Michael at the Phase 2→3 boundary, beside handoff 059's open questions: the three `[review-2-r3, …]` lines as one list to approve or re-rule.
 - **Reversal.** Before this commit integrates: `git -C .wt/2.10.r3d reset --hard phase/2`. The task stays `principal-pending`, and the stack returns to `handoff/059`, which is not deleted until after `2.close`. After integration a reconciliation has no undo: its verdict is written to `.evidence/reviews/2/r3/verdict`, and any change is a further planning commit.
+
+## #047-windows-kept-macos-first-at-the-phase-2-boundary (2026-10-05, Michael's decisions; recorded by the principal, runner idle at the Phase 2→3 boundary, host checkout on `phase/3`, #017; supersedes #045 Decision 2)
+
+- **Evidence put to Michael.** Phase 2 had 8 failed CI gate attempts (read from each `.evidence/ci/2.*/a*/workflow.log`'s failing job names). Windows was the only failing OS in 3 (`2.1h` a1 e2e-shell, `2.verify.g1h` a1 test, `2.verify.g3h` a1 test) and failed beside macOS in 3 more (`2.verifyh` a1, `2.verify.g2h` a1, `2.verify.r1h` a1). The 2 macOS-only failures (`2.verify.r2h` a1, `2.verify.r3h` a1) were excluded.
+- **Decision 1 (Michael), in his words:** "No, let's keep windows." #045 Decision 2 (drop Windows at this boundary) is withdrawn. Windows stays a v1 target, `windows-latest` stays in every CI matrix, PRD §4 keeps the `.msi`, and CLAUDE.md keeps its junction clauses. The backlog line `[#045, Windows dropped]` is closed by an appended line.
+- **Decision 2 (Michael), in his words:** "Mac will be the main program, it needs to be the most important version in the build, we can let things slide on windows until I can test that fully but mac has to be the one we focus on." From Phase 3 on:
+  - **Required** (a red job fails the gate): Linux and macOS, for both the `test` job and the `e2e-shell` job.
+  - **Recorded** (`continue-on-error`, results uploaded and kept as evidence): Windows, for both jobs, until Michael can test Windows himself.
+  - PRD §7's Phase 3 row and the `3.verify`, `3.7` and `4.verify` texts say so (this commit). The `ci.yml` change is task 3.8's (the boundary planning commit). Phase 6's installer row is unchanged.
+  - Consequence, accepted: a macOS e2e failure, including the `[1.46]` caret-race class (3 of its 7 instances on macOS), now fails a gate and takes a `.g<n>` repair instead of being noted.
+- **Reversal.** `git revert` of this commit (the PRD strings, this entry and the backlog line). Revert the boundary planning commit first if it has landed, because its `3.8` task text cites this entry.

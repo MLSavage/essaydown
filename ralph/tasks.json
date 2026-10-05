@@ -4616,7 +4616,7 @@
    ],
    "cleanupRef": true
   },
-  "ciAcceptance": "Full suite + one-workflow steps 1–6 green on ubuntu and windows (macOS recorded) at the implementation SHA; logs in /logs/ci/3.verify/accepted/.",
+  "ciAcceptance": "Full suite + one-workflow steps 1–6 green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; logs in /logs/ci/3.verify/accepted/.",
   "phase": "3",
   "execution": "loop",
   "targetBranch": "phase/3"
@@ -4647,7 +4647,7 @@
   "phase": "3",
   "targetBranch": "phase/3",
   "description": "CI gate for 3.verify: scripts/gate.sh 3.verifyh pushes integrated_sha of 3.verify to ci/3.verify/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\"] into /logs/ci/3.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
-  "acceptance": "Full suite + one-workflow steps 1–6 green on ubuntu and windows (macOS recorded) at the implementation SHA; logs in /logs/ci/3.verify/accepted/.",
+  "acceptance": "Full suite + one-workflow steps 1–6 green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; logs in /logs/ci/3.verify/accepted/.",
   "dependencies": [
    "3.verify"
   ]
@@ -4657,7 +4657,7 @@
   "model": "claude-opus",
   "execution": "reviewer",
   "reviewer": "claude",
-  "description": "Review attempt r0, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "description": "Review attempt r0, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
    "3.verifyh"
@@ -4666,14 +4666,14 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
  },
  {
   "id": "3.7.r0b",
   "model": "sol",
   "execution": "reviewer",
   "reviewer": "sol",
-  "description": "Review attempt r0, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "description": "Review attempt r0, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
    "3.verifyh"
@@ -4682,14 +4682,14 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
  },
  {
   "id": "3.7.r0c",
   "model": "grok",
   "execution": "reviewer",
   "reviewer": "grok",
-  "description": "Review attempt r0, grok reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "description": "Review attempt r0, grok reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
    "3.verifyh"
@@ -4698,7 +4698,7 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
  },
  {
   "id": "3.7.r0d",
@@ -4715,7 +4715,7 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and Windows (logs/ci); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
  },
  {
   "id": "3.close",
@@ -4913,7 +4913,7 @@
    ],
    "cleanupRef": true
   },
-  "ciAcceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and windows (macOS recorded) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; logs in /logs/ci/4.verify/accepted/.",
+  "ciAcceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; logs in /logs/ci/4.verify/accepted/.",
   "phase": "4",
   "execution": "loop",
   "targetBranch": "phase/4"
@@ -4945,7 +4945,7 @@
   "phase": "4",
   "targetBranch": "phase/4",
   "description": "CI gate for 4.verify: scripts/gate.sh 4.verifyh pushes integrated_sha of 4.verify to ci/4.verify/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\",\"export-validation\"] into /logs/ci/4.verify/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
-  "acceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and windows (macOS recorded) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; logs in /logs/ci/4.verify/accepted/.",
+  "acceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; logs in /logs/ci/4.verify/accepted/.",
   "dependencies": [
    "4.verify"
   ]
