@@ -15,7 +15,8 @@
  *   touch), and is ignored. Shorter text is held for up to {@link SyncOptions.shrinkHoldMs} from
  *   the first shrink, because sync tools write by truncating and then rewriting; a report inside
  *   the hold re-reads, so truncate-then-rewrite settles on the rewritten text as one change. A
- *   settled change reloads silently when clean, and is a conflict when dirty.
+ *   settled change reloads silently when clean, and is a conflict when dirty — dirty as it stands
+ *   after {@link SyncCallbacks.settle} has committed any edit the editor still holds.
  * - A conflict shows the 'Changed on disk' banner and suspends saving until the user picks
  *   {@link DocumentSync.keepMine} (write the editor's text over the disk) or
  *   {@link DocumentSync.reload} (take the disk's text, dropping the edit).
@@ -80,6 +81,14 @@ export interface SyncCallbacks {
   knownChanged(text: string): void;
   /** A read or write failed; the edit stays dirty. */
   failed(error: unknown): void;
+  /**
+   * Commit an edit the editor holds but has not reported yet (a source burst inside its coalescing
+   * window), so that it reports it through {@link DocumentSync.edited} before this returns. The
+   * watcher's check runs it before its clean/dirty decision and again after its awaited read, and
+   * Keep mine runs it before it serialises (DECISIONS #review-3-r0 S1): a reader that decides
+   * clean or dirty settles first (CLAUDE.md). Absent: the editor reports every edit at once.
+   */
+  settle?(): void;
 }
 
 export interface SyncOptions {
@@ -269,6 +278,7 @@ export function createDocumentSync(
     void serialised(async () => {
       // A later report scheduled its own check while this one waited behind a write.
       if (disposed || changeTimer !== null) return "clean";
+      callbacks.settle?.();
       let disk: string;
       try {
         disk = await io.read();
@@ -278,6 +288,9 @@ export function createDocumentSync(
         return "failed";
       }
       if (disposed) return "clean";
+      // An edit made during the read is pending again, and decides the outcome as much as one
+      // made before it (DECISIONS #review-2-r2 W1's shape).
+      callbacks.settle?.();
       if (disk === known) {
         holdStartedAt = null;
         return "clean";
@@ -323,7 +336,12 @@ export function createDocumentSync(
       if (disposed) return Promise.resolve<FlushResult>(dirty ? "failed" : "clean");
       conflict = false;
       clearSave();
-      return serialised(async () => (disposed ? "clean" : drain(await write())));
+      return serialised(async () => {
+        if (disposed) return "clean";
+        // The text typed inside the window is part of "mine".
+        callbacks.settle?.();
+        return drain(await write());
+      });
     },
     async reload() {
       if (disposed) return;

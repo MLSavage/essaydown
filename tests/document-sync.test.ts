@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Root } from "mdast";
 import { rewriteAssetUrls } from "../packages/core/src/assets.js";
+import { format } from "../packages/core/src/format.js";
+import { parse } from "../packages/core/src/parse.js";
+import { candidatesOf, emptySidecar, parseSidecar, type Sidecar } from "../packages/core/src/sidecar.js";
+import { bindCodeMirror, type BoundSourceView, type DocumentStore, type SourceBinding } from "../packages/editor/src/index.js";
+import { decideClose } from "../apps/desktop/src/workspace/close-guard.js";
+import { createPaneSync, loadDocument, storeFor, type PaneSync } from "../apps/desktop/src/workspace/DocumentPane.js";
+import { sidecarPathFor } from "../apps/desktop/src/workspace/paths.js";
 import {
   createDocumentSync,
   DEFAULT_SYNC_OPTIONS,
@@ -861,5 +869,295 @@ describe("a barrier drains an edit made during its write", () => {
     expect(h.writes).toEqual(["first\n"]);
     expect(h.reads).toBe(1);
     expect(h.sync.dirty).toBe(false);
+  });
+});
+
+// Task 3.24 (DECISIONS #review-3-r0 S1, S3; Sol r0 findings 1 and 3): the pane's own save path —
+// `createPaneSync` out of DocumentPane.tsx, over a real document store and a source binding — with
+// Tauri's `invoke` mocked as a map of files. `type` is CodeMirror's update listener (the burst is
+// pending in the binding until its window ends); `reloaded` swaps the store the way the pane's
+// effects do: the old store's subscriber goes first, then the old binding's `destroy` flushes into
+// the discarded store, then the new store is subscribed and bound.
+
+const ipc = vi.hoisted(() => ({
+  files: new Map<string, string>(),
+  /** A command held until its gate is released; consumed by the first call. */
+  holds: new Map<string, Promise<void>>(),
+}));
+
+// By path: `@tauri-apps/api` is the desktop app's dependency, so a bare specifier from tests/ names
+// another module id than the one DocumentPane.tsx imports, and the mock would not apply.
+vi.mock("../apps/desktop/node_modules/@tauri-apps/api/core.js", () => ({
+  invoke: async (command: string, args: { path?: string; contents?: string }) => {
+    const hold = ipc.holds.get(command);
+    if (hold !== undefined) {
+      ipc.holds.delete(command);
+      await hold;
+    }
+    const path = args.path ?? "";
+    switch (command) {
+      case "read_doc": {
+        const text = ipc.files.get(path);
+        if (text === undefined) throw new Error(`not found: ${path}`);
+        return text;
+      }
+      case "read_sidecar":
+        return ipc.files.get(path) ?? null;
+      case "write_doc":
+      case "write_sidecar":
+        ipc.files.set(path, args.contents ?? "");
+        return null;
+      default:
+        throw new Error(`unexpected command ${command}`);
+    }
+  },
+}));
+vi.mock("../apps/desktop/node_modules/@tauri-apps/api/event.js", () => ({ listen: async () => () => {} }));
+
+const DOC = "essay.md";
+const SIDECAR = sidecarPathFor(DOC);
+const { coalesceWindowMs } = storeFor("", emptySidecar()).getState().stack;
+
+/** A CodeMirror view as `bindCodeMirror` reads it: the buffer's text, replaced whole. */
+class Buffer {
+  text = "";
+  readonly view: BoundSourceView = {
+    get state() {
+      return { doc: { toString: () => buffer.text, length: buffer.text.length } } as unknown as BoundSourceView["state"];
+    },
+    dispatch: (spec) => {
+      const changes = spec.changes as { insert: string };
+      this.text = changes.insert;
+    },
+  };
+}
+let buffer = new Buffer();
+
+interface Pane {
+  readonly sync: PaneSync;
+  store(): DocumentStore;
+  /** The source view's buffer. */
+  buffer(): string;
+  /** Type into the source view: the binding records a burst it commits a window later. */
+  type(text: string): void;
+  banner: boolean;
+  reloads: number;
+  errors: string[];
+}
+
+async function openPane(text: string, sidecarRaw: string | null = null): Promise<Pane> {
+  ipc.files.clear();
+  ipc.holds.clear();
+  ipc.files.set(DOC, text);
+  if (sidecarRaw !== null) ipc.files.set(SIDECAR, sidecarRaw);
+  const initial = await loadDocument(DOC);
+  buffer = new Buffer();
+  let store = storeFor(initial.text, initial.sidecar);
+  let path = DOC;
+  let unsubscribe: () => void = () => {};
+  let binding: SourceBinding | null = null;
+  const mount = (): void => {
+    unsubscribe = store.subscribe((state, previous) => pane.sync.storeChanged(state, previous));
+    binding = bindCodeMirror(store, buffer.view);
+  };
+  const pane: Pane = {
+    sync: createPaneSync(initial, {
+      store: () => store,
+      path: () => path,
+      moved: (next) => {
+        path = next;
+      },
+      replaced: (next) => {
+        unsubscribe();
+        binding?.destroy();
+        store = next;
+        pane.reloads += 1;
+        mount();
+      },
+      banner: (shown) => {
+        pane.banner = shown;
+      },
+      knownChanged: () => {},
+      error: (message) => pane.errors.push(message),
+    }),
+    store: () => store,
+    buffer: () => buffer.text,
+    type(next) {
+      buffer.text = next;
+      binding?.change(next);
+    },
+    banner: false,
+    reloads: 0,
+    errors: [],
+  };
+  mount();
+  return pane;
+}
+
+const textOf = (pane: Pane): string => format(pane.store().getState().document.root);
+
+describe("the watcher settles a pending source burst (S1, through the pane)", () => {
+  it("guard 1: an external change inside the source window after typing → the banner, and the buffer and the store keep LOCAL", async () => {
+    const pane = await openPane("Alpha.\n");
+    pane.type("Alpha.LOCAL\n");
+    ipc.files.set(DOC, "Alpha.\n\nExternal.\n");
+    pane.sync.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    // Still inside the window: only the check's own settle can have committed the burst.
+    expect(quietMs).toBeLessThan(coalesceWindowMs);
+    expect(pane.banner).toBe(true);
+    expect(pane.reloads).toBe(0);
+    expect(pane.buffer()).toBe("Alpha.LOCAL\n");
+    expect(textOf(pane)).toBe("Alpha.LOCAL\n");
+    expect(pane.sync.sync.dirty).toBe(true);
+    // Nothing was written over the other writer's text.
+    await vi.advanceTimersByTimeAsync(coalesceWindowMs + saveDelayMs);
+    expect(ipc.files.get(DOC)).toBe("Alpha.\n\nExternal.\n");
+  });
+
+  it("guard 2: the typing lands during the watcher's awaited read → the banner, and the buffer and the store keep LOCAL", async () => {
+    const pane = await openPane("Alpha.\n");
+    ipc.files.set(DOC, "Alpha.\n\nExternal.\n");
+    let release: () => void = () => {};
+    ipc.holds.set("read_doc", new Promise<void>((resolve) => (release = resolve)));
+    pane.sync.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    // The check is waiting on its read; nothing was pending when it started.
+    expect(ipc.holds.has("read_doc")).toBe(false);
+    pane.type("Alpha.LOCAL\n");
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pane.banner).toBe(true);
+    expect(pane.reloads).toBe(0);
+    expect(pane.buffer()).toBe("Alpha.LOCAL\n");
+    expect(textOf(pane)).toBe("Alpha.LOCAL\n");
+  });
+
+  it("guard 3: Keep mine inside the window → the disk holds the pending text", async () => {
+    const pane = await openPane("Alpha.\n");
+    pane.type("Alpha.ONE\n");
+    ipc.files.set(DOC, "Alpha.\n\nExternal.\n");
+    pane.sync.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    expect(pane.banner).toBe(true);
+    pane.type("Alpha.ONE TWO\n");
+    const result = await pane.sync.sync.keepMine();
+    expect(result).toBe("saved");
+    expect(ipc.files.get(DOC)).toBe("Alpha.ONE TWO\n");
+    expect(pane.sync.sync.dirty).toBe(false);
+  });
+
+  it("guard 4 (absence): no pending burst → the external change reloads silently, as before", async () => {
+    const pane = await openPane("Alpha.\n");
+    ipc.files.set(DOC, "Alpha.\n\nExternal.\n");
+    pane.sync.sync.changed();
+    await vi.advanceTimersByTimeAsync(quietMs);
+    expect(pane.banner).toBe(false);
+    expect(pane.reloads).toBe(1);
+    expect(textOf(pane)).toBe("Alpha.\n\nExternal.\n");
+    expect(pane.buffer()).toBe("Alpha.\n\nExternal.\n");
+    expect(pane.sync.sync.dirty).toBe(false);
+  });
+});
+
+const WRITTEN_SIDECAR = `${JSON.stringify(emptySidecar(), null, 2)}\n`;
+const VARIANT = { text: "Alpha, once more.", createdAt: "2026-10-06T00:00:00.000Z" };
+
+/** Type `Alpha. Beta.` and add one Rewrite variant on its first sentence, as two store commits. */
+function editWithVariant(pane: Pane): void {
+  const state = pane.store().getState();
+  const root: Root = parse("Alpha. Beta.\n");
+  state.commit(root, state.document.sidecar);
+  const candidate = candidatesOf(root).find((one) => one.kind === "sentence");
+  if (candidate === undefined) throw new Error("no sentence candidate");
+  const anchor = {
+    kind: candidate.kind,
+    hash: candidate.hash,
+    occurrence: candidate.occurrence,
+    text: candidate.text,
+    sectionHash: candidate.sectionHash,
+    blockHash: candidate.blockHash,
+    depth: candidate.depth,
+    pos: [...candidate.pos],
+  };
+  pane.store().getState().dispatch((document) => ({
+    root: document.root,
+    sidecar: { ...document.sidecar, rewrites: [{ anchor, variants: [VARIANT], chosen: null, history: [] }] },
+  }));
+}
+
+const variantsOf = (sidecar: Sidecar): string[] => sidecar.rewrites.flatMap((entry) => entry.variants.map((v) => v.text));
+
+describe("a sidecar that was not written is a failed save (S3, through the pane)", () => {
+  async function broken(): Promise<Pane> {
+    const pane = await openPane("Alpha.\n", WRITTEN_SIDECAR);
+    editWithVariant(pane);
+    ipc.files.set(SIDECAR, "{broken");
+    return pane;
+  }
+
+  it("guard 5: a malformed disk sidecar and an in-memory variant → flush is failed, the Markdown is written, the variant retained", async () => {
+    const pane = await broken();
+    const store = pane.store();
+    expect(await pane.sync.flush()).toBe("failed");
+    expect(ipc.files.get(DOC)).toBe("Alpha. Beta.\n");
+    expect(ipc.files.get(SIDECAR)).toBe("{broken");
+    expect(pane.sync.sync.dirty).toBe(true);
+    expect(pane.store()).toBe(store);
+    expect(variantsOf(store.getState().document.sidecar)).toEqual([VARIANT.text]);
+    expect(pane.errors.at(-1)).toContain(`${SIDECAR} was not saved`);
+    // The Markdown baseline is the written text: the next save finds no other writer.
+    expect(pane.banner).toBe(false);
+    expect(await pane.sync.flush()).toBe("failed");
+    expect(pane.banner).toBe(false);
+  });
+
+  it("guard 6a: a switch stays on the document — the flush it awaits is failed, and the store keeps the variant", async () => {
+    const pane = await broken();
+    const store = pane.store();
+    // App.tsx's `openFile` proceeds only on `clean` or `saved` (its private `switchWaits`).
+    const result = await pane.sync.flush();
+    expect(["clean", "saved"]).not.toContain(result);
+    expect(pane.store()).toBe(store);
+    expect(variantsOf(pane.store().getState().document.sidecar)).toEqual([VARIANT.text]);
+  });
+
+  it("guard 6b: a close stays on the document — decideClose of the flush is stay", async () => {
+    const pane = await broken();
+    expect(decideClose(await pane.sync.flush())).toEqual({
+      action: "stay",
+      waits: "Not closed: this document is not saved yet.",
+    });
+    expect(variantsOf(pane.store().getState().document.sidecar)).toEqual([VARIANT.text]);
+  });
+
+  it("guard 6c: a rename stays on the document — nothing moves, and the outcome is failed", async () => {
+    const pane = await broken();
+    const move = vi.fn(async () => {});
+    expect(await pane.sync.rename("renamed.md", move)).toEqual({ moved: false, result: "failed" });
+    expect(move).not.toHaveBeenCalled();
+    expect(ipc.files.has(DOC)).toBe(true);
+    expect(variantsOf(pane.store().getState().document.sidecar)).toEqual([VARIANT.text]);
+  });
+
+  it("guard 7: after the sidecar is repaired on disk the next save writes it, and the variant survives a reload", async () => {
+    const pane = await broken();
+    expect(await pane.sync.flush()).toBe("failed");
+    ipc.files.set(SIDECAR, WRITTEN_SIDECAR);
+    expect(await pane.sync.flush()).toBe("saved");
+    expect(pane.sync.sync.dirty).toBe(false);
+    expect(variantsOf(parseSidecar(JSON.parse(ipc.files.get(SIDECAR) ?? "null")))).toEqual([VARIANT.text]);
+    const reloaded = await loadDocument(DOC);
+    expect(reloaded.text).toBe("Alpha. Beta.\n");
+    expect(variantsOf(storeFor(reloaded.text, reloaded.sidecar).getState().document.sidecar)).toEqual([VARIANT.text]);
+  });
+
+  it("guard 8 (absence): a well-formed disk sidecar → flush is saved, with the variant on disk", async () => {
+    const pane = await openPane("Alpha.\n", WRITTEN_SIDECAR);
+    editWithVariant(pane);
+    expect(await pane.sync.flush()).toBe("saved");
+    expect(ipc.files.get(DOC)).toBe("Alpha. Beta.\n");
+    expect(variantsOf(parseSidecar(JSON.parse(ipc.files.get(SIDECAR) ?? "null")))).toEqual([VARIANT.text]);
+    expect(pane.errors).toEqual([]);
   });
 });

@@ -21,6 +21,7 @@ import {
   toggleMode,
   togglePlugins,
   type DocumentStore,
+  type DocumentStoreState,
   type EditorMode,
   type SourceBinding,
   type SourcePosition,
@@ -73,7 +74,7 @@ export async function loadDocument(path: string): Promise<LoadedDocument> {
 /** The one-line §6.1 banner text. */
 export const NON_CANONICAL_MESSAGE = "This file will be saved in Essay Down's Markdown style";
 
-function storeFor(text: string, sidecar: Sidecar): DocumentStore {
+export function storeFor(text: string, sidecar: Sidecar): DocumentStore {
   const root = parse(text);
   return createDocumentStore(root, attach(sidecar, root).sidecar);
 }
@@ -125,6 +126,137 @@ function describe(error: unknown): string {
   return String(error);
 }
 
+/** What {@link createPaneSync} reads and drives in the pane; every member is called at call time. */
+export interface PaneSyncHost {
+  /** The pane's store: a reload replaces it. */
+  store(): DocumentStore;
+  /** The document's workspace-relative path: a rename moves it. */
+  path(): string;
+  /** A rename's move landed at `path`. */
+  moved(path: string): void;
+  /** A reload's new store. */
+  replaced(store: DocumentStore): void;
+  /** Show or hide the 'Changed on disk' banner. */
+  banner(shown: boolean): void;
+  /** The text the pane believes is on disk moved (document-sync.ts `knownChanged`). */
+  knownChanged(text: string): void;
+  error(message: string): void;
+}
+
+/** The pane's sync and its handle, wired to a {@link PaneSyncHost} (one per `initial`). */
+export interface PaneSync extends DocumentPaneHandle {
+  readonly sync: DocumentSync;
+  /** The store's subscriber: a snapshot change is an edit; a caret move or an adopted sidecar is not. */
+  storeChanged(state: DocumentStoreState, previous: DocumentStoreState): void;
+}
+
+/**
+ * The open document's save path (task 2.5): `document-sync.ts` over `read_doc`, `write_doc` and the
+ * sidecar's re-read and write, and the handle's `flush` and `rename`. Out of the component so a
+ * vitest drives the production sequence through the pane (tests/document-sync.test.ts).
+ *
+ * **Settled before deciding** (DECISIONS #review-3-r0 S1). The sync's `settle` is the store's: the
+ * watcher's check and Keep mine commit a source burst still inside its window before they decide or
+ * serialise, and the commit reports itself through {@link PaneSync.storeChanged} synchronously, so
+ * the decision sees the document dirty.
+ *
+ * **A sidecar not written is a failed save** (DECISIONS #review-3-r0 S3). A disk sidecar that does
+ * not parse is never overwritten (DECISIONS #review-2-r0 U5), so the save's sidecar half is a
+ * `MarkdownWritten` failure naming the sidecar: the Markdown baseline stays the written text, the
+ * document stays dirty and `flush` is `failed`, so no caller drops the in-memory sidecar.
+ */
+export function createPaneSync(initial: LoadedDocument, host: PaneSyncHost): PaneSync {
+  // Set only while a save adopts the disk's sidecar into the store: external state, not an edit,
+  // so `storeChanged` must not schedule another save for it.
+  let adopting = false;
+  // The sidecar's raw JSON text as this pane last read or wrote it (tasks 2.19, 2.23), reset on
+  // every reload of this document (a new `initial`). Since task 3.2 the parsed half is the
+  // store's: the Outline edits questions through it, so the store's present sidecar is every
+  // write's source, and a sidecar adopted from the disk is put back into it in the same step as
+  // the raw text moves (docs/V1.1-BACKLOG.md `[review-2-r1, sidecar baseline vs store]`).
+  const baseline = createSidecarBaseline(initial.sidecarRaw, {
+    current: () => host.store().getState().document.sidecar,
+    adopt: (sidecar) => {
+      adopting = true;
+      try {
+        host.store().getState().adoptSidecar(sidecar);
+      } finally {
+        adopting = false;
+      }
+    },
+  });
+  const sync = createDocumentSync(
+    initial.text,
+    {
+      read: () => invoke<string>("read_doc", { path: host.path() }),
+      write: async (text) => {
+        // The same synchronous step as `serialize` (document-sync.ts): the root and the sidecar
+        // are read from the state `text` was serialised from, before the first `await`.
+        const at = host.path();
+        const { root, sidecar } = host.store().getState().document;
+        await invoke("write_doc", { path: at, contents: text });
+        // From here the Markdown is on disk, so a failure is the sidecar's alone and is reported
+        // apart from it (`MarkdownWritten`; backlog `[review-2-r2, sidecar failure after a
+        // Markdown write]`).
+        try {
+          const sidecarPath = sidecarPathFor(at);
+          // Re-read before writing: `watch.rs` reports `.md` paths only, so a sidecar-only change
+          // by another writer is never seen except here (DECISIONS #review-2-r0 U5).
+          const diskRaw = await invoke<string | null>("read_sidecar", { path: sidecarPath });
+          const choice = baseline.choose(diskRaw, root, sidecar);
+          if (choice.action === "skip") {
+            throw new Error(`${sidecarPath} was not saved: ${describe(choice.error)}`);
+          }
+          const raw = `${JSON.stringify(choice.sidecar, null, 2)}\n`;
+          await invoke("write_sidecar", { path: sidecarPath, contents: raw });
+          baseline.wrote(raw, choice);
+        } catch (error) {
+          throw new MarkdownWritten(error);
+        }
+      },
+    },
+    {
+      serialize: () => format(host.store().getState().document.root),
+      reloaded: (text) => {
+        host.replaced(storeFor(text, host.store().getState().document.sidecar));
+        host.banner(false);
+      },
+      conflicted: () => host.banner(true),
+      knownChanged: (text) => host.knownChanged(text),
+      failed: (error) => host.error(describe(error)),
+      settle: () => host.store().getState().settle(),
+    },
+    {
+      setTimeout: (callback, ms) => globalThis.setTimeout(callback, ms),
+      clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+      now: () => Date.now(),
+    },
+  );
+  return {
+    sync,
+    storeChanged(state, previous) {
+      if (state.document !== previous.document && !adopting) sync.edited();
+    },
+    flush: () => {
+      // A source burst still inside its window is an edit the save must carry (task 3.19).
+      host.store().getState().settle();
+      return sync.flush();
+    },
+    rename: (newPath, move) => {
+      host.store().getState().settle();
+      const oldStem = stemOf(host.path());
+      const newStem = stemOf(newPath);
+      return sync.renamed(
+        (text) => rewriteAssetUrls(text, oldStem, newStem),
+        async () => {
+          await move();
+          host.moved(newPath);
+        },
+      );
+    },
+  };
+}
+
 /**
  * The open document (task 2.5): the rendered editor over a document store, autosaved through
  * `document-sync.ts`, reloaded on `fs:changed` for its own path, with the 'Changed on disk' banner
@@ -142,7 +274,8 @@ function describe(error: unknown): string {
  *
  * **Readers of the store.** The source view commits at the end of a burst, so a reader that is not
  * an editing surface settles the pending burst first: the handle's `flush` and `rename` call the
- * store's `settle()`, as do the test hook's readers, and the store's own `dispatch`/`undo`/`redo`
+ * store's `settle()`, as do the watcher's check and Keep mine (through the sync's `settle`,
+ * {@link createPaneSync}) and the test hook's readers, and the store's own `dispatch`/`undo`/`redo`
  * settle before they move (DECISIONS #054's one seam). The autosave's `serialize` does not: it runs
  * inside the sync's own chain, and a burst it misses is committed by the source view's timer within
  * a window, which marks the document edited and schedules the save that carries it.
@@ -205,81 +338,29 @@ export default function DocumentPane({
   const [conflict, setConflict] = useState(false);
   const [reloads, setReloads] = useState(0);
   const [nonCanonical, setNonCanonical] = useState(() => format(parse(initial.text)) !== initial.text);
-  const syncRef = useRef<DocumentSync | null>(null);
-  // Set only while a save adopts the disk's sidecar into the store: external state, not an edit,
-  // so the subscriber below must not schedule another save for it.
-  const adopting = useRef(false);
+  const paneSyncRef = useRef<PaneSync | null>(null);
 
   useEffect(() => {
-    // The sidecar's raw JSON text as this pane last read or wrote it (tasks 2.19, 2.23), reset on
-    // every reload of this document (a new `initial`). Since task 3.2 the parsed half is the
-    // store's: the Outline edits questions through it, so the store's present sidecar is every
-    // write's source, and a sidecar adopted from the disk is put back into it in the same step as
-    // the raw text moves (docs/V1.1-BACKLOG.md `[review-2-r1, sidecar baseline vs store]`).
-    const baseline = createSidecarBaseline(initial.sidecarRaw, {
-      current: () => storeRef.current.getState().document.sidecar,
-      adopt: (sidecar) => {
-        adopting.current = true;
-        try {
-          storeRef.current.getState().adoptSidecar(sidecar);
-        } finally {
-          adopting.current = false;
-        }
+    const paneSync = createPaneSync(initial, {
+      store: () => storeRef.current,
+      path: () => pathRef.current,
+      moved: (next) => {
+        pathRef.current = next;
       },
+      replaced: (next) => {
+        setStore(next);
+        setReloads((n) => n + 1);
+      },
+      banner: setConflict,
+      knownChanged: (text) => {
+        setKnown(text);
+        // Written in canonical form: the §6.1 banner has said what it had to say.
+        if (format(parse(text)) === text) setNonCanonical(false);
+      },
+      error: (message) => errorRef.current(message),
     });
-    const sync = createDocumentSync(
-      initial.text,
-      {
-        read: () => invoke<string>("read_doc", { path: pathRef.current }),
-        write: async (text) => {
-          // The same synchronous step as `serialize` (document-sync.ts): the root and the sidecar
-          // are read from the state `text` was serialised from, before the first `await`.
-          const at = pathRef.current;
-          const { root, sidecar } = storeRef.current.getState().document;
-          await invoke("write_doc", { path: at, contents: text });
-          // From here the Markdown is on disk, so a failure is the sidecar's alone and is reported
-          // apart from it (`MarkdownWritten`; backlog `[review-2-r2, sidecar failure after a
-          // Markdown write]`).
-          try {
-            const sidecarPath = sidecarPathFor(at);
-            // Re-read before writing: `watch.rs` reports `.md` paths only, so a sidecar-only change
-            // by another writer is never seen except here (DECISIONS #review-2-r0 U5).
-            const diskRaw = await invoke<string | null>("read_sidecar", { path: sidecarPath });
-            const choice = baseline.choose(diskRaw, root, sidecar);
-            if (choice.action === "skip") {
-              errorRef.current(describe(choice.error));
-              return;
-            }
-            const raw = `${JSON.stringify(choice.sidecar, null, 2)}\n`;
-            await invoke("write_sidecar", { path: sidecarPath, contents: raw });
-            baseline.wrote(raw, choice);
-          } catch (error) {
-            throw new MarkdownWritten(error);
-          }
-        },
-      },
-      {
-        serialize: () => format(storeRef.current.getState().document.root),
-        reloaded: (text) => {
-          setStore(storeFor(text, storeRef.current.getState().document.sidecar));
-          setConflict(false);
-          setReloads((n) => n + 1);
-        },
-        conflicted: () => setConflict(true),
-        knownChanged: (text) => {
-          setKnown(text);
-          // Written in canonical form: the §6.1 banner has said what it had to say.
-          if (format(parse(text)) === text) setNonCanonical(false);
-        },
-        failed: (error) => errorRef.current(describe(error)),
-      },
-      {
-        setTimeout: (callback, ms) => window.setTimeout(callback, ms),
-        clearTimeout: (handle) => window.clearTimeout(handle as number),
-        now: () => Date.now(),
-      },
-    );
-    syncRef.current = sync;
+    const { sync } = paneSync;
+    paneSyncRef.current = paneSync;
     let unlisten: (() => void) | null = null;
     let disposed = false;
     void listen<{ path: string }>("fs:changed", (event) => {
@@ -292,19 +373,13 @@ export default function DocumentPane({
       disposed = true;
       unlisten?.();
       sync.dispose();
-      syncRef.current = null;
+      paneSyncRef.current = null;
     };
   }, [initial]);
 
   // A snapshot change only: the store also notifies when the caret moves (`cursor`), which is not
   // an edit and must not schedule a save.
-  useEffect(
-    () =>
-      store.subscribe((state, previous) => {
-        if (state.document !== previous.document && !adopting.current) syncRef.current?.edited();
-      }),
-    [store],
-  );
+  useEffect(() => store.subscribe((state, previous) => paneSyncRef.current?.storeChanged(state, previous)), [store]);
 
   // The Outline's views live outside the pane (task 3.2) and edit this store too.
   const storeListener = useRef(onStore);
@@ -325,25 +400,9 @@ export default function DocumentPane({
   useImperativeHandle(
     ref,
     () => ({
-      flush: async () => {
-        // A source burst still inside its window is an edit the save must carry (task 3.19).
-        storeRef.current.getState().settle();
-        return (await syncRef.current?.flush()) ?? "clean";
-      },
-      rename: async (newPath, move) => {
-        storeRef.current.getState().settle();
-        const sync = syncRef.current;
-        if (sync === null) return { moved: false, result: "failed" };
-        const oldStem = stemOf(pathRef.current);
-        const newStem = stemOf(newPath);
-        return sync.renamed(
-          (text) => rewriteAssetUrls(text, oldStem, newStem),
-          async () => {
-            await move();
-            pathRef.current = newPath;
-          },
-        );
-      },
+      flush: async () => (await paneSyncRef.current?.flush()) ?? "clean",
+      rename: async (newPath, move) =>
+        (await paneSyncRef.current?.rename(newPath, move)) ?? { moved: false, result: "failed" },
     }),
     [],
   );
@@ -519,7 +578,7 @@ export default function DocumentPane({
             type="button"
             data-testid="conflict-reload"
             onClick={() => {
-              void syncRef.current?.reload();
+              void paneSyncRef.current?.sync.reload();
             }}
           >
             Reload
@@ -528,8 +587,8 @@ export default function DocumentPane({
             type="button"
             data-testid="conflict-keep-mine"
             onClick={() => {
-              void syncRef.current?.keepMine().then(() => {
-                if (syncRef.current?.conflict === false) setConflict(false);
+              void paneSyncRef.current?.sync.keepMine().then(() => {
+                if (paneSyncRef.current?.sync.conflict === false) setConflict(false);
               });
             }}
           >
