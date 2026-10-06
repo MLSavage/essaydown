@@ -505,6 +505,17 @@ export function refresh(sidecar: Sidecar, root: Root, options: SegmentOptions = 
   return attach(sidecar, root, options).sidecar;
 }
 
+/**
+ * `refresh`'s position resolution of `sidecar` against `root`, keeping `sidecar`'s own
+ * `title`/`topicQuestion` rather than `refresh`'s (`attach`'s) front-matter mirror: mirroring is
+ * the load-time half of §6.2, not something an in-app move should also perform as a side effect of
+ * resolving stale positions before it maps them.
+ */
+function refreshPositions(sidecar: Sidecar, root: Root, options: SegmentOptions): Sidecar {
+  const resolved = refresh(sidecar, root, options);
+  return { ...resolved, title: sidecar.title, topicQuestion: sidecar.topicQuestion };
+}
+
 // ---------------------------------------------------------------------------
 // In-app operations keep anchors on their logical item (§6.2, duplicate limit)
 // ---------------------------------------------------------------------------
@@ -580,7 +591,12 @@ export function applyReorderSentences(
   const at = (block as NonNullable<typeof block>).path[0];
 
   const sidecar = reanchor(
-    state.sidecar,
+    // `state.sidecar` is whatever the caller's last save or load produced; nothing refreshes it in
+    // between (the editor's commit carries the root alone), so its positions can be stale by
+    // however much the document moved since. Resolve against `state.root` — the document the
+    // permutation is about to apply to — before mapping, so `anchor.pos` names the item `order`
+    // actually means (DECISIONS #review-3-r0 S2).
+    refreshPositions(state.sidecar, state.root, options),
     root,
     (anchor) => {
       if (anchor.kind !== "sentence" || anchor.pos[0] !== at) return anchor.pos;
@@ -629,7 +645,9 @@ export function carryTopLevelMove(
   const root: Root = { ...moved, children };
 
   const sidecar = reanchor(
-    state.sidecar,
+    // Same staleness as `applyReorderSentences`: resolve against the pre-move document before the
+    // permutation, not the sidecar's possibly-stale positions (DECISIONS #review-3-r0 S2).
+    refreshPositions(state.sidecar, state.root, options),
     root,
     (anchor) => {
       const at = oldToNew.get(anchor.pos[0]);

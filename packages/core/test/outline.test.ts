@@ -317,3 +317,29 @@ describe("outlineDrop and applyOutlineDrop (the Outline drag)", () => {
     expect(dropsChecked).toBeGreaterThan(0);
   });
 });
+
+describe("applyOutlineDrop resolves a stale sidecar before mapping it (DECISIONS #review-3-r0 S2, task 3.22)", () => {
+  it("a heading inserted above keeps each heading question on its heading", () => {
+    const FLAT = "## A\n\na.\n\n## B\n\nb.\n\n## C\n\nc.\n";
+    let state = stateOf(FLAT);
+    state = applySetQuestion(state, 0, "Q-A");
+    state = applySetQuestion(state, 1, "Q-B");
+    state = applySetQuestion(state, 2, "Q-C");
+
+    // A new section typed above everything; the sidecar still carries the pre-insert positions.
+    const root: Root = {
+      ...state.root,
+      children: [...parse("## New\n\nIntro.\n").children, ...state.root.children],
+    };
+    const stale: DocumentState = { root, sidecar: state.sidecar };
+
+    // Drop C (now section index 3) onto A (now section index 1), landing before it.
+    const next = applyOutlineDrop(stale, 3, 1, false);
+    expect(next.sidecar.orphans).toEqual([]);
+    const questionFor = (text: string): string | undefined =>
+      next.sidecar.headings.find((entry) => entry.anchor.text === text)?.question;
+    expect(questionFor("A")).toBe("Q-A");
+    expect(questionFor("B")).toBe("Q-B");
+    expect(questionFor("C")).toBe("Q-C");
+  });
+});

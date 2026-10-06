@@ -1,10 +1,13 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { Root, Yaml } from "mdast";
+import type { Paragraph, Root, Yaml } from "mdast";
 import { blocksOf } from "../src/blocks.js";
 import { format } from "../src/format.js";
 import { parse } from "../src/parse.js";
-import { reorderSentences } from "../src/sentences.js";
+import { reorderSentences, sentencesOf } from "../src/sentences.js";
 import {
+  applyMoveBlock,
   applyMoveSection,
   applyReorderSentences,
   attach,
@@ -24,6 +27,14 @@ import {
   type FrontMatterField,
   type Sidecar,
 } from "../src/sidecar.js";
+
+const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
+const FIXTURE_INDEX = JSON.parse(readFileSync(`${FIXTURES}/index.json`, "utf8")) as Record<
+  string,
+  unknown
+>;
+const FIXTURE_NAMES = Object.keys(FIXTURE_INDEX).sort();
+const fixture = (name: string): string => readFileSync(`${FIXTURES}/${name}`, "utf8");
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -655,6 +666,159 @@ describe("two identical H2 headings", () => {
 });
 
 // ---------------------------------------------------------------------------
+// reanchor resolves a stale sidecar before mapping it (DECISIONS #review-3-r0 S2, task 3.22)
+// ---------------------------------------------------------------------------
+
+/** One top-level paragraph prepended to `root`, after any front matter (never before it). */
+function prependParagraph(root: Root, markdown: string): Root {
+  const probe = parse(markdown).children;
+  const at = root.children[0]?.type === "yaml" ? 1 : 0;
+  return { ...root, children: [...root.children.slice(0, at), ...probe, ...root.children.slice(at)] };
+}
+
+describe("reanchor resolves a stale sidecar before mapping it (DECISIONS #review-3-r0 S2)", () => {
+  it("a sentence reorder after a sentence typed before the variant's paragraph keeps the variant on its own text", () => {
+    const seed = parse("Alpha here. Beta here.\n");
+    const sidecar = parseSidecar({
+      version: 1,
+      rewrites: [rewriteFor(seed, "Beta here.", "Beta's variant")],
+    });
+    // The editor's commit carries the root alone; nothing refreshed the sidecar after the typing.
+    const typed = parse("New first. Alpha here. Beta here.\n");
+    const next = applyReorderSentences({ root: typed, sidecar }, paragraphId(typed), [0, 2, 1]);
+
+    expect(format(next.root)).toBe("New first. Beta here. Alpha here.\n");
+    expect(next.sidecar.orphans).toEqual([]);
+    const entry = next.sidecar.rewrites[0];
+    expect(entry.anchor.text).toBe("Beta here.");
+    expect(sentencesOf(next.root.children[0] as Paragraph)[entry.anchor.pos[1]].text).toBe(
+      "Beta here.",
+    );
+  });
+
+  it("applyMoveBlock after an inserted paragraph keeps the variant on Beta's paragraph", () => {
+    const seed = parse("Alpha paragraph.\n\nBeta paragraph.\n");
+    const sidecar = parseSidecar({
+      version: 1,
+      rewrites: [rewriteFor(seed, "Beta paragraph.", "Beta's variant")],
+    });
+    // An introductory paragraph typed above both; the sidecar still carries `seed`'s positions.
+    const typed = parse("Intro paragraph.\n\nAlpha paragraph.\n\nBeta paragraph.\n");
+    const next = applyMoveBlock({ root: typed, sidecar }, 2, 1);
+
+    expect(format(next.root)).toBe("Intro paragraph.\n\nBeta paragraph.\n\nAlpha paragraph.\n");
+    expect(next.sidecar.orphans).toEqual([]);
+    expect(next.sidecar.rewrites[0].anchor.text).toBe("Beta paragraph.");
+    expect(next.sidecar.rewrites[0].anchor.pos[0]).toBe(1);
+  });
+
+  it("applyMoveSection after a heading inserted above keeps each heading question on its heading", () => {
+    const seed = parse("## A\n\na.\n\n## B\n\nb.\n\n## C\n\nc.\n");
+    const sidecar = parseSidecar({
+      version: 1,
+      headings: [
+        { anchor: anchorFor(seed, "heading", (text) => text === "A"), question: "Q-A" },
+        { anchor: anchorFor(seed, "heading", (text) => text === "B"), question: "Q-B" },
+        { anchor: anchorFor(seed, "heading", (text) => text === "C"), question: "Q-C" },
+      ],
+    });
+    // A new section typed above everything; the sidecar still carries `seed`'s positions.
+    const typed = parse("## New\n\nIntro text.\n\n## A\n\na.\n\n## B\n\nb.\n\n## C\n\nc.\n");
+
+    const next = applyMoveSection({ root: typed, sidecar }, 3, 1);
+
+    expect(next.sidecar.orphans).toEqual([]);
+    const questionFor = (text: string): string | undefined =>
+      next.sidecar.headings.find((entry) => entry.anchor.text === text)?.question;
+    expect(questionFor("A")).toBe("Q-A");
+    expect(questionFor("B")).toBe("Q-B");
+    expect(questionFor("C")).toBe("Q-C");
+  });
+
+  it("duplicate sentence text in two paragraphs: the move keeps the variant on the one that has it", () => {
+    const DOC = "Intro paragraph.\n\nSame line here.\n\nFiller paragraph.\n\nSame line here.\n";
+    const seed = parse(DOC);
+    const twins = candidatesOf(seed).filter(
+      (candidate) => candidate.kind === "sentence" && candidate.text === "Same line here.",
+    );
+    expect(twins).toHaveLength(2);
+    const sidecar = parseSidecar({
+      version: 1,
+      rewrites: [
+        {
+          anchor: twins[1],
+          variants: [{ text: "variant for the second one", createdAt: AT }],
+        },
+      ],
+    });
+    // A paragraph typed above everything; the sidecar unrefreshed.
+    const typed = parse(`New first paragraph.\n\n${DOC}`);
+    const next = applyMoveBlock({ root: typed, sidecar }, 4, 1);
+
+    expect(format(next.root)).toBe(
+      "New first paragraph.\n\nSame line here.\n\nIntro paragraph.\n\nSame line here.\n\nFiller paragraph.\n",
+    );
+    expect(next.sidecar.orphans).toEqual([]);
+    expect(next.sidecar.rewrites).toHaveLength(1);
+    expect(variantAt(next.sidecar, [1, 0])).toBe("variant for the second one");
+    expect(variantAt(next.sidecar, [3, 0])).toBeUndefined();
+  });
+
+  it("after a move, the stored hash and text equal attach's for the intended item on the reloaded document", () => {
+    const seed = parse("Alpha here. Beta here.\n");
+    const sidecar = parseSidecar({
+      version: 1,
+      rewrites: [rewriteFor(seed, "Beta here.", "Beta's variant")],
+    });
+    const typed = parse("New first. Alpha here. Beta here.\n");
+    const next = applyReorderSentences({ root: typed, sidecar }, paragraphId(typed), [0, 2, 1]);
+
+    // Simulate a save and reload: attach the moved sidecar to its own re-parsed document.
+    const reloaded = attach(next.sidecar, parse(format(next.root)));
+    expect(reloaded.resolutions.map((one) => one.step)).toEqual([1]);
+    const expected = anchorFor(next.root, "sentence", (text) => text === "Beta here.");
+    const entry = reloaded.sidecar.rewrites[0];
+    expect(entry.anchor.hash).toBe(expected.hash);
+    expect(entry.anchor.text).toBe(expected.text);
+  });
+
+  it("the identity permutation re-serialises every fixture byte-identically and matches refresh, sidecar positions stale by one inserted paragraph", () => {
+    let fixturesChecked = 0;
+    for (const name of FIXTURE_NAMES) {
+      const original = parse(fixture(name));
+      const firstSentence = candidatesOf(original).find((candidate) => candidate.kind === "sentence");
+      if (firstSentence === undefined) continue;
+
+      const sidecar = parseSidecar({
+        version: 1,
+        rewrites: [{ anchor: firstSentence, variants: [{ text: "stand-in", createdAt: AT }] }],
+      });
+      // A paragraph typed above everything, never reflected in the sidecar.
+      const edited = prependParagraph(original, "Stale-position probe.\n");
+      const blockAt = firstSentence.pos[0] + 1;
+      const block = blocksOf(edited).find(
+        (candidate) => candidate.path.length === 1 && candidate.path[0] === blockAt,
+      );
+      if (block === undefined) continue;
+      const sentenceCount = sentencesOf(edited.children[blockAt] as Paragraph).length;
+      const identity = Array.from({ length: sentenceCount }, (_, index) => index);
+
+      const next = applyReorderSentences({ root: edited, sidecar }, block.contentId, identity);
+      expect(format(next.root)).toBe(format(edited));
+      // Position resolution matches `refresh`, except the front-matter mirror: that is `attach`'s
+      // load-time job, not a side effect of resolving stale positions before an in-app move.
+      expect(next.sidecar).toEqual({
+        ...refresh(sidecar, edited),
+        title: sidecar.title,
+        topicQuestion: sidecar.topicQuestion,
+      });
+      fixturesChecked += 1;
+    }
+    expect(fixturesChecked).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // front matter (§6.1)
 // ---------------------------------------------------------------------------
 
@@ -956,24 +1120,27 @@ describe("resolution edges", () => {
 });
 
 describe("in-app operations orphan an anchor they cannot place", () => {
-  const stale = (root: Root, pos: number[]): Sidecar =>
-    parseSidecar({
+  // Since the fix for DECISIONS #review-3-r0 S2, a stale *position* with a valid hash no longer
+  // orphans: `applyReorderSentences`/`applyMoveSection` refresh against the pre-move document
+  // first, which finds the real item by hash regardless of what `pos` the entry carried. Only a
+  // genuine absence (the item itself is gone before the move) still orphans — see also guard 4's
+  // dedicated test above, "an entry whose sentence was deleted before the move is an orphan after
+  // it".
+
+  it("an entry whose sentence was deleted before the move is an orphan after it", () => {
+    const seed = parse(TWIN_SENTENCE_DOC);
+    const sidecar = parseSidecar({
       version: 1,
       rewrites: [
         {
-          anchor: { ...anchorFor(root, "sentence", (text) => text === TWIN_SENTENCE), pos },
+          anchor: anchorFor(seed, "sentence", (text) => text === TWIN_SENTENCE),
           variants: [{ text: "stranded", createdAt: AT }],
         },
       ],
     });
-
-  it("orphans a sentence anchor whose remembered index the reorder does not cover", () => {
-    const root = parse(TWIN_SENTENCE_DOC);
-    const next = applyReorderSentences(
-      { root, sidecar: stale(root, [1, 7]) },
-      paragraphId(root),
-      [1, 0, 2],
-    );
+    // Something that is not this app deleted both twins before the reorder ran.
+    const edited = parse("## Ink\n\nEverything else is the handle.\n");
+    const next = applyReorderSentences({ root: edited, sidecar }, paragraphId(edited), [0]);
     expect(next.sidecar.rewrites).toEqual([]);
     expect(next.sidecar.orphans).toHaveLength(1);
     const orphan = next.sidecar.orphans[0];
@@ -981,15 +1148,17 @@ describe("in-app operations orphan an anchor they cannot place", () => {
     expect(orphan.entry.variants[0].text).toBe("stranded");
   });
 
-  it("orphans an anchor whose remembered block the move does not cover", () => {
-    const root = parse(TWIN_HEADING_DOC);
+  it("orphans an anchor whose remembered heading was deleted before the move", () => {
+    const seed = parse(TWIN_HEADING_DOC);
     const sidecar = parseSidecar({
       version: 1,
-      headings: [
-        { anchor: { ...anchorFor(root, "heading", () => true), pos: [9] }, question: "Where?" },
-      ],
+      headings: [{ anchor: anchorFor(seed, "heading", () => true), question: "Where?" }],
     });
-    const next = applyMoveSection({ root, sidecar }, 1, 0);
+    // Both "Notes on nibs" sections are gone by the time the move runs.
+    const edited = parse(
+      "## Something else\n\nNothing about nibs here.\n\n## And another\n\nStill nothing.\n",
+    );
+    const next = applyMoveSection({ root: edited, sidecar }, 1, 0);
     expect(next.sidecar.headings).toEqual([]);
     expect(next.sidecar.orphans[0].list).toBe("headings");
   });
