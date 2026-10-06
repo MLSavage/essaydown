@@ -98,6 +98,22 @@ export interface DocumentStoreState {
   redo(): void;
   /** End the open coalescing group without pushing (§6.5's source/rendered toggle). */
   endCoalescing(): void;
+  /**
+   * Commit a source burst that is still only in the CodeMirror buffer (task 3.19; DECISIONS #054).
+   * The source view commits at the end of a burst (`bindCodeMirror`), so a reader or a writer that
+   * is not the source view itself would otherwise see — or write over — a snapshot that lags the
+   * buffer by up to one window (CLAUDE.md's stale-read rule). A no-op until a source binding has
+   * registered its flush through {@link registerSettle}, and again after that binding is destroyed.
+   * {@link dispatch}, {@link undo} and {@link redo} call it first, so a mode mutation lands on top
+   * of the typed text and an undo steps back over the burst rather than dropping it.
+   */
+  settle(): void;
+  /**
+   * Make `flush` what {@link settle} runs, and return the unregister. The unregister clears the seam
+   * only while it is still this registration's, so a binding destroyed after a newer one registered
+   * never disarms the newer one.
+   */
+  registerSettle(flush: () => void): () => void;
 }
 
 export type DocumentStore = StoreApi<DocumentStoreState>;
@@ -114,6 +130,9 @@ export function createDocumentStore(
   return createStore<DocumentStoreState>((set, get) => {
     const seed = createUndoStack(root, sidecar, options);
     const move = (next: UndoStack): void => set({ stack: next, document: current(next) });
+    /** The registered source binding's flush; see {@link DocumentStoreState.settle}. */
+    let settler: (() => void) | null = null;
+    const settle = (): void => settler?.();
     return {
       stack: seed,
       document: current(seed),
@@ -122,6 +141,7 @@ export function createDocumentStore(
         if (get().cursor !== position) set({ cursor: position });
       },
       dispatch: (mutation) => {
+        settle();
         const before = get().document;
         const after = mutation(before);
         if (after.root === before.root && after.sidecar === before.sidecar) return;
@@ -133,9 +153,22 @@ export function createDocumentStore(
       },
       commit: (nextRoot, nextSidecar, pushOptions) =>
         move(push(get().stack, nextRoot, nextSidecar, pushOptions)),
-      undo: () => move(undo(get().stack)),
-      redo: () => move(redo(get().stack)),
+      undo: () => {
+        settle();
+        move(undo(get().stack));
+      },
+      redo: () => {
+        settle();
+        move(redo(get().stack));
+      },
       endCoalescing: () => move(endCoalescing(get().stack)),
+      settle,
+      registerSettle: (flush) => {
+        settler = flush;
+        return () => {
+          if (settler === flush) settler = null;
+        };
+      },
     };
   });
 }

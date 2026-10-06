@@ -1315,6 +1315,9 @@ export function bindCodeMirror(
   const unsubscribe = store.subscribe((state) => {
     if (state.document.root !== shown) pull(state.document.root);
   });
+  // The store's `settle` seam (task 3.19): every outside writer and reader of the store commits
+  // this binding's pending burst first, through the one flush the toggle and the chords already use.
+  const unregister = store.getState().registerSettle(commitPending);
 
   return {
     change(text) {
@@ -1337,6 +1340,7 @@ export function bindCodeMirror(
     flush: commitPending,
     destroy() {
       commitPending();
+      unregister();
       unsubscribe();
     },
   };

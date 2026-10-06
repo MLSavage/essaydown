@@ -219,6 +219,16 @@ button:disabled {
   outline: none;
 }
 
+/* Task 3.19: the source view (PRD §146) takes the rendered view's place and layout rules — it is
+   the same `.document-editor` host, so Produce's 68ch column below applies to it unchanged. */
+.document-editor .cm-editor {
+  min-height: 60vh;
+}
+
+.document-editor .cm-editor.cm-focused {
+  outline: none;
+}
+
 /* Task 3.3: Produce mode (PRD §6.3) — the sidebar hidden, the editor narrowed and centred. */
 .app-shell[data-mode="produce"] .sidebar {
   display: none;

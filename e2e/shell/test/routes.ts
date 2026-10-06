@@ -39,8 +39,16 @@ export async function reloadPage(): Promise<void> {
  * as the provider's own element click does after `el.click()`. */
 export async function clickCentreOf(selector: string): Promise<void> {
   const centre = await browser.execute((sel) => {
-    const rect = document.querySelector(sel)?.getBoundingClientRect();
-    return rect === undefined ? null : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    const element = document.querySelector(sel);
+    if (element === null) return null;
+    // Task 3.6's workflow spec is the first to click a page-level control (a mode button) after
+    // Produce's own typing has scrolled `.workspace-main` down to follow the caret — without this,
+    // a control that scrolled above the viewport reads a negative `rect.top` and the click's
+    // computed point goes out of bounds. "nearest" is a no-op for anything already on screen, so
+    // every prior call (editor text, dialog fields) keeps its own scroll position.
+    element.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const rect = element.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   }, selector);
   assert.ok(centre !== null, `${selector} is not on the page`);
   await browser

@@ -1,19 +1,36 @@
-import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { attach, emptySidecar, format, outlineOf, parse, parseSidecar, rewriteAssetUrls, type Sidecar } from "@essaydown/core";
 import {
+  bindCodeMirror,
   bindProseMirror,
+  canonicalCursor,
   createDocumentStore,
+  cursorMap,
   editorPlugins,
   questionHintsPlugin,
+  renderedSelection,
   schema,
+  sourceCursor,
+  sourceExtensions,
+  sourceOffset,
+  sourceToggleKeymap,
+  sourceUndoKeymap,
   storePlugins,
+  toggleMode,
+  togglePlugins,
   type DocumentStore,
+  type EditorMode,
+  type SourceBinding,
+  type SourcePosition,
 } from "@essaydown/editor";
+import { EditorState as SourceEditorState } from "@codemirror/state";
+import { EditorView as SourceEditorView } from "@codemirror/view";
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
+import "@essaydown/editor/src/source.css";
 import type { Mode } from "../modes/modes";
 import {
   createDocumentSync,
@@ -114,10 +131,21 @@ function describe(error: unknown): string {
  * (Reload / Keep mine) when the file changes under an edit and §6.1's non-canonical banner on
  * open.
  *
- * **Readers of the store.** The save's `serialize` is the one reader here that is not an editing
- * surface. The pane mounts the rendered view only, which commits every transaction as it is
- * dispatched (`bindProseMirror`), so there is no pending source burst to settle before it reads
- * (CLAUDE.md's rule binds a reader beside the source view, which this page does not mount).
+ * **Two surfaces over one store** (PRD §146, task 3.19; the toggle of `/dev/editor`, task 1.7).
+ * `surface` is `rendered` (ProseMirror) or `source` (CodeMirror over `format(root)`), beside and
+ * independent of the app's `mode`: Cmd/Ctrl+/ swaps the one mounted view and works in every §6.3
+ * mode, forcing none. The toggle is not an edit — `toggleMode` only closes the coalescing group —
+ * and the caret is carried in canonical (line, ch) coordinates, as on the dev route. The mode panels
+ * keep reading `store.cursor`, which only the rendered view drives: in the source view a Rewrite or
+ * Reorder action acts on the last rendered-view caret (a recorded cut, DECISIONS #054; backlog
+ * `[3.19, source caret does not drive the mode panels]`).
+ *
+ * **Readers of the store.** The source view commits at the end of a burst, so a reader that is not
+ * an editing surface settles the pending burst first: the handle's `flush` and `rename` call the
+ * store's `settle()`, as do the test hook's readers, and the store's own `dispatch`/`undo`/`redo`
+ * settle before they move (DECISIONS #054's one seam). The autosave's `serialize` does not: it runs
+ * inside the sync's own chain, and a burst it misses is committed by the source view's timer within
+ * a window, which marks the document edited and schedules the save that carries it.
  *
  * **A reload is a new store**, not a commit onto the old one: the external text is not an edit
  * the user made, so it is not an undo step, and an Undo that took it back would autosave the old
@@ -152,6 +180,16 @@ export default function DocumentPane({
   const typewriterScrollRef = useRef(typewriterScroll);
   const onJumpToOutlineRef = useRef(onJumpToOutline);
   const viewRef = useRef<EditorView | null>(null);
+  // The source surface (task 3.19): which view is mounted, the mounted source view and its binding,
+  // and the caret the outgoing view handed the incoming one — kept with the store it belongs to, so
+  // a reload (a new store) never places a caret read from the old document. Nothing clears it:
+  // re-applying it is idempotent, and clearing it would lose it to StrictMode's second mount.
+  const [surface, setSurface] = useState<EditorMode>("rendered");
+  const surfaceRef = useRef<EditorMode>("rendered");
+  const sourceHost = useRef<HTMLDivElement>(null);
+  const sourceViewRef = useRef<SourceEditorView | null>(null);
+  const sourceBindingRef = useRef<SourceBinding | null>(null);
+  const carried = useRef<{ store: DocumentStore; at: SourcePosition } | null>(null);
   // On a change only: `rename` moves `pathRef` before the parent re-renders with the new `path`.
   useLayoutEffect(() => {
     pathRef.current = path;
@@ -287,8 +325,13 @@ export default function DocumentPane({
   useImperativeHandle(
     ref,
     () => ({
-      flush: async () => (await syncRef.current?.flush()) ?? "clean",
+      flush: async () => {
+        // A source burst still inside its window is an edit the save must carry (task 3.19).
+        storeRef.current.getState().settle();
+        return (await syncRef.current?.flush()) ?? "clean";
+      },
       rename: async (newPath, move) => {
+        storeRef.current.getState().settle();
         const sync = syncRef.current;
         if (sync === null) return { moved: false, result: "failed" };
         const oldStem = stemOf(pathRef.current);
@@ -305,7 +348,78 @@ export default function DocumentPane({
     [],
   );
 
+  // Cmd/Ctrl+/ from either view (PRD §146): the same steps as `/dev/editor`'s toggle. The pending
+  // source burst is committed first, so the incoming view is built from a store that holds it and
+  // the toggle itself pushes nothing; then the outgoing view's caret is put into canonical
+  // coordinates — the rendered caret through the cursor map, told the stored marks a typed
+  // character would take (task 1.52), the source caret through `canonicalCursor`, because the
+  // buffer holds the user's own bytes — and the coalescing group is closed.
+  const toggle = useCallback(() => {
+    const current = storeRef.current;
+    sourceBindingRef.current?.flush();
+    const rendered = viewRef.current;
+    const source = sourceViewRef.current;
+    if (surfaceRef.current === "rendered" && rendered !== null) {
+      const at = cursorMap(current.getState().document.root, rendered.state.doc).toSource(
+        rendered.state.selection.head,
+        rendered.state.storedMarks,
+      );
+      carried.current = { store: current, at };
+    } else if (surfaceRef.current === "source" && source !== null) {
+      carried.current = { store: current, at: canonicalCursor(source.state.doc.toString(), sourceCursor(source.state)) };
+    }
+    const next = toggleMode(current, surfaceRef.current);
+    surfaceRef.current = next;
+    setSurface(next);
+  }, []);
+
   useEffect(() => {
+    if (surface !== "source") return;
+    const element = sourceHost.current;
+    if (element === null) return;
+    // `binding` is built from the view, which the update listener needs, so the listener and the
+    // undo hook read it at call time (the same shape as /dev/editor).
+    let binding: SourceBinding | null = null;
+    const view = new SourceEditorView({
+      state: SourceEditorState.create({
+        doc: format(store.getState().document.root),
+        extensions: [
+          ...sourceExtensions(),
+          sourceToggleKeymap(toggle),
+          sourceUndoKeymap(store, () => binding?.flush()),
+          SourceEditorView.updateListener.of((update) => {
+            if (update.docChanged) binding?.change(update.state.doc.toString());
+          }),
+        ],
+      }),
+      parent: element,
+    });
+    binding = bindCodeMirror(store, {
+      get state() {
+        return view.state;
+      },
+      dispatch: (spec) => {
+        view.dispatch(spec);
+      },
+    });
+    sourceViewRef.current = view;
+    sourceBindingRef.current = binding;
+    const at = carried.current;
+    if (at !== null && at.store === store) {
+      view.dispatch({ selection: { anchor: sourceOffset(view.state, at.at) }, scrollIntoView: true });
+      view.focus();
+    }
+    return () => {
+      sourceViewRef.current = null;
+      sourceBindingRef.current = null;
+      // `destroy` flushes, then unregisters the store's settle seam.
+      binding?.destroy();
+      view.destroy();
+    };
+  }, [store, surface, toggle]);
+
+  useEffect(() => {
+    if (surface !== "rendered") return;
     const element = host.current;
     if (element === null) return;
     const saveImage = async (bytes: Uint8Array, extension: string): Promise<string> =>
@@ -321,7 +435,13 @@ export default function DocumentPane({
     const view = new EditorView(element, {
       state: EditorState.create({
         schema,
-        plugins: [...storePlugins(store), ...editorPlugins(), imagePastePlugin(saveImage), questionHints],
+        plugins: [
+          ...storePlugins(store),
+          ...togglePlugins(toggle),
+          ...editorPlugins(),
+          imagePastePlugin(saveImage),
+          questionHints,
+        ],
       }),
       nodeViews: { image: createImageNodeView(root, () => pathRef.current) },
     });
@@ -343,12 +463,18 @@ export default function DocumentPane({
         container.scrollTop += coords.top - (rect.top + rect.height / 2);
       },
     });
+    const at = carried.current;
+    if (at !== null && at.store === store) {
+      const pos = cursorMap(store.getState().document.root, view.state.doc).toRendered(at.at);
+      view.dispatch(view.state.tr.setSelection(renderedSelection(view.state.doc, pos)));
+      view.focus();
+    }
     return () => {
       viewRef.current = null;
       binding.destroy();
       view.destroy();
     };
-  }, [store, root]);
+  }, [store, root, surface, toggle]);
 
   // A mode switch draws or clears the question hints: they read `modeRef` fresh, but only a new
   // state update makes the view redraw its decorations, so an empty transaction forces one.
@@ -371,7 +497,7 @@ export default function DocumentPane({
   );
 
   return (
-    <div className="document-pane" data-testid="document" data-reloads={reloads}>
+    <div className="document-pane" data-testid="document" data-reloads={reloads} data-surface={surface}>
       <div className="workspace-current-file" data-testid="current-file">
         {path}
       </div>
@@ -411,7 +537,11 @@ export default function DocumentPane({
           </button>
         </div>
       )}
-      <div className="document-editor" data-testid="editor" ref={host} />
+      {surface === "rendered" ? (
+        <div key="editor" className="document-editor" data-testid="editor" ref={host} />
+      ) : (
+        <div key="source" className="document-editor document-source" data-testid="source" ref={sourceHost} />
+      )}
       <pre className="workspace-content" data-testid="current-content" hidden>
         {known}
       </pre>

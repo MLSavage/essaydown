@@ -30,6 +30,7 @@ import {
   undoKeyBindings,
   type BoundView,
   type DocumentStore,
+  type ModeMutation,
 } from "../src/store.js";
 import {
   SOURCE_KEY,
@@ -2621,5 +2622,151 @@ describe("the default timer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("the store's settle seam: an outside writer commits a pending source burst first (task 3.19, DECISIONS #054)", () => {
+  /** A source view bound to a fresh store, with nothing but the binding's own deferred commit. */
+  function bound(markdown = "") {
+    const clock = new FakeClock();
+    const store = createDocumentStore(parse(markdown), SIDECAR, { at: 0 });
+    const view = new FakeSourceView();
+    const binding = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
+    /** A keystroke as the view delivers one: the buffer changes, then the update listener fires. */
+    const type = (text: string): void => {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+      binding.change(view.text());
+    };
+    return {
+      clock,
+      store,
+      view,
+      binding,
+      type,
+      markdown: () => format(store.getState().document.root),
+      entries: () => store.getState().stack.entries.length,
+    };
+  }
+
+  /** A mode mutation that appends a paragraph, and records the snapshot it was handed. */
+  function appending(text: string): { mutation: ModeMutation; seen: string[] } {
+    const seen: string[] = [];
+    const mutation: ModeMutation = (state) => {
+      seen.push(format(state.root));
+      const paragraph = { type: "paragraph" as const, children: [{ type: "text" as const, value: text }] };
+      return { ...state, root: { ...state.root, children: [...state.root.children, paragraph] } };
+    };
+    return { mutation, seen };
+  }
+
+  it("guard dispatch: the mutation is applied on top of the typed text, which is its own snapshot beneath it", () => {
+    const { clock, store, view, type, markdown, entries } = bound("seed\n");
+    const before = entries();
+    type("seed typed\n");
+    expect(markdown()).toBe("seed\n");
+    const { mutation, seen } = appending("added");
+
+    store.getState().dispatch(mutation);
+
+    // The mutation was handed the burst, not the snapshot before it, and both are on the stack.
+    expect(seen).toEqual(["seed typed\n"]);
+    expect(markdown()).toBe("seed typed\n\nadded\n");
+    expect(view.text()).toBe("seed typed\n\nadded\n");
+    expect(entries()).toBe(before + 2);
+    expect(clock.waiting).toBe(0);
+    // The undo steps back over the mutation alone, to the burst.
+    store.getState().undo();
+    expect(markdown()).toBe("seed typed\n");
+    clock.advance(COALESCE_WINDOW_MS);
+    expect(markdown()).toBe("seed typed\n");
+  });
+
+  it("guard undo: an undo inside the window steps back over the burst, and a redo brings it back", () => {
+    const { clock, store, view, type, markdown } = bound("seed\n");
+    type("seed typed\n");
+
+    store.getState().undo();
+
+    expect(markdown()).toBe("seed\n");
+    expect(view.text()).toBe("seed\n");
+    expect(clock.waiting).toBe(0);
+    // Stepped over, never dropped: the burst is the redo entry.
+    expect(canRedo(store.getState().stack)).toBe(true);
+    store.getState().redo();
+    expect(markdown()).toBe("seed typed\n");
+    expect(view.text()).toBe("seed typed\n");
+  });
+
+  it("guard redo: a redo inside the window commits the burst first, so the redo cannot pull it away", () => {
+    const { clock, store, view, type, markdown } = bound("seed\n");
+    type("seed one\n");
+    clock.advance(COALESCE_WINDOW_MS);
+    store.getState().undo();
+    expect(markdown()).toBe("seed\n");
+    expect(canRedo(store.getState().stack)).toBe(true);
+    type("seed two\n");
+
+    store.getState().redo();
+
+    // The burst was committed before the redo moved, and a commit clears the redo side, so the
+    // redo had nothing to restore and the typed text stays — on screen and in the store.
+    expect(markdown()).toBe("seed two\n");
+    expect(view.text()).toBe("seed two\n");
+    expect(canRedo(store.getState().stack)).toBe(false);
+    expect(clock.waiting).toBe(0);
+    clock.advance(COALESCE_WINDOW_MS);
+    expect(markdown()).toBe("seed two\n");
+    // And it is a real snapshot: an undo steps back over it to the seed.
+    store.getState().undo();
+    expect(markdown()).toBe("seed\n");
+  });
+
+  it("guard no binding: settle on a store no source view has bound changes nothing and notifies no one", () => {
+    const store = storeFor("seed\n");
+    const listener = vi.fn();
+    store.subscribe(listener);
+    const state = store.getState();
+
+    state.settle();
+
+    expect(store.getState()).toBe(state);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("guard destroy: after the binding is destroyed, settle no longer reaches its flush", () => {
+    const { clock, store, binding, type, markdown } = bound("seed\n");
+    type("seed typed\n");
+    binding.destroy();
+    // `destroy` flushes on its way out.
+    expect(markdown()).toBe("seed typed\n");
+    const listener = vi.fn();
+    store.subscribe(listener);
+    // A change the destroyed binding still schedules (nothing stops a late listener call) is no
+    // longer the store's to settle.
+    type("seed late\n");
+    expect(clock.waiting).toBe(1);
+
+    store.getState().settle();
+
+    expect(markdown()).toBe("seed typed\n");
+    expect(listener).not.toHaveBeenCalled();
+    expect(clock.waiting).toBe(1);
+  });
+
+  it("guard stale unregister: a binding destroyed after a newer one bound leaves the newer one's seam armed", () => {
+    const clock = new FakeClock();
+    const store = createDocumentStore(parse("seed\n"), SIDECAR, { at: 0 });
+    const older = bindCodeMirror(store, new FakeSourceView(), { now: clock.now, schedule: clock.schedule });
+    const view = new FakeSourceView();
+    const newer = bindCodeMirror(store, view, { now: clock.now, schedule: clock.schedule });
+    older.destroy();
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "seed newer\n" } });
+    newer.change(view.text());
+    expect(format(store.getState().document.root)).toBe("seed\n");
+
+    store.getState().settle();
+
+    expect(format(store.getState().document.root)).toBe("seed newer\n");
+    expect(clock.waiting).toBe(0);
   });
 });

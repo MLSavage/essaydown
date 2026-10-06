@@ -1,5 +1,5 @@
 import { applyMoveBlock, format } from "@essaydown/core";
-import type { DocumentStore, ModeMutation } from "@essaydown/editor";
+import type { DocumentStore, DocumentStoreState, ModeMutation } from "@essaydown/editor";
 
 /**
  * `window.__essaydown`, the shell e2e's handle on the open document's store (task 3.1's acceptance:
@@ -11,6 +11,10 @@ import type { DocumentStore, ModeMutation } from "@essaydown/editor";
  * flag to hide it behind without a second bundle. It reaches nothing the page cannot already reach:
  * `dispatch` takes the same core mutations a mode's own UI pushes, and the readers return the
  * store's current snapshot. No product code reads it.
+ *
+ * **Every reader settles first** (task 3.19): a source burst still inside its window is only in the
+ * CodeMirror buffer, so each reader calls the store's `settle()` before it reads, and `dispatch`
+ * settles through the store's own `dispatch`.
  */
 export interface EssaydownTestHook {
   /** The store's own `dispatch`: one mode mutation, one undo snapshot. */
@@ -31,14 +35,20 @@ export interface TestHookHost {
   __essaydown?: EssaydownTestHook;
 }
 
+/** The store's state after its pending source burst, if any, was committed. */
+function settled(store: DocumentStore): DocumentStoreState {
+  store.getState().settle();
+  return store.getState();
+}
+
 export function createTestHook(store: DocumentStore): EssaydownTestHook {
   return {
     dispatch: (mutation) => store.getState().dispatch(mutation),
     moveBlock: (from, to) => (state) => applyMoveBlock(state, from, to),
-    markdown: () => format(store.getState().document.root),
-    sidecar: () => JSON.stringify(store.getState().document.sidecar),
-    cursor: () => store.getState().cursor,
-    snapshots: () => store.getState().stack.entries.length,
+    markdown: () => format(settled(store).document.root),
+    sidecar: () => JSON.stringify(settled(store).document.sidecar),
+    cursor: () => settled(store).cursor,
+    snapshots: () => settled(store).stack.entries.length,
   };
 }
 
