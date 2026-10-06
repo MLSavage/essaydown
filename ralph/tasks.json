@@ -4809,6 +4809,74 @@
   ]
  },
  {
+  "id": "3.21",
+  "model": "opus",
+  "description": "Phase 3 test-only repair 1 of the 3.verifyh GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a); ci.yml run 37423998582 at f897498, ref ci/3.verify/a1; evidence /logs/ci/3.verifyh/a1/e2e-shell/). ubuntu 15/15; macOS 10/15 (required, DECISIONS #047); Windows 13/15 (recorded). Three route defects in e2e/shell/test/routes.ts on the embedded provider (tauri-plugin-wdio-webdriver 1.4.0, the leg macOS and Windows drive, e2e/shell/provider.ts); no product change — RewritePanel.tsx:218–219 and reveal.ts:176–183 behave as specified under native input, which only the Linux leg sends. The Phase 3 shell specs ran in the container on the external leg only (journal [3.4]: 'embedded leg routes written, not run here'), so the gate was their first embedded run. (a) `pressModChord(\"Enter\")` (routes.ts:314–316) is `browser.keys([MOD_KEY, \"Enter\"])`; the plugin's `dispatch_key_event` (src/platform/executor.rs:1216–1405 of the 1.4.0 crate — read it from the crate source, `cargo` registry or static.crates.io, never from memory) builds the KeyboardEvent for Enter, Escape, Space, Tab, Backspace, Delete, the arrows and the F-keys with no metaKey/ctrlKey/shiftKey/altKey; only `dispatch_regular_key` (printable characters) carries ModifierState — so `isModEnter` sees a bare Enter: rewrite.spec.ts 'add 2 variants…' (`addVariant` :167; macOS log 93–96, Windows 74–79) and one-workflow step 4 (:350), the later rewrite cases cascading. Fix, in `pressModChord` only: on the embedded leg a key WebdriverIO maps to a WebDriver named key (`key.length > 1`) is dispatched by one `browser.execute` as a `keydown` then a `keyup` KeyboardEvent on `document.activeElement` with `key`/`code` (`Enter`), `keyCode`/`which` 13, bubbles, cancelable, `metaKey: MOD_KEY === \"Meta\"`, `ctrlKey: MOD_KEY === \"Control\"`, shiftKey/altKey false — the provider's own synthetic route for printable chords; printable keys and the external leg keep `browser.keys`. (b) `selectDomText`'s `locate` (routes.ts:190–198) and `textPoint` (:152–169) walk every text node of a block, and the specs read offsets from `textContent` (one-workflow.spec.ts:308, :332–336; rewrite.spec.ts:135–139, :284, :315–325; reorder.spec.ts:150), but the reveal plugin (packages/editor/src/reveal.ts:176–183, DECISIONS #037) draws the caret block's heading marker and mark delimiters as `contenteditable=\"false\"` widget text inside the block the moment the caret enters it — `## ` is three characters. On the embedded leg the route sets the range, ProseMirror reveals the block, the next poll re-locates the offset over the longer node list and re-applies it three characters early, and the held check passes there: one-workflow step 3 split heading 1 at 26 of 29 on both OSes (`## What changed with metal ni` … `page.bs?`, macOS 31–57, Windows 36–63; 'producing under heading 1 never matched', :315); heading 0 survived only because the caret was already in it when its length was read. Fix: one ownership rule, stated once in routes.ts — a block's plain-text coordinate is the concatenation of its text nodes with no `[contenteditable=\"false\"]` ancestor inside the block — applied by `textPoint`, by `locate`, and by an exported `editableTextOf(blockSelector)` the specs use for every length and `indexOf` read named above (no `textContent` offset or length read of an editor block remains in one-workflow, rewrite or reorder; rewrite's :317–319 comment restated to the rule); in-page helpers stay anonymous (reorder.spec.ts:108's `__name` note). Both halves move together: a walker that skips widgets with a spec that still reads `textContent` turns heading 0 red. (c) `reloadPage` (routes.ts:26–31) returns before the old document is gone: the plugin's refresh is `window.location.reload(); null;` (executor.rs:331–334), returning at once, so a readiness predicate already true on the stale document — the same file restored twice (outline.spec.ts:250 after :88–104; reorder.spec.ts:246 after :123–144; autosave.spec.ts:226 after :53–65) — passes, and the next command runs on the new document mid-load (outline 'delete the sidecar and reopen' `[]`, macOS 60–81; reorder keyboard case `[data-testid=\"mode-reorder\"] is not on the page`, 86–90) or its execute result dies with the old window (autosave CRLF, bare `Error: Timeout`, 6–7; the race routes.ts:15–16 names; lesson [2.12]: WebKitGTK wins it, so the container cannot show it). Fix, embedded leg only: stamp the old document in one execute before the refresh (an attribute on `document.documentElement`), refresh, then poll `browser.getPageSource()` — the plugin's direct evaluate (executor.rs:341–352), not one of the six commands `@wdio/tauri-service` hooks (lesson [2.4]; `getTitle` is one), never an `execute` — until the stamp is absent, bounded at 15 s; the external leg is unchanged. If a lost page-source read proves to cost the script timeout at the gate, the fallback is `browser.setTimeout({ script: 1000 })` around the poll, restored after — the journal records which route stands. Guards in e2e/shell/test/routes.spec.ts, one per defect, enumerated from the diff: (a) a `keydown` listener installed by execute records {key, metaKey, ctrlKey}; `pressModChord(\"Enter\")` yields key `Enter` with the platform's modifier true and the other false, on both legs; mutation: the branch reverted to `browser.keys` is red on the embedded leg in the container. (b) a heading (`# Hello`) with the caret first in another block: `caretAtText` at `editableTextOf`'s length then `typeText(\"X\")` gives `# HelloX\\n` byte-exact in `__essaydown.markdown()`; `editableTextOf` equals the heading's text while `textContent` holds the revealed marker (presence), and equals `textContent` on a paragraph with no marks (absence); mutation: the walker reverted to every text node is red on the embedded leg. (c) the existing reload guard (routes.spec.ts:56–86) is rewritten, never deleted: marker on the old document, readiness already true before the reload (the same file restored), `reloadPage()`, and the first execute after it returns reads the marker absent with no `waitFor`; its mutation (the poll removed) is recorded honestly as not reproducible in the container ([2.12]) and proved by the macOS e2e-shell leg of 3.verify.g1h. Before any fix, reproduce (a) and (b) in the container on the embedded leg — `ESSAYDOWN_E2E_DRIVER=embedded` under lesson [2.1.g1]'s `Xvfb :99 -ac` substitute — with one-workflow.spec.ts and rewrite.spec.ts, and quote each first error in the journal beside the gate's; if either does not reproduce, stop and journal the reading rather than guessing a fix. Then run the full e2e/shell suite on both legs as one foreground call per leg bounded by `timeout 540` (tool timeout 600000, output to a file then grepped; DECISIONS #049), as 3.20 did; a leg that does not finish inside the bound is run one spec file per call; then `scripts/check`. Append to docs/V1.1-BACKLOG.md: `[3.21, embedded chords on named keys]` tauri-plugin-wdio-webdriver 1.4.0's named-key events carry no modifiers, so `pressModChord` synthesises them on the embedded leg; revisit when the pinned plugin's `dispatch_key_event` carries ModifierState (the branch goes, the guard stays); hard stop `4.verify`. Append a lessons line: a shell spec's embedded leg is run in the container before its task ends, because the gate is otherwise its first run. Scope: e2e/shell/test/routes.ts, routes.spec.ts, one-workflow.spec.ts, rewrite.spec.ts, reorder.spec.ts, docs/V1.1-BACKLOG.md, docs/lessons.md, the journal; nothing under apps/ or packages/; no `.skip()`; no `process.platform` in a spec; no Home/End key or caret chord (DECISIONS #022); no magnitude from one run asserted (#024, #039); zero new dependencies and no plugin version change. First, before any read of node_modules: `pnpm install --frozen-lockfile`. `node ralph/journal.mjs stub 3.21` before implementing; each attempt appends its own journal line (lesson [1.29]).",
+  "acceptance": "`scripts/check` green; in the container on the embedded leg (`ESSAYDOWN_E2E_DRIVER=embedded`), before the fix, one-workflow.spec.ts and rewrite.spec.ts fail with the gate's first errors ('producing under heading 1 never matched'; 'Cmd/Ctrl+Enter never added If anything they sharpened it.'), quoted in the journal; after it, every spec file under e2e/shell/test/ passes on both legs, each leg's per-file passing/failing lines recorded in the journal; routes.spec.ts carries guards (a)–(c), the journal naming the test that discharges each and quoting each mutation's result (the route reverted, the spec red, then restored, `git diff` confirmed back; (c)'s recorded as container-green with the reason); `grep -n 'textContent' e2e/shell/test/one-workflow.spec.ts e2e/shell/test/rewrite.spec.ts e2e/shell/test/reorder.spec.ts` shows no offset or length read of an editor block (every remaining hit named in the journal as a non-offset read); `grep -rn 'process.platform' e2e/shell/test/` and `grep -rn '\\.skip(' e2e/shell/test/` print nothing; the backlog line and the lessons line appended; `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); the journal states that (c) is proved only by the macOS e2e-shell leg of the 3.verify.g1h gate and (a)/(b) by the container's embedded leg and both CI legs.",
+  "dependencies": [
+   "3.verifyh"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verify.g1",
+  "model": "sonnet",
+  "description": "Phase 3 verification, repair 1 of 3.verify after the 3.verifyh GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a), §3): freeze dependencies (no lockfile change allowed), run the full suite in the container after 3.21, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. No procedure change and no code, test, fixture or config edit. The backlog hard-stop audit carried by 3.verify is integrated at f897498 and is not repeated.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against 3.verify's integrated commit shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "3.21"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify.g1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite green on ubuntu and macOS (windows recorded, DECISIONS #047); every spec file under e2e/shell/test/, one-workflow steps 1–6 included, green on ubuntu and macOS (windows recorded) at the implementation SHA; logs in /logs/ci/3.verify.g1h/accepted/.",
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verify.g1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "3.verify.g1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify.g1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "description": "CI gate for 3.verify.g1: scripts/gate.sh 3.verify.g1h pushes integrated_sha of 3.verify.g1 to ci/3.verify.g1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\"] into /logs/ci/3.verify.g1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite green on ubuntu and macOS (windows recorded, DECISIONS #047); every spec file under e2e/shell/test/, one-workflow steps 1–6 included, green on ubuntu and macOS (windows recorded) at the implementation SHA; logs in /logs/ci/3.verify.g1h/accepted/.",
+  "dependencies": [
+   "3.verify.g1"
+  ]
+ },
+ {
   "id": "3.7.r0a",
   "model": "claude-opus",
   "execution": "reviewer",
@@ -4816,7 +4884,7 @@
   "description": "Review attempt r0, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "3.verifyh"
+   "3.verify.g1h"
   ],
   "phase": "3",
   "targetBranch": "phase/3",
@@ -4832,7 +4900,7 @@
   "description": "Review attempt r0, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "3.verifyh"
+   "3.verify.g1h"
   ],
   "phase": "3",
   "targetBranch": "phase/3",
@@ -4848,7 +4916,7 @@
   "description": "Review attempt r0, grok reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "3.verifyh"
+   "3.verify.g1h"
   ],
   "phase": "3",
   "targetBranch": "phase/3",
