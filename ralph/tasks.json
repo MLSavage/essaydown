@@ -4729,12 +4729,36 @@
   "targetBranch": "phase/3"
  },
  {
+  "id": "3.19",
+  "model": "opus",
+  "description": "Phase 3 feature, the §146 source toggle in the desktop shell (DECISIONS #054: 3.6 abandoned after STUCK at 3 attempts; its step 6 drove a read-only CodeMirror snapshot behind a button in DocumentPane.tsx, not §146; branch `abandoned/3.6` at `9397a4a`). No task had wired the toggle outside the dev route. First: `git checkout 9397a4a -- e2e/shell/test/routes.ts` (the `clickCentreOf` scrollIntoView fix, lesson `[3.6]`; keep it as the file has it). Then port `apps/desktop/src/dev/DevEditor.tsx`'s toggle into `apps/desktop/src/workspace/DocumentPane.tsx`: a `surface` of `rendered | source` beside `mode`, one of the two views mounted over the pane's one store; `togglePlugins(toggle)` in the ProseMirror plugins; the source view built from `format(root)` with `sourceExtensions()`, `sourceToggleKeymap(toggle)`, `sourceUndoKeymap(store, () => binding?.flush())`, an update listener into `bindCodeMirror`, and `destroy()` on unmount; `toggle` flushes the binding, carries the caret through `cursorMap(...).toSource(head, storedMarks)` or `canonicalCursor(text, sourceCursor(state))`, then `toggleMode`; the incoming view places it through `toRendered`/`renderedSelection` or `sourceOffset` and focuses. DOM contract for 3.20: the pane root (`data-testid=\"document\"`) carries `data-surface`; in source only `[data-testid=\"source\"] .cm-content` exists and no `.ProseMirror`; in rendered only `[data-testid=\"editor\"] .ProseMirror` and no `[data-testid=\"source\"]`; no button is added (§146 is the chord). The source host takes the rendered host's layout rules (Produce's 68ch). The toggle works in every §6.3 mode and forces none; mode panels keep reading `store.cursor`, which the source view does not drive — the journal and commit body record the cut (Michael's OK, DECISIONS #054) and this task appends the backlog line `[3.19, source caret does not drive the mode panels]` with hard stop the Phase 3→4 boundary planning, whose text says that in the source view a Rewrite or Reorder panel action acts on the last rich-view cursor with no visible cue, and that the fix candidate is a cue on the panel (greyed out, or labelled as following the rich-view cursor) while `data-surface` is `source`. Settling (CLAUDE.md stale-read rule), one seam (Michael's OK, DECISIONS #054): `packages/editor/src/store.ts` gains `settle()` on the state, a no-op until `bindCodeMirror` registers its `flush` (cleared on destroy), and `dispatch`, `undo` and `redo` call it first; the pane's `flush()` and `rename()` and `workspace/test-hook.ts`'s readers call `settle()` before they read; `DevEditor.tsx` is unchanged. Every typed string in the spec has no two identical consecutive characters (WebKitWebDriver drops the second; 3.6's spec comment) and is letters only. The chord is sent only through `routes.ts`'s `pressModChord(\"/\")`; never a Home/End key or a caret chord (DECISIONS #022). Run every e2e spec as one foreground call per CLAUDE.md's long-command rule (DECISIONS #049); e2e/web runs because store.ts changes (lesson `[3.4]`).",
+  "acceptance": "Headless (`packages/editor/test/toggle.test.ts`): with a source change pending inside the window, `dispatch`, `undo` and `redo` each settle it first (the committed snapshot holds the typed text and the mutation on top; the undo steps back over the burst, never drops it); `settle` is a no-op with no binding and after destroy. WebdriverIO `e2e/shell/test/source-toggle.spec.ts` on a fixture-seeded workspace, in the container (Linux): (1) Cmd/Ctrl+/ from the rendered view shows `[data-testid=\"source\"] .cm-content` whose `.cm-line` join equals `format(parse(file))` byte-exact and no `.ProseMirror`; Cmd/Ctrl+/ again restores `.ProseMirror`; `__essaydown.markdown()`, the file on disk and `snapshots()` are unchanged by the pair; (2) the caret placed by `caretAtText` at a known offset of a known paragraph lands in the source view on that paragraph's line (located by text, line number from index.json's `paragraphStartLines`) at that `ch`, and toggling back returns `__essaydown.cursor()` to the position before; (3) text typed in the source view, toggled back with no wait, shows in the rendered view, in `markdown()` and on disk, and still does after 1.5 s; (4) text typed in the source view followed at once by a switch to another file is on the first file's disk (the pane's `flush` settled it); (5) text typed in the source view followed at once by `__essaydown.dispatch(moveBlock(...))` leaves `markdown()` holding both the text and the move; (6) Cmd/Ctrl+1–4 then a toggle pair in each mode leaves the mode and `markdown()` unchanged and shows the source view in every mode; every chord in the spec is `pressModChord`. e2e/shell and e2e/web green in the container; `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists only apps/desktop/src/workspace/DocumentPane.tsx, apps/desktop/src/workspace/test-hook.ts, apps/desktop/src/App.css, packages/editor/src/store.ts, packages/editor/src/toggle.ts, packages/editor/test/toggle.test.ts, e2e/shell/test/routes.ts, e2e/shell/test/source-toggle.spec.ts, docs/V1.1-BACKLOG.md, docs/lessons.md and docs/progress/journal-main.md; the journal names the test that discharges each guard; zero new dependencies; suite green.",
+  "dependencies": [
+   "3.5"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.20",
+  "model": "sonnet",
+  "description": "Phase 3, replacing 3.6 (DECISIONS #054; 3.6 abandoned after STUCK at 3 attempts, its spec green at a3 against a read-only stand-in; branch `abandoned/3.6` at `9397a4a`). Author e2e/shell/one-workflow.spec.ts implementing §3 steps 1–6 on a fresh temp folder and fresh Untitled file (step 7 added in 4.4, step 8 in 5.2): open folder, outline 3 questions, produce 2 paragraphs under each, rewrite one sentence, reorder two sentences, toggle source and back, assert final Markdown against expected/one-workflow.md. First: `git checkout 9397a4a -- e2e/shell/test/one-workflow.spec.ts fixtures/markdown/expected/one-workflow.md packages/core/test/one-workflow-golden.test.ts` (routes.ts came with 3.19; DocumentPane.tsx is not checked out). Keep steps 1–5, the golden and the golden test as the files have them. Rewrite step 6 against 3.19's real toggle: place the caret in the editor (`caretAtText`), `pressModChord(\"/\")`, wait for `[data-testid=\"document\"][data-surface=\"source\"]` and `.cm-content`, assert the `.cm-line` join equals the golden, `pressModChord(\"/\")` from the source view, wait for `data-surface=\"rendered\"` and `.ProseMirror`, then assert `__essaydown.markdown()`, the file on disk and `snapshots()` unchanged. Replace the spec's and the golden test's comments that describe the stand-in (\"read-only\", `toggle-source` button) with the §146 toggle; the golden's bytes do not change because the toggle pushes nothing and nothing is typed in source. The chord is sent only through `pressModChord`; never a Home/End key or a caret chord (DECISIONS #022). Run the spec and the full e2e/shell suite as foreground calls per CLAUDE.md's long-command rule (DECISIONS #049). Each attempt appends its own `- [3.20]` journal line (lesson [1.29]).",
+  "acceptance": "Spec passes in the container (Linux) against expected/one-workflow.md, 6/6, with step 6 driven by Cmd/Ctrl+/ and no `toggle-source` selector anywhere in e2e/shell; `packages/core/test/one-workflow-golden.test.ts` green; full e2e/shell green; `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists only e2e/shell/test/one-workflow.spec.ts, fixtures/markdown/expected/one-workflow.md, packages/core/test/one-workflow-golden.test.ts, docs/lessons.md and docs/progress/journal-main.md; zero new dependencies; suite green.",
+  "dependencies": [
+   "3.19"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
   "id": "3.verify",
   "model": "sonnet",
   "description": "Phase 3 verification: freeze dependencies (no lockfile change allowed), run the full suite in the container, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. Backlog hard stops (DECISIONS #review-2-r0): the journal lists every docs/V1.1-BACKLOG.md line whose hard stop is `3.verify` (the ids named in #review-2-r0 and any appended since, found with `grep -n \"3.verify\" docs/V1.1-BACKLOG.md`) and states, for each, the Phase 3 task that discharged it or that none did; an untaken stop is reported in the journal for the principal and is never implemented here.",
   "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against the previous task shows no dependency-manifest or lockfile change.",
   "dependencies": [
-   "3.6"
+   "3.20"
   ],
   "needsCI": true,
   "ci": {
@@ -4789,7 +4813,7 @@
   "model": "claude-opus",
   "execution": "reviewer",
   "reviewer": "claude",
-  "description": "Review attempt r0, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "description": "Review attempt r0, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
    "3.verifyh"
@@ -4798,14 +4822,14 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified."
  },
  {
   "id": "3.7.r0b",
   "model": "sol",
   "execution": "reviewer",
   "reviewer": "sol",
-  "description": "Review attempt r0, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "description": "Review attempt r0, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
    "3.verifyh"
@@ -4814,14 +4838,14 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified."
  },
  {
   "id": "3.7.r0c",
   "model": "grok",
   "execution": "reviewer",
   "reviewer": "grok",
-  "description": "Review attempt r0, grok reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified.",
+  "description": "Review attempt r0, grok reviewer, for review set 3.7 (phase 3). Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified.",
   "acceptance": "/logs/reviews/3/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
    "3.verifyh"
@@ -4830,7 +4854,7 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified."
  },
  {
   "id": "3.7.r0d",
@@ -4847,7 +4871,7 @@
   "targetBranch": "phase/3",
   "reviewSet": "3.7",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.6 hand-verified."
+  "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified."
  },
  {
   "id": "3.close",

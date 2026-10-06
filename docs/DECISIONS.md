@@ -1128,3 +1128,27 @@ verdict: PASS
 - **Reversal.**
   - This commit: before the runner starts 3.18, `git revert`, then `ralph/ralph.sh sync-state`. That drops the pending 3.18 record, and 3.14's old dependency is accepted since 3.14 is pending. After 3.18 has started: none.
   - The abandon has no runner reversal (`retry` and `resume` take only `blocked`). The manual route is #052's: `git branch -m abandoned/3.13 task/3.13`, `git worktree add .wt/3.13 task/3.13`, and a `ctx.set` under `withLock` back to `blocked` with 3 attempts, recorded if it is ever run.
+
+## #054-3.6-stuck-replaced-by-3.19-and-3.20 (2026-10-06, principal; Michael's route B, his OK for the store seam and the backlog cut; Fable consulted on STUCK after three attempts; manual procedure by #052's route, runner idle mid-phase, planning commit on the host checkout on `phase/3`, #017)
+
+- **What happened.** 3.6 (one-workflow e2e) was `STUCK` after 3 attempts. a1 and a2 capped at 81 turns; a3 (54 turns) was green (spec 6/6, e2e/shell 14/14, `scripts/check`), but completed a2's journal stub instead of appending its own line (lesson [1.29]). Evidence: `.evidence/tasks/3.6/{1,2,3}.log`.
+- **The plan gap it exposed.** PRD §146's source toggle (Cmd/Ctrl+/, ProseMirror ↔ CodeMirror over the store, cursor mapped, editable; task 1.7) exists only on the dev route (`apps/desktop/src/dev/DevEditor.tsx`). No Phase 2 or 3 row wired it into the desktop shell. To meet §3 step 6, 3.6's a1 added an unrequested read-only CodeMirror snapshot behind a "Toggle source" button in `DocumentPane.tsx` (`85fd05e`). That is short of §146.
+- **Michael's answer: route B.** Replace 3.6 with a real toggle first, then the e2e, so `3.verify` tests the product §3 describes. He also approved the two points Fable raised:
+  - 3.19 may add one `settle()` seam in `packages/editor/src/store.ts`, with `dispatch`, `undo` and `redo` settling a pending source burst first. No new dependency.
+  - The source caret does not drive the mode panels. This is recorded as a cut, and 3.19 appends the backlog line `[3.19, source caret does not drive the mode panels]` (hard stop: the Phase 3→4 boundary planning). At Michael's prompt, its text names the surprise: in the source view, a Rewrite or Reorder action acts on the last rich-view cursor with no visible cue.
+- **Fable's reading, folded into the rows.**
+  - `bindCodeMirror` and its siblings are exported from `@essaydown/editor`, and the shell's store, sync and save already carry a source commit to disk.
+  - The outside writers (the Outline, Rewrite and Reorder panels, sidebar undo), the pane's `flush` and `rename`, and the test hook must settle first. One store seam covers them all.
+  - The chord goes through `routes.ts`'s `pressModChord`, which modes and undo already use as a handled keydown, not a caret motion (#022).
+  - The golden `expected/one-workflow.md` stays valid, because the toggle pushes nothing.
+- **The procedure.**
+  1. `ralph/ralph.sh abandon 3.6 --reason …`. `.wt/3.6` was clean and was removed. `task/3.6` was renamed `abandoned/3.6`, tip `9397a4a`.
+  2. This planning commit:
+     - PRD §8 gains `3.19` (opus, depends on `3.5`) and `3.20` (sonnet, depends on `3.19`). 3.19 checks out `routes.ts` from `9397a4a`. 3.20 checks out the spec, the golden and the golden test, but not `DocumentPane.tsx`.
+     - `3.verify` now depends on `3.20`, and 3.7's golden list names `3.20`. 3.6's row is byte-identical.
+     - `tasks.json` was regenerated, `EXPECTED_COUNT` went 340 → 342, and `validate-tasks` printed `OK 342`.
+     - The `[3.6]` lessons line is carried verbatim. 3.6's journal lines stay on `abandoned/3.6`.
+  3. `sync-state`, `doctor`, then `run --phase 3 --dry-run` naming `3.19`, then the restart (#051).
+- **Reversal.**
+  - This commit: before the runner starts 3.19, `git revert`, then `ralph/ralph.sh sync-state`. After 3.19 has started: none.
+  - The abandon has no runner reversal. The manual route is #052's: `git branch -m abandoned/3.6 task/3.6`, `git worktree add .wt/3.6 task/3.6`, and a `ctx.set` under `withLock` back to `blocked` with 3 attempts.
