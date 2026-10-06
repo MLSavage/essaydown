@@ -4942,13 +4942,150 @@
   "reviewSetDescription": "Review set for Phase 3. Phase checks: one-workflow green on Linux and macOS, Windows recorded (logs/ci; DECISIONS #047); goldens from 3.2/3.4/3.5/3.20 hand-verified."
  },
  {
+  "id": "3.22",
+  "model": "sonnet",
+  "description": "Phase 3 review fix, a permutation reanchors stale sidecar positions (DECISIONS #review-3-r0 S2 — Sol r0 finding 2 blocker; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list (DECISIONS #review-3-r0); files of passed tasks 3.2 and 3.5, whose records are not edited — a new task per DECISIONS #016). Scope: packages/core/src/sidecar.ts, packages/core/test/sidecar.test.ts, packages/core/test/outline.test.ts, packages/core/test/reorder-goldens.test.ts only if a golden's sidecar changes (it must not), docs/lessons.md, the journal. Defect: attach a variant to `Beta here.` in `Alpha here. Beta here.`, type `New first.` before them, then reorder sentences `[0,2,1]` — before the move the panel shows the variant on Beta, after it the stored anchor names Alpha (hash and text rebuilt for the wrong sentence), and a save and reload keep it there; inserting an introductory paragraph and then moving Beta's paragraph before Alpha's does the same through `applyMoveBlock`, and a heading inserted above a section does it to that section's heading question through `applyOutlineDrop`/`applyMoveSection` (Sol's probes, .evidence/reviews/3/r0/sol/core-probes.log:1–33). Cause: `reanchor` (sidecar.ts:531) states \"Callers pass a sidecar whose positions are current\", and `applyReorderSentences` (:582) and `carryTopLevelMove` (:631) pass `state.sidecar` unchanged; the editor's commit (packages/editor store `commit(root, document.sidecar, …)`) never refreshes positions, so after typing that shifts indices `anchor.pos` names another item. Fix: resolve every entry against the pre-move root before the permutation — pass `refresh(state.sidecar, state.root, options)` (sidecar.ts:504) to `reanchor` in both callers, or make `reanchor` refresh first and drop the caller contract from its doc comment; an entry that does not resolve stays an orphan, never silently moved. Guards, one vitest test each: (1) sentence reorder after a sentence typed before the variant's paragraph keeps the variant on its own text (Sol's probe 1); (2) `applyMoveBlock` after an inserted paragraph (probe 2); (3) `applyMoveSection` / `applyOutlineDrop` after a heading inserted above keeps each heading question on its heading; (4) an entry whose sentence was deleted before the move is an orphan after it (absence case); (5) duplicate sentence text in two paragraphs, one with a variant, the move keeps it on the right one; (6) after each move, the stored hash and text equal `attach`'s for the intended item on the reloaded document; (7) corpus identity leg: for every fixture in fixtures/markdown/index.json, a sidecar whose positions are stale by one inserted paragraph, the identity permutation re-serialises the Markdown byte-identically and the sidecar equals the refreshed one. Record the mutation of the fix (revert one caller) red then restored. Run the suite as `scripts/check`; a long command (an e2e spec) runs as one foreground call bounded by `timeout 540` with its output redirected to a file, never `run_in_background` (DECISIONS #049). Zero new dependencies (PRD §4).",
+  "acceptance": "packages/core/test holds the seven named guards (titles in the journal) and they are green; the mutation of one caller recorded red then restored (`git diff` confirmed back); the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "3.7.r0d"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.23",
+  "model": "opus",
+  "description": "Phase 3 review fix, inline code swallows a hard break and a link on save (DECISIONS #review-3-r0 C1, C6 — Claude r0 finding 1 blocker and finding 6 should-fix Required, taken as blocking under D1; the backlog lines `[3.16, found outside scope]` and `[3.12, found outside scope]`, whose hard stop 3.verify recorded as untaken; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list (DECISIONS #review-3-r0); files of passed tasks 3.12 and 3.16, whose records are not edited — DECISIONS #016). Scope: packages/editor/src/input.ts, packages/editor/src/schema.ts, packages/editor/test/input.test.ts, packages/editor/test/typed-marks.test.ts, one new packages/editor/test file for the hard-break and link-wrapped-code guards, docs/V1.1-BACKLOG.md (one line closing the two outside-scope lines), docs/lessons.md, the journal. Defects: (C1) Shift+Enter right after an inline-code run — ```alpha`beta`` with the caret after `alpha` — inserts a `hard_break` carrying `inline_code` (input.ts:226, `replaceSelectionWith`'s default `inheritMarks: true`), and `pmToMdast` folds it into the code run as its empty `textContent` (schema.ts:1409–1416), so the saved file has no break; with a space after the span (```alpha` beta``) the space goes too. (C6) one character typed at the start of a link whose text is a code span — ``[`cd`](v) tail`` — saves ```Xcd` tail``: `runEnd` (schema.ts:1365) extends an `inline_code` run while the mark is in the next node's set, not while the whole mark set is equal, so the typed `code` node and the `code+link` node become one `inlineCode` and the link is never wrapped; at the end it saves ``[`cd`](v)`X```. Before touching the editor's tree, read the installed mdast-util-to-markdown `break` and `inlineCode` handlers and the app's handler for each mark (CLAUDE.md: both halves of every fixed-point family are owned). Fix, by behaviour: a hard break inserted by Shift+Enter never carries `inline_code` and keeps the other marks it inherits today (emphasis, strong, delete, link — DECISIONS #review-1-r8 N1); `pmToMdast` never drops a `hard_break` that does carry `inline_code` (a pasted or hand-built tree), splitting the code run at it; an `inline_code` run is grouped only across nodes whose full mark sets agree, so a `link` boundary is never crossed. A ProseMirror `NodeSpec.marks` on `hard_break` does not restrict the marks on the break itself (it governs content), so the fix is in the command and the converter. Guards, one test each: (1) Shift+Enter at the closing edge and the opening edge of each of the five mark kinds (emphasis, strong, delete, link, inline_code), × the following text spaced / unspaced / block end, with one astral member: the break is present in `format(pmToMdast(·))` and the result is a fixed point of parse∘format; (2) the inserted break's marks equal today's minus `inline_code` (presence of the other four, absence of `inline_code`); (3) a hand-built paragraph whose `hard_break` carries `inline_code` serialises with the break; (4) one character typed at the start and at the end of ``[`cd`](v)``, with and without an enclosing emphasis: the link is present and the node count after `parse(format(·))` equals the tree's (DECISIONS #review-1-r7 M2); (5) a corpus leg seeded from the writing surface: every link-wrapped code span of every fixture in fixtures/markdown/index.json, one character typed at each edge, the output a fixed point and the link count unchanged; (6) the ordered-pair sweep of task 1.67 extended with `inline_code+link` as a composite first run. Remove the `unrepresentable` bound for the `link | O9 | the click route` cells in typed-marks.test.ts only if the fix makes them representable, and say which in the journal. Run the suite as `scripts/check`; a long command (an e2e spec) runs as one foreground call bounded by `timeout 540` with its output redirected to a file, never `run_in_background` (DECISIONS #049). Zero new dependencies (PRD §4).",
+  "acceptance": "The named guards (titles in the journal) exist and are green; the probes `` `alpha`beta `` and `` `alpha` beta `` with Shift+Enter after `alpha`, and `` [`cd`](v) tail `` with `X` typed at the start, each quoted in the journal with their saved bytes, keep the break and the link; the mutation of each of the two fixes recorded red then restored; the backlog line appended; the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "3.22"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.24",
+  "model": "opus",
+  "description": "Phase 3 review fix, the save path's notion of dirty and saved (DECISIONS #review-3-r0 S1, S3 — Sol r0 findings 1 and 3, both blocker; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list (DECISIONS #review-3-r0); files of passed tasks 2.16, 3.2 and 3.19, whose records are not edited — DECISIONS #016). Scope: apps/desktop/src/workspace/document-sync.ts, apps/desktop/src/workspace/DocumentPane.tsx, tests/document-sync.test.ts, tests/sidecar-sync.test.ts, one e2e/shell/test spec case only if a vitest through the pane cannot reach a guard (say which in the journal), docs/lessons.md, the journal. Defects: (S1) open `Alpha.`, toggle to the source view, type `LOCAL`, and let another writer append to the file inside the source coalescing window: after the watcher's 100 ms debounce the buffer and the store hold only the external text, no banner shows, and `LOCAL` is gone (Sol's probe, .evidence/reviews/3/r0/sol/browser-probes.log:1–15). Cause: `check()` (document-sync.ts:288–300) decides on `dirty`, which only a store commit sets (`edited()` from DocumentPane's store subscriber); the pending CodeMirror burst has not committed, so `disk !== known && !dirty` → `reloaded` → the pane rebuilds the store, and the old binding's `destroy()` flushes `LOCAL` into the discarded store — the watcher is a store reader that does not settle (CLAUDE.md). (S3) with an externally malformed sidecar (`{broken`) and one variant added in the app, `flush()` returns `saved`: DocumentPane.tsx:249 reports the parse error and returns normally on `choice.action === \"skip\"`, so `write()` clears `dirty` and every caller that discards state (switch, close, rename) proceeds and drops the variant (browser-probes.log:16–23; CLAUDE.md, DECISIONS #review-2-r0 U1). Fix: (1) the sync gains a settle step that `check()` runs before its clean/dirty decision, and again after its awaited disk read, and that `keepMine()` runs before it serialises; DocumentPane wires it to the store's `settle()` (the commit fires `edited()` synchronously, so the decision sees `dirty`). (2) The sidecar skip branch fails through the existing MarkdownWritten path — the Markdown baseline stays the written one, the document stays dirty, `flush()` resolves `failed`, and the error names the sidecar as not saved; no new dialog or button (Michael's answer: the escape hatch is backlog). Guards, one test each (vitest with fake timers through the pane and mocked invoke/listen, the shape the existing switch and toggle tests use): (1) an external change inside the source window after typing → the banner, the buffer and the store keep `LOCAL`; (2) the same change arriving during the watcher's awaited read (DECISIONS #review-2-r2 W1 shape) → the same; (3) Keep mine inside the window → disk holds the pending text; (4) no pending burst → reload as today (absence case); (5) malformed disk sidecar plus an in-memory variant → `flush()` is `failed`, the Markdown is written, the variant retained; (6) switch, close and rename each stay on the document on that `failed` (one test per caller); (7) after the sidecar is repaired on disk, the next save writes it and the variant survives a reload; (8) a well-formed sidecar → `saved` (absence case). Record the mutation of each fix red then restored. Run the suite as `scripts/check`; a long command (an e2e spec) runs as one foreground call bounded by `timeout 540` with its output redirected to a file, never `run_in_background` (DECISIONS #049). Zero new dependencies (PRD §4).",
+  "acceptance": "The named guards (titles in the journal) exist and are green, and the 2.16, 2.19 and 2.23 guards are unchanged and green; the mutation of each of the two fixes recorded red then restored (`git diff` confirmed back); the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "3.23"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verify.r1",
+  "model": "sonnet",
+  "description": "Phase 3 verification for review attempt r1 (RUNNER-SPEC §3, §5.5): freeze dependencies (no lockfile change allowed), run the full suite in the container after 3.22–3.24, and confirm the phase head is ready for the three-OS CI run the CI gate performs. Promote-lessons step: none promoted at r0 (DECISIONS #review-3-r0 records them, Michael's answer); no code, test, fixture or config edit.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against 3.24's integrated commit shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "3.24"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite green on ubuntu and macOS (windows recorded, DECISIONS #047); every spec file under e2e/shell/test/, one-workflow steps 1–6 included, green on ubuntu and macOS (windows recorded) at the implementation SHA; logs in /logs/ci/3.verify.r1h/accepted/.",
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verify.r1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "3.verify.r1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "description": "CI gate for 3.verify.r1: scripts/gate.sh 3.verify.r1h pushes integrated_sha of 3.verify.r1 to ci/3.verify.r1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\"] into /logs/ci/3.verify.r1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite green on ubuntu and macOS (windows recorded, DECISIONS #047); every spec file under e2e/shell/test/, one-workflow steps 1–6 included, green on ubuntu and macOS (windows recorded) at the implementation SHA; logs in /logs/ci/3.verify.r1h/accepted/.",
+  "dependencies": [
+   "3.verify.r1"
+  ]
+ },
+ {
+  "id": "3.7.r1a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "reviewSet": "3.7",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3, attempt r1 (after the r0 FAIL, DECISIONS #review-3-r0; the three r0 reports were independent — DECISIONS #025's condition, the #044 warning on r0c read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/3.verify.r1h/accepted/, the spec-file count read from the directory; the accepted logs stand for the cold build), that the r0 blockers are fixed and the dispositions hold — (1) S2 by 3.22: a sentence, block and section move after typing that shifts indices keeps every variant and question on its own item, with the named guards; (2) C1 and C6 by 3.23: Shift+Enter at an inline-code edge keeps the break on save, a character typed at a link-wrapped code span keeps the link, with the named guards; (3) S1 and S3 by 3.24: an external change inside the source window raises the banner and keeps the typed text, a skipped sidecar write makes `flush()` `failed` and every discarding caller stays, with the named guards; (4) the r0 dispositions in docs/V1.1-BACKLOG.md present with their triggers — a disposition is questioned only if its premise is false. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; no new sweep, probe generator or browser drive beyond re-running your r0 probes for findings 1 and 6 (your own r0 directory /logs/reviews/3/r0/claude/ may be read), whose non-reproduction is the confirmation, and your r0 finding 14 (a URL holding `|` typed into a table cell, saved twice): run it once — if the row splits, it is a blocker in this report with the probe's bytes; if not, say so in one line. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
+  "acceptance": "/logs/reviews/3/r1/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "3.verify.r1h"
+  ],
+  "phase": "3",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.7.r1b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "reviewSet": "3.7",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3, attempt r1 (after the r0 FAIL, DECISIONS #review-3-r0; the three r0 reports were independent — DECISIONS #025's condition, the #044 warning on r0c read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/3.verify.r1h/accepted/, the spec-file count read from the directory; the accepted logs stand for the cold build), that the r0 blockers are fixed and the dispositions hold — (1) S2 by 3.22: a sentence, block and section move after typing that shifts indices keeps every variant and question on its own item, with the named guards; (2) C1 and C6 by 3.23: Shift+Enter at an inline-code edge keeps the break on save, a character typed at a link-wrapped code span keeps the link, with the named guards; (3) S1 and S3 by 3.24: an external change inside the source window raises the banner and keeps the typed text, a skipped sidecar write makes `flush()` `failed` and every discarding caller stays, with the named guards; (4) the r0 dispositions in docs/V1.1-BACKLOG.md present with their triggers — a disposition is questioned only if its premise is false. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; no new sweep, probe generator or browser drive beyond re-running your r0 probes that reproduced findings 1–3 (browser-probes.mjs and core-probes.mjs; /logs/reviews/3/r0/sol/ is your own r0 directory and may be read), whose non-reproduction is the confirmation. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
+  "acceptance": "/logs/reviews/3/r1/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "3.verify.r1h"
+  ],
+  "phase": "3",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.7.r1d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "reviewSet": "3.7",
+  "reviewAttempt": "r1",
+  "description": "Reconciliation of review attempt r1 for review set 3.7 (phase 3): copy the two reports to docs/reviews/phase-3-r1-{claude,sol}.md (Grok reviews r0 only, DECISIONS #043), write DECISIONS.md#review-3-r1 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 3.verify.r2 and 3.7.r2a/b/d in the same planning commit (RUNNER-SPEC §5.4). A blocker reported in r1 goes to Michael before any planning commit (DECISIONS #041 D1): the reconciliation gives him the finding with its counts and its route and writes no planning commit until he answers; the task stays principal-pending.",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "3.7.r1a",
+   "3.7.r1b"
+  ],
+  "phase": "3",
+  "targetBranch": "phase/3"
+ },
+ {
   "id": "3.close",
   "model": "opus",
   "execution": "runner",
   "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/3 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/4; then finalise .evidence/closes and the next phase base record.",
   "acceptance": "main == reconciliation_sha of the newest Phase 3 review attempt (verdict PASS); suite green on that commit; branch phase/4 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
   "dependencies": [
-   "3.7.r0d"
+   "3.7.r1d"
   ],
   "nextPhase": "4",
   "nextBranch": "phase/4",
