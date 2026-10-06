@@ -8,6 +8,7 @@ import { format } from "../../core/src/format.js";
 import { parse } from "../../core/src/parse.js";
 import { formatWithMap } from "../../core/src/positions.js";
 import { mdastToPM, pmToMdast, schema } from "../src/schema.js";
+import { Typing } from "./typing.js";
 
 /**
  * URL-shaped text keeps the writer's bytes, through the editor (task 3.14, DECISIONS
@@ -222,5 +223,146 @@ describe("a literal link tied with a flanking mark nests inside it (task 3.14 gu
 
   it("absence: a link that is not a literal, over a run with no edge whitespace, stays outermost", () => {
     expect(nested("https://a.b", false).type).toBe("link");
+  });
+});
+
+/**
+ * A URL holding `|` typed into a table cell keeps its row (task 3.27, DECISIONS #review-3-r1 C14).
+ * The reproduction: typed after `c` in `| a | b |\n| - | - |\n| c | d |\n`, save 1 wrote the
+ * escaped text `https\://a.b/x\|y`, which reloads as a literal link (the autolink-literal transform
+ * reads the decoded text); save 2 wrote that link in the `<…>` form, whose emptied construct stack
+ * hid the cell's `|`, so the row read back as three cells; save 3 widened the header.
+ */
+const PIPE_URL = "https://a.b/x|y";
+
+/** Every table row of a parsed tree, as its cell count. */
+function rowWidths(root: Root): number[] {
+  const out: number[] = [];
+  const walk = (node: Nodes): void => {
+    if (node.type === "tableRow") out.push(node.children.length);
+    if ("children" in node) for (const child of node.children as Nodes[]) walk(child);
+  };
+  walk(root);
+  return out;
+}
+
+function nodeCount(node: Nodes): number {
+  return 1 + ("children" in node ? (node.children as Nodes[]).reduce((n, child) => n + nodeCount(child), 0) : 0);
+}
+
+/** The cell-end positions of every table cell, in document order. */
+function cellEnds(doc: PMNode): number[] {
+  const out: number[] = [];
+  doc.descendants((node, pos) => {
+    if (node.type === schema.nodes.table_cell) {
+      out.push(pos + 1 + node.content.size);
+      return false;
+    }
+    return true;
+  });
+  return out;
+}
+
+/** The literal links of a parsed tree whose url is `url`. */
+function literalsOf(root: Root, url: string): number {
+  let n = 0;
+  const walk = (node: Nodes): void => {
+    if (node.type === "link" && node.url === url && node.data?.autolinkLiteral === true) n += 1;
+    if ("children" in node) for (const child of node.children as Nodes[]) walk(child);
+  };
+  walk(root);
+  return n;
+}
+
+/**
+ * The probe typed through {@link Typing} over `editorPlugins()`: `| a | b |` and Enter make the
+ * table (`tableFromRow`), `c` and `d` go into the body cells, and `typedUrl` is typed after `c`.
+ */
+function typedProbe(typedUrl: string): Typing {
+  const typing = new Typing().type("| a | b |").press("Enter").type("c");
+  typing.moveTo(cellEnds(typing.state.doc)[3]).type("d");
+  return typing.moveTo(cellEnds(typing.state.doc)[2]).type(` ${typedUrl}`);
+}
+
+/** Three saves of `first` by `route`: each save loads the one before it. */
+function threeSaves(first: string, route: (bytes: string) => string): string[] {
+  const saves = [first];
+  while (saves.length < 3) saves.push(route(saves[saves.length - 1]));
+  return saves;
+}
+
+const ROUTES: [string, (bytes: string) => string][] = [
+  ["the editor route", reloaded],
+  ["the core route", (bytes) => format(parse(bytes))],
+];
+
+describe("a URL holding `|` typed into a table cell keeps its row on every save (task 3.27, DECISIONS #review-3-r1 C14)", () => {
+  const PROBES: [string, string, string][] = [
+    ["guard 1: the typed member `https://a.b/x|y`", PIPE_URL, "https\\://a.b/x\\|y"],
+    ["guard 2: the astral member `https://a.b/x|𝒜`", "https://a.b/x|𝒜", "https\\://a.b/x\\|𝒜"],
+  ];
+  for (const [title, typedUrl, escaped] of PROBES) {
+    for (const [routeName, route] of ROUTES) {
+      it(`${title}, typed after \`c\` through Typing over editorPlugins(), saved three times by ${routeName}: every save a fixed point with two cells per row`, () => {
+        const typing = typedProbe(typedUrl);
+        const tree = pmToMdast({ doc: typing.state.doc, frontMatter: null });
+        const saves = threeSaves(typing.markdown(), route);
+        const width = "c ".length + escaped.length;
+        expect(saves[0]).toBe(
+          `| a${" ".repeat(width - 1)} | b |\n| ${"-".repeat(width)} | - |\n| c ${escaped} | d |\n`,
+        );
+        for (const [k, save] of saves.entries()) {
+          expect(save, `save ${k + 1} is byte-identical to save 1`).toBe(saves[0]);
+          expect(format(parse(save)), `save ${k + 1}: parse∘format fixed point`).toBe(save);
+          expect(rowWidths(parse(save)), `save ${k + 1}: two cells in every row`).toEqual([2, 2]);
+          const reparsed = parse(save);
+          expect(nodeCount(parse(format(reparsed))), `save ${k + 1}: node count after parse(format(·))`).toBe(
+            nodeCount(reparsed),
+          );
+          expect(literalsOf(reparsed, typedUrl), `save ${k + 1}: one literal link`).toBe(1);
+        }
+        // The editor's tree is one text node; the parse of save 1 re-links it (the transform), and
+        // the editor's tree of that parse is the same tree, so save 2 has nothing new to write.
+        const cell = (parse(saves[0]).children[0] as { children: { children: { children: Nodes[] }[] }[] })
+          .children[1].children[0];
+        expect(cell.children.map((node) => node.type)).toEqual(["text", "link"]);
+        const editorTree = pmToMdast(mdastToPM(parse(saves[0])));
+        expect(nodeCount(editorTree), "the editor's tree of save 1 is the parse's").toBe(nodeCount(parse(saves[0])));
+        expect(nodeCount(tree)).toBe(nodeCount(editorTree) - 2);
+      });
+    }
+  }
+});
+
+describe("the `|` URL typed into every table cell of every fixture holding a table (task 3.27 guard 6, CLAUDE.md M1: a link inside a cell)", () => {
+  const withTables = names.filter((name) =>
+    ((index[name] as { nodeTypes: string[] }).nodeTypes ?? []).includes("table"),
+  );
+  let exercised = 0;
+
+  it.each(withTables)("%s: every cell typed, the bytes keep every row's width, hold one literal per cell, are a fixed point and map every node", (name) => {
+    const editor = mdastToPM(parse(readFileSync(`${FIXTURES}/${name}`, "utf8")));
+    const widths = rowWidths(parse(readFileSync(`${FIXTURES}/${name}`, "utf8")));
+    const ends = cellEnds(editor.doc);
+    let tr = EditorState.create({ doc: editor.doc }).tr;
+    for (const pos of [...ends].reverse()) {
+      const empty = editor.doc.resolve(pos).parent.content.size === 0;
+      tr = tr.insert(pos, schema.text(empty ? PIPE_URL : ` ${PIPE_URL}`));
+    }
+    const { root, bytes } = written(tr.doc, editor.frontMatter);
+    expect(rowWidths(parse(bytes)), `${name}: every row keeps its width`).toEqual(widths);
+    expect(literalsOf(parse(bytes), PIPE_URL), `${name}: one literal per cell`).toBe(ends.length);
+    expect(format(parse(bytes)), `${name}: parse∘format fixed point`).toBe(bytes);
+    expect(reloaded(bytes), `${name}: the editor's own trip`).toBe(bytes);
+    expect(reloaded(reloaded(bytes)), `${name}: the third save`).toBe(bytes);
+    const mapped = formatWithMap(root);
+    expect(mapped.text, `${name}: the map is of the copied bytes`).toBe(bytes);
+    expect(mapped.map.unresolved, `${name}: nothing unresolved`).toEqual([]);
+    exercised += 1;
+  });
+
+  it("every fixture index.json lists with a table was typed into", () => {
+    expect(withTables.length).toBeGreaterThan(0);
+    expect(exercised).toBe(withTables.length);
   });
 });

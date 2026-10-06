@@ -218,3 +218,84 @@ describe("settleLiterals escapes only the literal the parser would misread (task
     expect(format(paragraph(text("a_b")))).toBe("a\\_b\n");
   });
 });
+
+/** A one-column table: a header cell `h` and one body cell holding `children`. */
+function inCell(...children: PhrasingContent[]): Root {
+  return {
+    type: "root",
+    children: [
+      {
+        type: "table",
+        align: [null],
+        children: [
+          { type: "tableRow", children: [{ type: "tableCell", children: [text("h")] }] },
+          { type: "tableRow", children: [{ type: "tableCell", children }] },
+        ],
+      },
+    ],
+  };
+}
+
+/** The body cell's line of a one-column table's bytes, without its padding. */
+function bodyCell(bytes: string): string {
+  return bytes.split("\n")[2].slice(2, -2).trimEnd();
+}
+
+/** Every table row of a parsed tree, as its cell count. */
+function rowWidths(root: Root): number[] {
+  const out: number[] = [];
+  const walk = (node: Nodes): void => {
+    if (node.type === "tableRow") out.push(node.children.length);
+    if ("children" in node) for (const child of node.children as Nodes[]) walk(child);
+  };
+  walk(root);
+  return out;
+}
+
+describe("a link holding `|` inside a table cell keeps its cell (task 3.27, DECISIONS #review-3-r1 C14)", () => {
+  it("guard 3: a hand-built literal link with `|` in its url is written as its text escaped in the cell's stack, the bytes save 1 writes", () => {
+    const root = inCell(literal("https://a.b/x|y"));
+    const out = format(root);
+    expect(bodyCell(out)).toBe("https\\://a.b/x\\|y");
+    expect(rowWidths(parse(out))).toEqual([1, 1]);
+    expect(linksOf(parse(out))).toEqual([["https://a.b/x|y", "https://a.b/x|y", true]]);
+    assertSettled(root, out);
+    // The bytes of the typed text (a `text` node, not a link) are the same bytes.
+    expect(format(inCell(text("https://a.b/x|y")))).toBe(out);
+    // The www member: its url is not its text, and the escaped text is still the same literal.
+    const www = format(inCell(literal("http://www.a.b/x|y", "www.a.b/x|y")));
+    expect(bodyCell(www)).toBe("www\\.a.b/x\\|y");
+    expect(linksOf(parse(www))).toEqual([["http://www.a.b/x|y", "www.a.b/x|y", true]]);
+    assertSettled(inCell(literal("http://www.a.b/x|y", "www.a.b/x|y")), www);
+  });
+
+  it("guard 4: a hand-built link that is not a literal, its text its url with `|`, takes the resource form in a cell, saved twice", () => {
+    const root = inCell({ ...literal("https://a.b/x|y"), data: undefined });
+    const first = format(root);
+    expect(bodyCell(first)).toBe("[https://a.b/x\\|y](https://a.b/x\\|y)");
+    expect(rowWidths(parse(first))).toEqual([1, 1]);
+    expect(linksOf(parse(first))).toEqual([["https://a.b/x|y", "https://a.b/x|y", false]]);
+    assertSettled(root, first);
+    const second = format(parse(first));
+    expect(second, "save 2").toBe(first);
+    expect(format(parse(second)), "save 3").toBe(first);
+  });
+
+  it("guard 4: peek answers `[` for the resource form, so the text before the link is escaped against it", () => {
+    const root = inCell(text("see \\"), { ...literal("https://a.b/x|y"), data: undefined });
+    assertSettled(root, format(root));
+    expect(bodyCell(format(root))).toBe("see \\\\[https://a.b/x\\|y](https://a.b/x\\|y)");
+  });
+
+  it("guard 5 (absence): a literal in a cell without `|` stays bare", () => {
+    assertSettled(inCell(literal("https://a.b/c_d")), "| h               |\n| --------------- |\n| https://a.b/c_d |\n");
+    assertSettled(inCell(text("https://a.b/c_d")), "| h               |\n| --------------- |\n| https://a.b/c_d |\n");
+  });
+
+  it("guard 5 (absence): a `|` literal outside a cell keeps `<…>`, and `|` text outside a cell stays raw", () => {
+    const unmarked = { ...literal("https://a.b/x|y"), data: undefined };
+    assertSettled(paragraph(text("See "), unmarked, text(" end")), "See <https://a.b/x|y> end\n");
+    assertSettled(paragraph(text("See "), literal("https://a.b/x|y"), text(" end")), "See https://a.b/x|y end\n");
+    assertSettled(paragraph(text("See https://a.b/x|y end")), "See https://a.b/x|y end\n");
+  });
+});

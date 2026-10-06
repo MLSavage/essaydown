@@ -1059,12 +1059,20 @@ function writesLiteralsRaw(state: ToMarkdownState, node: Nodes): boolean {
  * stretch is passed to `safe` with its real neighbours: the literal's edge character where one
  * touches it, `info`'s otherwise.
  *
+ * A literal holding `|` inside a table cell is the exception ({@link cutsCell}, DECISIONS
+ * #review-3-r1 C14): the table tokenizer cuts the row at its raw `|` before the literal is read,
+ * and when every row is cut alike the parse holds no table and the same links, which
+ * {@link literalMisread} cannot tell apart — so it is a plain stretch, escaped by `safe` in the
+ * cell's stack (`https\://a.b/x\|y`), which the parser reads back as the same literal.
+ *
  * The spans written raw are recorded on the `State` per node ({@link writtenLiteralSpans}), last
  * call wins — `containerPhrasing` calls a peek-less handler twice — so the position map reads
  * which units were written as themselves instead of guessing it from the bytes.
  */
 export function handleText(node: Text, _parent: Parents, state: ToMarkdownState, info: Info): string {
-  const spans = writesLiteralsRaw(state, node) ? literalSpans(node.value) : [];
+  const spans = writesLiteralsRaw(state, node)
+    ? literalSpans(node.value).filter((span) => !cutsCell(state, node.value.slice(span.start, span.end)))
+    : [];
   const widened = state as WidenedState;
   if (spans.length === 0) {
     widened.literalSpans?.delete(node);
@@ -1239,6 +1247,15 @@ function autolinkCarriesUrl(value: string, url: string): boolean {
 }
 
 /**
+ * Whether `bytes`, written inside the current construct, hold a `|` that would cut a table cell
+ * (DECISIONS #review-3-r1 C14): the stack holds `tableCell` and the bytes a `|`. Read on the
+ * stack the `link` handler is called with, before the built-in's `<…>` branch empties it.
+ */
+function cutsCell(state: ToMarkdownState, bytes: string): boolean {
+  return state.stack.includes("tableCell") && bytes.includes("|");
+}
+
+/**
  * Wrap the configured `link` handler once per serialization so that a link is written in the
  * `<…>` autolink form exactly when that form round-trips the url byte for byte, and in the
  * resource form `[text](url)` otherwise (DECISIONS #review-1-r6 L2). Nothing inside `<…>` can be
@@ -1256,9 +1273,27 @@ function autolinkCarriesUrl(value: string, url: string): boolean {
  * destination, so `[https://x.y\\](https://x.y\\)` parses back to the original url — the form the
  * built-in already falls back to when the text and the url differ (`www.x.y\`).
  *
+ * A table cell is the one container whose unsafe character the `<…>` branch hides and the parser
+ * still reads there (DECISIONS #review-3-r1 C14): the GFM table tokenizer cuts the row at every
+ * unescaped `|` before any inline construct is parsed, so `| c <https://a.b/x|y> | d |` is three
+ * cells, and `mdast-util-gfm-table`'s `{character: '|', inConstruct: 'tableCell'}` is the pattern
+ * `state.stack = []` hides. Every other `inConstruct` pattern the `<…>` branch hides is either read
+ * literally inside `<…>` (§6.4: no escape, no emphasis, no literal applies there) or a character
+ * `formatLinkAsAutolink` already refuses (`[\0- <>\u007F]`). So inside a `tableCell` a `<…>` form
+ * whose bytes hold `|` is not taken either ({@link cutsCell}): such a link that is a literal
+ * written bare is still its text child alone, which {@link handleText} writes escaped in the
+ * cell's stack — `https\://a.b/x\|y`, the bytes the escaped text of the first save already holds,
+ * which the parser reads back as the same literal — so the position map's text instrumentation
+ * spells it (CLAUDE.md K2), and no `safe` is called here; any other such link takes the resource
+ * form, `[https://a.b/x\|y](https://a.b/x\|y)`, label and destination escaped by `safe` in the
+ * cell's stack.
+ *
  * `peek` answers `[` when the fallback will be taken and the original's `peek` (`<`) otherwise,
  * because `containerPhrasing` classifies the previous sibling's `after` by it; both `<` and `[`
- * are punctuation, so the sibling's escaping is the same either way, and the answer is exact.
+ * are punctuation, so the sibling's escaping is the same either way, and the answer is exact. A
+ * literal written as its escaped text answers its first character, as a bare one does: a literal
+ * whose url holds `|` is a `www.` or a scheme literal, whose first character is a letter `safe`
+ * never escapes.
  *
  * Installed in the shape of {@link installSurrogateWidening}: from the app `root` handler on the
  * `State` it receives, once per `State` (the marker), the original reached through
@@ -1287,17 +1322,19 @@ function installAutolinkFallback(state: WidenedState): void {
   // A literal written bare is its text child and nothing else, so it is serialised as that child
   // alone: `containerPhrasing` dispatches the child (the position map places it, and the link
   // takes its hull), and {@link handleText} writes the literal raw because the construct stack is
-  // the parent's, `phrasing` on it.
+  // the parent's, `phrasing` on it — or escaped in that stack, when its `|` would cut its cell.
   const bare = (node: Link): boolean => writesLiteralsRaw(state, node) && writesBare(node);
+  const keepsAutolink = (value: string, node: Link): boolean =>
+    autolinkCarriesUrl(value, node.url) && !(value.startsWith("<") && cutsCell(state, value));
   const link: PeekableHandle = (node, parent, _state, info) => {
     if (bare(node)) return state.containerPhrasing(node, info);
     const value = original.call(state, node, parent, state, info);
-    return autolinkCarriesUrl(value, node.url) ? value : asResourceLink(node, parent, state, info);
+    return keepsAutolink(value, node) ? value : asResourceLink(node, parent, state, info);
   };
   link.peek = (node, parent, _state, info) => {
     if (bare(node)) return textOf(node).charAt(0);
     const value = original.call(state, node, parent, state, info);
-    if (!autolinkCarriesUrl(value, node.url)) return "[";
+    if (!keepsAutolink(value, node)) return "[";
     return originalPeek.call(state, node, parent, state, info);
   };
   state.handlers.link = link;
