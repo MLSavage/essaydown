@@ -40,6 +40,8 @@ const LEAD = "Writing";
 const HEADING = `${EDITOR} > h2`;
 /** Between "Writing" and " with" in paragraph 2 — no mark before it, so a plain-text offset is a `ch`. */
 const OFFSET = 7;
+/** Case (1)'s confirmed click target: inside the heading's text, past its leading character. */
+const HEADING_OFFSET = 2;
 
 interface Readout {
   readonly surface: string | null;
@@ -81,20 +83,25 @@ async function surfaceDom(): Promise<{ surface: string | null; proseMirror: numb
   }));
 }
 
-/** Cmd/Ctrl+/ and wait for `surface` to be the one showing, with its view focused. */
+/**
+ * Cmd/Ctrl+/ and wait for `surface` to be the one showing, with its view focused — two waits in
+ * sequence (DECISIONS #055) so a failure names which half missed: the surface attribute never
+ * flipping, or the view never taking focus once it had.
+ */
 async function toggleTo(surface: "rendered" | "source"): Promise<void> {
   await pressModChord("/");
   const selector = surface === "source" ? SOURCE : EDITOR;
   await browser.waitUntil(
     () =>
       browser.execute(
-        (want, sel) =>
-          document.querySelector('[data-testid="document"]')?.getAttribute("data-surface") === want &&
-          document.activeElement === document.querySelector(sel),
+        (want) => document.querySelector('[data-testid="document"]')?.getAttribute("data-surface") === want,
         surface,
-        selector,
       ),
-    { timeout: 5000, interval: 25, timeoutMsg: `Cmd/Ctrl+/ never showed the ${surface} view focused` },
+    { timeout: 2500, interval: 25, timeoutMsg: `Cmd/Ctrl+/ never showed the ${surface} surface` },
+  );
+  await browser.waitUntil(
+    () => browser.execute((sel) => document.activeElement === document.querySelector(sel), selector),
+    { timeout: 2500, interval: 25, timeoutMsg: `the ${surface} view never took focus` },
   );
 }
 
@@ -244,6 +251,49 @@ async function intoSourceAtParagraph(): Promise<void> {
   await toggleTo("source");
 }
 
+/** The ProseMirror position of offset 2 in the first depth-2 heading of the document `markdown`
+ * parses to (block offset + 1 + 2; a heading, so no mark lies before the offset). */
+function headingHead(markdown: string): number {
+  const { doc } = mdastToPM(parse(markdown));
+  let head = -1;
+  doc.forEach((node, offset) => {
+    if (head < 0 && node.type.name === "heading" && node.attrs.depth === 2) head = offset + 1 + HEADING_OFFSET;
+  });
+  assert.ok(head >= 0, "the first depth-2 heading is not in the editor's document");
+  return head;
+}
+
+/**
+ * The rendered caret at the first depth-2 heading's offset 2, confirmed in both the editor's own
+ * state (the store's cursor) and its focus — case (1)'s click is the first pointer event after
+ * `openThroughRestore`'s reload, before which the editor holds no focus at all (DECISIONS #055);
+ * a click whose caret or focus the editor does not confirm is made again, as `caretAtParagraph`
+ * already does for its own target.
+ */
+async function caretAtHeading(): Promise<void> {
+  const head = headingHead((await readout()).markdown);
+  let lastCursor: number | null = null;
+  let lastFocused = false;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await caretAtText(EDITOR, HEADING, HEADING_OFFSET);
+    const placed = await browser
+      .waitUntil(
+        async () => {
+          lastCursor = (await readout()).cursor;
+          lastFocused = await browser.execute(
+            (sel) => document.activeElement === document.querySelector(sel),
+            EDITOR,
+          );
+          return lastCursor === head && lastFocused;
+        },
+        { timeout: 1500, interval: 25 },
+      )
+      .catch(() => false);
+    if (placed) return;
+  }
+  assert.fail(`the click never put the editor's caret at ${head} with focus (cursor ${lastCursor}, focused ${lastFocused})`);
+}
+
 describe("the source toggle in the desktop shell (task 3.19, PRD §146)", () => {
   let workspace: string;
   let doc: string;
@@ -259,7 +309,7 @@ describe("the source toggle in the desktop shell (task 3.19, PRD §146)", () => 
   it("(1) Cmd/Ctrl+/ shows the source view holding format(parse(file)) byte-exact, and back; the pair changes nothing", async function () {
     this.timeout(90000);
     assert.equal(CANONICAL.split("\n")[PARAGRAPH_LINE - 1], paragraphOf(CANONICAL), "index.json's line is not paragraph 2's");
-    await caretAtText(EDITOR, HEADING, 2);
+    await caretAtHeading();
     const before = await readout();
     assert.equal(before.surface, "rendered");
     assert.equal(before.markdown, CANONICAL);

@@ -89,8 +89,22 @@ describe("autosave and external changes", () => {
     await typeText(EDITOR, "X");
     await browser.pause(600);
     assert.equal(readFileSync(doc, "utf8"), "HelloX\n");
-    const sidecar = JSON.parse(readFileSync(join(workspace, "a.essaydown.json"), "utf8")) as { version: number };
-    assert.equal(sidecar.version, 1);
+    const sidecarPath = join(workspace, "a.essaydown.json");
+    let sidecar: { version: number } | undefined;
+    await waitFor(
+      async () => {
+        if (!existsSync(sidecarPath)) return false;
+        try {
+          sidecar = JSON.parse(readFileSync(sidecarPath, "utf8")) as { version: number };
+          return sidecar.version === 1;
+        } catch {
+          return false;
+        }
+      },
+      3000,
+      "the sidecar never reached version 1 on disk",
+    );
+    assert.equal(sidecar?.version, 1);
   });
 
   it("an externally written sidecar survives the next autosave (DECISIONS #review-2-r0 U5)", async () => {
