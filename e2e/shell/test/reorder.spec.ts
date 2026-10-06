@@ -8,7 +8,7 @@ import { parse } from "../../../packages/core/src/parse.js";
 import { sectionsOf } from "../../../packages/core/src/blocks.js";
 import { emptySidecar, type Sidecar } from "../../../packages/core/src/sidecar.js";
 import { applyAddVariant } from "../../../packages/core/src/rewrite.js";
-import { caretAtText, clickCentreOf, dragBetween, pressModChord, reloadPage } from "./routes.js";
+import { caretAtText, clickCentreOf, dragBetween, editableTextOf, pressModChord, reloadPage } from "./routes.js";
 
 // Reorder mode (task 3.5). Acceptance: sentence 3 → 1 in paragraph 4 → expected/essay-fixture.
 // reorder-sentence.md with marks intact; paragraph 2 → 4 in section 3 → expected/essay-fixture.
@@ -147,7 +147,7 @@ async function openThroughRestore(folder: string, file: string): Promise<void> {
  * through the block's text: `caretAtText` centres the block in the viewport first, and with both
  * sidebars open a long paragraph is taller than the window, so its first line can be above it. */
 async function caretInto(at: number, ready: () => Promise<boolean>, what: string): Promise<void> {
-  const length = await browser.execute((sel) => document.querySelector(sel)?.textContent?.length ?? 0, blockSelector(at));
+  const length = (await editableTextOf(blockSelector(at))).length;
   assert.ok(length > 0, `block ${at} has no text`);
   await caretAtText(EDITOR, blockSelector(at), Math.floor(length / 2));
   await browser.waitUntil(ready, { timeout: 5000, interval: 50, timeoutMsg: `the sidebar never showed ${what}` });

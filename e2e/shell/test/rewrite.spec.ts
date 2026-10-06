@@ -7,7 +7,7 @@ import { platform } from "node:os";
 import { parse } from "../../../packages/core/src/parse.js";
 import { blocksOf } from "../../../packages/core/src/blocks.js";
 import { parseSidecar, type Sidecar } from "../../../packages/core/src/sidecar.js";
-import { caretAtText, clickCentreOf, dragBetween, pressModChord, reloadPage, selectText, typeText } from "./routes.js";
+import { caretAtText, clickCentreOf, dragBetween, editableTextOf, pressModChord, reloadPage, selectText, typeText } from "./routes.js";
 
 // Rewrite mode (task 3.4). Acceptance, on essay-fixture paragraph 4: add 2 variants to sentence 2,
 // choose variant 2 → the Markdown equals fixtures/markdown/expected/essay-fixture.rewrite.md with
@@ -132,11 +132,7 @@ async function openThroughRestore(folder: string, file: string): Promise<void> {
 /** The caret into paragraph 4 at the start of the sentence that begins with `prefix`, and the
  * sidebar showing that sentence's card as the active one. */
 async function caretInto(prefix: string, index: number): Promise<void> {
-  const offset = await browser.execute(
-    (sel, text) => document.querySelector(sel)?.textContent?.indexOf(text) ?? -1,
-    BLOCK,
-    prefix,
-  );
+  const offset = (await editableTextOf(BLOCK)).indexOf(prefix);
   assert.ok(offset >= 0, `paragraph 4 does not contain ${prefix}`);
   await caretAtText(EDITOR, BLOCK, offset + 2);
   await browser.waitUntil(async () => (await cardView(card(index)))?.active === "true", {
@@ -281,7 +277,7 @@ describe("Rewrite mode (task 3.4)", () => {
 
   it("an edit elsewhere in the paragraph: still anchored", async function () {
     this.timeout(60000);
-    const offset = await browser.execute((sel) => document.querySelector(sel)?.textContent?.indexOf("Metal") ?? -1, BLOCK);
+    const offset = (await editableTextOf(BLOCK)).indexOf("Metal");
     assert.equal(offset, 0);
     await caretAtText(EDITOR, BLOCK, "Metal".length);
     await typeText(EDITOR, " ink");
@@ -312,17 +308,12 @@ describe("Rewrite mode (task 3.4)", () => {
 
   it("retype the sentence entirely: the card is in 'Unattached'", async function () {
     this.timeout(60000);
-    const range = await browser.execute(
-      (sel, text) => {
-        // Sentence 2 is the paragraph's last, so it runs to the block's end. The rendered text is
-        // not the plain sentence: the caret's block shows its marks' delimiters (`*worse*`) as
-        // widgets, so the range is read from its first words to the end of the block.
-        const content = document.querySelector(sel)?.textContent ?? "";
-        return { from: content.indexOf(text), to: content.length, content };
-      },
-      BLOCK,
-      "If anything, a metal nib",
-    );
+    // Sentence 2 is the paragraph's last, so it runs to the block's end. Offsets are in the
+    // block's plain-text coordinate (`editableTextOf`, routes.ts): the caret's block shows its
+    // marks' delimiters (`*worse*`) as `contenteditable="false"` widgets, which that coordinate
+    // skips, so the range runs from the sentence's first words to the end of the block's own text.
+    const content = await editableTextOf(BLOCK);
+    const range = { from: content.indexOf("If anything, a metal nib"), to: content.length, content };
     assert.ok(range.from > 0, `sentence 2 is not in paragraph 4: ${JSON.stringify(range.content)}`);
     await selectText(EDITOR, BLOCK, range.from, range.to);
     await typeText(EDITOR, RETYPED);

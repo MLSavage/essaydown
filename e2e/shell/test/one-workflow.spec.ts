@@ -10,7 +10,7 @@ import { parse } from "../../../packages/core/src/parse.js";
 import { applyNewQuestion, applySetQuestion } from "../../../packages/core/src/outline.js";
 import { applyAddVariant, applyUseVariant } from "../../../packages/core/src/rewrite.js";
 import { applyReorderSentences, emptySidecar, type DocumentState } from "../../../packages/core/src/sidecar.js";
-import { caretAtText, clickCentreOf, dragBetween, pressModChord, reloadPage, typeText } from "./routes.js";
+import { caretAtText, clickCentreOf, dragBetween, editableTextOf, pressModChord, reloadPage, typeText } from "./routes.js";
 
 // Task 3.6, PRD §3 steps 1-6, encoded once for every later gate to reuse: a fresh temp folder, a
 // fresh Untitled file (no pre-seeded fixture), Outline's 3 questions, Produce's 2 paragraphs under
@@ -305,7 +305,7 @@ describe("the one workflow (task 3.6, PRD §3 steps 1-6)", () => {
       // here never are. `caretAtText` at the block's own text length is the general route
       // (reorder.spec.ts/rewrite.spec.ts already place a caret this way).
       const headingSelector = await blockSelectorAt(headingAt);
-      const headingLength = await browser.execute((sel) => document.querySelector(sel)?.textContent?.length ?? 0, headingSelector);
+      const headingLength = (await editableTextOf(headingSelector)).length;
       await caretAtText(EDITOR, headingSelector, headingLength);
       for (const sentence of body) {
         await browser.keys(["Enter"]);
@@ -329,11 +329,7 @@ describe("the one workflow (task 3.6, PRD §3 steps 1-6)", () => {
 
     const firstParagraph = headingIndices(producedState().root)[0] + 1;
     const card = rewriteCard(firstParagraph, 1);
-    const offset = await browser.execute(
-      (sel, text) => document.querySelector(sel)?.textContent?.indexOf(text) ?? -1,
-      blockSelector(firstParagraph),
-      REWRITE_SENTENCE_PREFIX,
-    );
+    const offset = (await editableTextOf(blockSelector(firstParagraph))).indexOf(REWRITE_SENTENCE_PREFIX);
     assert.ok(offset >= 0, `paragraph ${firstParagraph} does not contain ${REWRITE_SENTENCE_PREFIX}`);
     await caretAtText(EDITOR, blockSelector(firstParagraph), offset + 2);
     await browser.waitUntil(async () => (await cardActive(card)) === "true", {
@@ -368,7 +364,7 @@ describe("the one workflow (task 3.6, PRD §3 steps 1-6)", () => {
     });
 
     const lastParagraph = rewrittenState().root.children.length - 1;
-    const length = await browser.execute((sel) => document.querySelector(sel)?.textContent?.length ?? 0, blockSelector(lastParagraph));
+    const length = (await editableTextOf(blockSelector(lastParagraph))).length;
     assert.ok(length > 0, `the last paragraph (block ${lastParagraph}) has no text`);
     await caretAtText(EDITOR, blockSelector(lastParagraph), Math.floor(length / 2));
     await browser.waitUntil(async () => (await count(chip(0))) === 1 && (await count(chip(1))) === 1, {

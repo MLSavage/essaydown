@@ -23,11 +23,60 @@ export const driverProvider = selectDriverProvider(platform(), process.env.ESSAY
 const embedded = driverProvider === "embedded";
 const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 
-/** Reloads the page and returns once the navigation has completed: WebDriver's own Refresh on both
+const RELOAD_STAMP = "data-essaydown-reload-stamp";
+
+/** Reloads the page and returns once the old document is gone: WebDriver's own Refresh on both
  * legs, never a reload started from inside an execute script (which returns before the old document
- * is gone, and on the embedded provider wipes the result the execute is polling for). */
+ * is gone, and on the embedded provider wipes the result the execute is polling for). external: the
+ * driver's Refresh waits for the navigation itself. embedded: the provider's Refresh is
+ * `window.location.reload(); null;` (tauri-plugin-wdio-webdriver 1.4.0 executor.rs `refresh`), which
+ * returns at once, so a readiness predicate already true on the old document would pass on it (task
+ * 3.21) — the route stamps the old document's root in one execute before the Refresh, then polls
+ * `getPageSource` (the provider's direct evaluate, not one of the six commands `@wdio/tauri-service`
+ * hooks, docs/lessons.md [2.4]; never an execute, whose result a dying window can lose) until the
+ * stamp is gone, bounded at 15 s. */
 export async function reloadPage(): Promise<void> {
+  if (!embedded) {
+    await browser.refresh();
+    return;
+  }
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await browser.execute((name, value) => document.documentElement.setAttribute(name, value), RELOAD_STAMP, stamp);
   await browser.refresh();
+  await browser.waitUntil(
+    async () => {
+      try {
+        return !(await browser.getPageSource()).includes(stamp);
+      } catch {
+        return false;
+      }
+    },
+    { timeout: 15000, interval: 50, timeoutMsg: "the old document was still there 15 s after the reload" },
+  );
+}
+
+/** The ownership rule for a block's plain-text coordinate (task 3.21), stated once here and applied by
+ * `textPoint`, `selectDomText`'s `locate` and `editableTextOf`: it is the concatenation of the
+ * block's text nodes that have no `[contenteditable="false"]` ancestor inside the block. The reveal
+ * plugin (packages/editor/src/reveal.ts, DECISIONS #037) draws the caret block's heading marker and
+ * mark delimiters as `contenteditable="false"` widget text inside the block the moment the caret
+ * enters it, so a coordinate over every text node shifts under the route that placed the caret. A
+ * widget is zero-width in this coordinate: an offset at its edge belongs to the editable text node
+ * before it (the start of the next one when none precedes it). Each in-page copy of the filter is an
+ * anonymous arrow (a named inner function picks up a `__name` helper the page lacks; reorder.spec.ts). */
+export async function editableTextOf(blockSelector: string): Promise<string> {
+  const text = await browser.execute((sel) => {
+    const block = document.querySelector(sel);
+    if (block === null) return null;
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, (node) =>
+      node.parentElement?.closest('[contenteditable="false"]')?.contains(block) === false ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    );
+    let out = "";
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) out += node.textContent ?? "";
+    return out;
+  }, blockSelector);
+  assert.ok(text !== null, `${blockSelector} is not on the page`);
+  return text;
 }
 
 /** A real mouse click at the centre of `selector`'s bounding rect (a click at a computed point,
@@ -35,10 +84,14 @@ export async function reloadPage(): Promise<void> {
  * `@wdio/tauri-service` hooks with a ~5 s focus check (docs/lessons.md [2.4], [2.5]). On the
  * embedded leg the provider's pointer action is a dispatched mousedown/mouseup/click, which runs
  * the click handlers but not a native mousedown's default action, so nothing takes focus and a
- * following F2 goes nowhere; the route then focuses the nearest focusable ancestor of the point,
- * as the provider's own element click does after `el.click()`. */
+ * following F2 goes nowhere; the route performs that default itself, in the same execute that
+ * measures the point and so before the press, as a native mousedown does: it focuses the nearest
+ * focusable ancestor of the point, or blurs the focused element when there is none. Resolving it
+ * after the click instead read whatever the click's own re-render left under a stale point — a
+ * Rewrite variant radio under 'Use this', which kept focus there and a following Cmd/Ctrl+Z went to
+ * the radio, not the store (task 3.21). */
 export async function clickCentreOf(selector: string): Promise<void> {
-  const centre = await browser.execute((sel) => {
+  const centre = await browser.execute((sel, focusAtPress) => {
     const element = document.querySelector(sel);
     if (element === null) return null;
     // Task 3.6's workflow spec is the first to click a page-level control (a mode button) after
@@ -48,24 +101,22 @@ export async function clickCentreOf(selector: string): Promise<void> {
     // every prior call (editor text, dialog fields) keeps its own scroll position.
     element.scrollIntoView({ block: "nearest", inline: "nearest" });
     const rect = element.getBoundingClientRect();
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  }, selector);
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+    if (focusAtPress) {
+      const target = document.elementFromPoint(x, y)?.closest("a[href], button, input, [tabindex], [contenteditable='true']");
+      if (target instanceof HTMLElement) target.focus();
+      else if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    }
+    return { x, y };
+  }, selector, embedded);
   assert.ok(centre !== null, `${selector} is not on the page`);
   await browser
     .action("pointer", { parameters: { pointerType: "mouse" } })
-    .move({ x: Math.round(centre.x), y: Math.round(centre.y), origin: "viewport" })
+    .move({ x: centre.x, y: centre.y, origin: "viewport" })
     .down({ button: 0 })
     .up({ button: 0 })
     .perform();
-  if (!embedded) return;
-  await browser.execute(
-    (x, y) => {
-      const target = document.elementFromPoint(x, y)?.closest("a[href], button, input, [tabindex], [contenteditable='true']");
-      if (target instanceof HTMLElement) target.focus();
-    },
-    Math.round(centre.x),
-    Math.round(centre.y),
-  );
 }
 
 /** The WebDriver element id of the focused element, which must match `selector` — the editor after
@@ -142,14 +193,17 @@ export async function placeCaret(editorSelector: string, blockSelector: string, 
 /** The viewport point at plain-text offset `offset` of `blockSelector` (the left edge of the
  * character there, or the right edge of the one before it at the block's end), vertically centred
  * on its line, after the block is scrolled to the viewport's centre. Computed from a DOM Range over
- * the block's text nodes, so a click there is "a click at a computed point" (DECISIONS #022). */
+ * the block's editable text nodes (`editableTextOf`'s rule), so a click there is "a click at a computed point" (DECISIONS #022). */
 async function textPoint(blockSelector: string, offset: number): Promise<{ x: number; y: number }> {
   const point = await browser.execute(
     (sel, at) => {
       const block = document.querySelector(sel);
       if (block === null) return null;
       block.scrollIntoView({ block: "center" });
-      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      // The plain-text coordinate (`editableTextOf`'s rule): widget text is skipped.
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, (node) =>
+        node.parentElement?.closest('[contenteditable="false"]')?.contains(block) === false ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+      );
       const nodes: Node[] = [];
       for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) nodes.push(node);
       let seen = 0;
@@ -176,7 +230,7 @@ async function textPoint(blockSelector: string, offset: number): Promise<{ x: nu
   return { x: Math.round(point.x), y: Math.round(point.y) };
 }
 
-/** Sets the DOM selection to plain-text offsets `[from, to)` of `blockSelector` and polls until it
+/** Sets the DOM selection to plain-text offsets `[from, to)` (`editableTextOf`'s coordinate) of `blockSelector` and polls until it
  * holds (the embedded leg's caret route; see `placeCaret` for why it is re-applied). */
 async function selectDomText(editorSelector: string, blockSelector: string, from: number, to: number): Promise<void> {
   await browser.execute((editorSel) => (document.querySelector(editorSel) as HTMLElement | null)?.focus(), editorSelector);
@@ -188,7 +242,10 @@ async function selectDomText(editorSelector: string, blockSelector: string, from
           const selection = window.getSelection();
           if (block === null || selection === null) return false;
           const locate = (at: number): [Node, number] | null => {
-            const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+            // The plain-text coordinate (`editableTextOf`'s rule): widget text is skipped.
+            const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, (node) =>
+              node.parentElement?.closest('[contenteditable="false"]')?.contains(block) === false ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+            );
             let seen = 0;
             for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
               const length = node.textContent?.length ?? 0;
@@ -306,13 +363,53 @@ export async function deleteBackward(editorSelector: string): Promise<void> {
 /** The platform's Cmd/Ctrl as WebDriver names it: Cmd on macOS, Ctrl elsewhere — the same choice
  * `prosemirror-keymap`'s `Mod-` and the app's mode chords make (apps/desktop/src/modes/modes.ts),
  * so a chord pressed here is the one the app binds and never the other platform's. */
-const MOD_KEY = platform() === "darwin" ? "Meta" : "Control";
+export const MOD_KEY = platform() === "darwin" ? "Meta" : "Control";
+
+/** keyCode/which of each named key `pressModChord` synthesises on the embedded leg. */
+const NAMED_KEY_CODES: Record<string, number> = { Enter: 13 };
 
 /** Presses Cmd/Ctrl + `key` (task 3.1: the mode bar's Cmd/Ctrl+1–4 and the store's Cmd/Ctrl+Z) at
- * the focused element. Both legs send it as WebDriver key actions: a keydown the app's own
- * handlers read (like F2/Enter/Escape above), never a caret motion (CLAUDE.md, DECISIONS #022). */
+ * the focused element: a keydown the app's own handlers read (like F2/Enter/Escape above), never a
+ * caret motion (CLAUDE.md, DECISIONS #022). external, and a printable key on both legs: WebDriver
+ * key actions. embedded, a key WebdriverIO maps to a WebDriver named key (`key.length > 1`): the
+ * provider's `dispatch_key_event` (tauri-plugin-wdio-webdriver 1.4.0 executor.rs) builds Enter,
+ * Escape, the arrows and the other named keys with no modifier flags at all — only printable keys
+ * carry its ModifierState — so the route dispatches the keydown then keyup itself on
+ * `document.activeElement`, with the flags the provider's own printable route would set (task 3.21;
+ * docs/V1.1-BACKLOG.md `[3.21, embedded chords on named keys]`). */
 export async function pressModChord(key: string): Promise<void> {
-  await browser.keys([MOD_KEY, key]);
+  if (!embedded || key.length === 1) {
+    await browser.keys([MOD_KEY, key]);
+    return;
+  }
+  const keyCode = NAMED_KEY_CODES[key];
+  assert.ok(keyCode !== undefined, `pressModChord has no embedded route for the named key ${key}`);
+  const dispatched = await browser.execute(
+    (name, code, meta) => {
+      const target = document.activeElement ?? document.body;
+      for (const type of ["keydown", "keyup"]) {
+        target.dispatchEvent(
+          new KeyboardEvent(type, {
+            key: name,
+            code: name,
+            keyCode: code,
+            which: code,
+            bubbles: true,
+            cancelable: true,
+            metaKey: meta,
+            ctrlKey: !meta,
+            shiftKey: false,
+            altKey: false,
+          }),
+        );
+      }
+      return true;
+    },
+    key,
+    keyCode,
+    MOD_KEY === "Meta",
+  );
+  assert.ok(dispatched, `the ${MOD_KEY}+${key} chord was not dispatched`);
 }
 
 /** A pointer drag from `from` to `to` (viewport points), task 3.2's Outline tree drag. `@dnd-kit/core`'s
