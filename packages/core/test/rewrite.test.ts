@@ -140,11 +140,28 @@ describe("applyUseVariant", () => {
     expect(() => applyUseVariant(withTwoVariants(), [P4, 1], 2, "t")).toThrow(RangeError);
   });
 
-  it("the no-op variant re-serialises byte-identically for every fixture (corpus identity)", () => {
-    let checked = 0;
-    for (const name of names) {
+  // The card count per fixture, counted once and cached: every top-level paragraph's rewriteCards,
+  // with nothing applied. The per-fixture test below asserts its applied count against this
+  // fixture's entry; the totals test sums the whole map, so neither depends on test order.
+  const cardCounts = new Map<string, number>();
+  function cardCountOf(name: string): number {
+    const cached = cardCounts.get(name);
+    if (cached !== undefined) return cached;
+    const markdown = readFileSync(`${FIXTURES}/${name}`, "utf8");
+    const count = paragraphs(markdown).reduce(
+      (sum, at) => sum + (rewriteCards(stateOf(markdown), at)?.length ?? 0),
+      0,
+    );
+    cardCounts.set(name, count);
+    return count;
+  }
+
+  it.each(names)(
+    "%s: the no-op variant re-serialises byte-identically (corpus identity)",
+    (name) => {
       const markdown = readFileSync(`${FIXTURES}/${name}`, "utf8");
       const canonical = format(parse(markdown));
+      let checked = 0;
       for (const at of paragraphs(markdown)) {
         const before = stateOf(markdown);
         for (const card of rewriteCards(before, at) ?? []) {
@@ -157,11 +174,16 @@ describe("applyUseVariant", () => {
           checked += 1;
         }
       }
-    }
-    expect(checked).toBeGreaterThan(names.length);
-    // Every sentence of every top-level paragraph of every fixture: ~3 s alone, more under the
-    // parallel suite, so the default 5 s is too tight.
-  }, 30_000);
+      // Both summands present: the applied count and the counted card count for this fixture.
+      expect(checked).toBe(cardCountOf(name));
+    },
+    30_000,
+  );
+
+  it("the corpus holds more rewrite cards than top-level paragraphs (corpus identity totals)", () => {
+    const totalCards = names.reduce((sum, name) => sum + cardCountOf(name), 0);
+    expect(totalCards).toBeGreaterThan(names.length);
+  });
 });
 
 describe("anchoring across typing", () => {

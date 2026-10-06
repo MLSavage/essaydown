@@ -262,7 +262,8 @@ describe("corpus-wide identity invariant over fixtures/markdown/index.json", () 
     expect(totals.fixtures).toBeGreaterThan(0);
     expect(totals.paragraphs).toBeGreaterThan(0);
     expect(totals.sentences).toBeGreaterThan(totals.paragraphs);
-  });
+    // Every top-level paragraph of every fixture, twice per sentence: rewrite.test.ts's form (30_000).
+  }, 30_000);
 
   it.each(names)(
     "%s: an identity reorder and a self-replacement leave every top-level paragraph byte-identical",
