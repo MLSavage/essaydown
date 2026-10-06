@@ -1361,10 +1361,23 @@ function inlineToMdast(nodes: readonly PMNode[]): PhrasingContent[] {
   return out;
 }
 
-/** The end of `mark`'s maximal run starting at `i`: the first index after it that does not carry it. */
+/**
+ * The end of `mark`'s maximal run starting at `i`: the first index after it that does not carry it.
+ *
+ * An `inline_code` run is narrower (task 3.23, DECISIONS #review-3-r0 C1, C6): `inlineCode` holds
+ * literal text only, so the run continues only across nodes of `i`'s own markup — text, with the
+ * whole mark set `i` has (`sameMarkup`). A node with one more mark — `code+link` after a typed `code` character — would otherwise
+ * fold into the code value and its link be lost, and a `hard_break` would fold in as its empty
+ * `textContent` and the break be lost; each instead ends the run.
+ */
 function runEnd(nodes: readonly PMNode[], i: number, mark: PMMark): number {
+  const code = mark.type === schema.marks.inline_code;
   let j = i + 1;
-  while (j < nodes.length && mark.isInSet(nodes[j].marks)) j += 1;
+  while (
+    j < nodes.length &&
+    (code ? nodes[j].sameMarkup(nodes[i]) : mark.isInSet(nodes[j].marks))
+  )
+    j += 1;
   return j;
 }
 
@@ -1381,13 +1394,18 @@ function runHasEdgeWhitespace(nodes: readonly PMNode[], i: number, j: number): b
  * flanking mark over a run with edge whitespace yields to it (task 1.35), a literal `link` tied
  * with a flanking mark yields to it over any run — a GFM autolink literal holds plain text only, so
  * `*https://a.b*` is emphasis around the literal and is written bare only so (task 3.14) — and
- * `inline_code`, which can hold nothing, is never chosen while another mark is on the node.
+ * `inline_code`, which can hold nothing, is never chosen while another mark is on the node, nor on
+ * a node that is not text (a `hard_break` carrying it is written as the break it is, task 3.23).
  */
 function outermostMark(nodes: readonly PMNode[], i: number): PMMark | undefined {
   let best: PMMark | undefined;
   let bestEnd = i;
   for (const mark of nodes[i].marks) {
-    if (mark.type === schema.marks.inline_code && nodes[i].marks.length > 1) continue;
+    if (
+      mark.type === schema.marks.inline_code &&
+      (nodes[i].marks.length > 1 || !nodes[i].isText)
+    )
+      continue;
     const end = runEnd(nodes, i, mark);
     if (best === undefined || end > bestEnd) {
       best = mark;

@@ -336,6 +336,22 @@ describe("insertHardBreak (Shift-Enter)", () => {
     typed.moveTo(from, to).press("Shift-Enter");
     expect(typed.markdown()).toBe("alpha\\\nta\n");
   });
+
+  it("gives the break no marks when the selection starts at a paragraph's end and crosses into the next (task 3.23)", () => {
+    // `marksAcross` is null there (no inline node after the selection's start), the case
+    // `replaceSelectionWith`'s own inheritance answers with no marks; the command keeps that.
+    const typed = new Typing().type("*alpha*").press("Enter").type("*beta*");
+    const from = textPos(typed.state, "alpha", 5);
+    const to = textPos(typed.state, "beta", 2);
+    typed.moveTo(from, to).press("Shift-Enter");
+    const marks: string[] = [];
+    typed.state.doc.descendants((node) => {
+      if (node.type === schema.nodes.hard_break) marks.push(...node.marks.map((m) => m.type.name));
+      return true;
+    });
+    expect(marks).toEqual([]);
+    expect(typed.markdown()).toBe("*alpha*\\\n*ta*\n");
+  });
 });
 
 describe("the keymap", () => {

@@ -223,7 +223,17 @@ export const insertHardBreak: Command = (state, dispatch) => {
   if (parentType === schema.nodes.heading || parentType === schema.nodes.table_cell) return true;
   if (parentType !== schema.nodes.paragraph) return false;
   if (dispatch) {
-    dispatch(state.tr.replaceSelectionWith(schema.nodes.hard_break.create()).scrollIntoView());
+    // The marks `replaceSelectionWith`'s default `inheritMarks` would give the break, minus
+    // `inline_code` (task 3.23, DECISIONS #review-3-r0 C1): a code span holds no break, so a break
+    // carrying it is written as nothing. Emphasis, strong, delete and link stay as they were.
+    const { selection, storedMarks } = state;
+    const inherited =
+      storedMarks ??
+      (selection.empty ? selection.$from.marks() : selection.$from.marksAcross(selection.$to)) ??
+      [];
+    const marks = schema.marks.inline_code.removeFromSet(inherited);
+    const node = schema.nodes.hard_break.create(null, null, marks);
+    dispatch(state.tr.replaceSelectionWith(node, false).scrollIntoView());
   }
   return true;
 };
