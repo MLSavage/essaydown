@@ -5408,16 +5408,84 @@
   ]
  },
  {
+  "id": "3.30",
+  "model": "sonnet",
+  "description": "Phase 3 test-only repair after the 3.verify.r3.g1h GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a); DECISIONS #039's class, the 3.26/3.29 pattern; DECISIONS #058; ci.yml run 37575244182 at d75e722, ref ci/3.verify.r3.g1/a1; evidence /logs/ci/3.verify.r3.g1h/a1/): the `test` job on ubuntu, macOS and windows timed out `packages/core/test/rewrite.test.ts:199` (`applyUseVariant > essay-fixture.md > essay-fixture.md: its paragraphs' counted cards sum to the fixture's card count (corpus identity totals)`) at Vitest's default 5000 ms — 3.29 added it with no trailing budget, and its body (the uncached `cardCountOf`) runs past 5000 ms on every runner. Read that test's three durations and the totals test's three durations from /logs/ci/3.verify.r3.g1h/a1/test-logs/test-logs-<os>-latest/test.log and quote them in the journal; assert none. Fix, in the family's form (#039; the per-paragraph test's trailing argument at rewrite.test.ts:196, `30_000,` on its own line): the per-fixture sum test and the corpus totals test (`toBeGreaterThan(names.length)`) each take the trailing `30_000`, written on its own line as at :196. No body, title, oracle, cache, fixture or paragraph changes; the per-paragraph `it.each` is untouched; nothing under `packages/*/src`; no `.skip()`; no other budget literal. No mutation step: the gate's a1 log is the before (the container passes the unbudgeted test under 5000 ms, so the failure reproduces only on the runners). Append to docs/V1.1-BACKLOG.md one line `[3.30, …]` recording the uncached-totals bound (the sum of the per-fixture sum tests' durations in the a1 logs, per OS) and the filtered `-t 'corpus identity totals'` path (both counters uncached, about twice the sum test; not a CI path), with the trigger \"a `.g` gate shows either `corpus identity totals` test over `30_000`\" → a cheaper `cardCountOf` as its own task. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 3.30` before implementing; each attempt appends its own journal line. Scope: packages/core/test/rewrite.test.ts, docs/V1.1-BACKLOG.md, docs/lessons.md, the journal.",
+  "acceptance": "(1) `scripts/check` green. (2) `pnpm vitest run packages/core/test/rewrite.test.ts --reporter=verbose`, its output redirected to a file and grepped, green; the journal records the file's test count read from that output and from fixtures/markdown/index.json (never asserted as a literal), and the durations of `essay-fixture.md: its paragraphs' counted cards sum to the fixture's card count` and of `the corpus holds more rewrite cards than top-level paragraphs` copied from it. (3) `pnpm vitest run packages/core/test/rewrite.test.ts -t 'the corpus holds more rewrite cards' --reporter=verbose` (the totals test alone, so `cardCountOf` is uncached for every fixture — the order independence 3.29 claims), redirected and grepped, green; its duration copied into the journal. (4) `grep -c 'corpus identity' packages/core/test/rewrite.test.ts` and `grep -cE '^[[:space:]]+30_000,$' packages/core/test/rewrite.test.ts` print the same number — one family test title, one trailing budget (the relation is the acceptance; the numbers are read from the file) — and `awk '/corpus identity/{open++} /^[[:space:]]+30_000,$/{if(open!=1)exit 1; open=0} END{exit open!=0}' packages/core/test/rewrite.test.ts` exits 0 (every family title is followed by exactly one trailing budget before the next title). (5) 3.29's structure holds: `grep -c 'describe.each(names)' packages/core/test/rewrite.test.ts` prints 1; `grep -c 'it.each(names)'` prints 0; `grep -c 'it.each(paragraphs('` prints 1; `grep -c 'toBeGreaterThan(names.length)'` prints 1. (6) `git diff \"$(git merge-base HEAD phase/3)\" HEAD -- packages/core/test | grep -E '^\\+' | grep -oE '[0-9][0-9_]{3,}'` prints only `30_000`; and `git diff -w \"$(git merge-base HEAD phase/3)\" HEAD -- packages/core/test/rewrite.test.ts | grep -E '^[-+]' | grep -vE '^(\\+\\+\\+|---)' | grep -E 'expect|cardCountOf|paragraphCardCountOf|rewriteCards|stateOf|reduce|readFileSync|names\\.'` prints nothing (no assertion, oracle, counter or corpus line is added or removed). (7) The journal names each guard and what discharges it — the sum test's budget ((2) and (4)), the totals test's budget ((3) and (4)), the unchanged bodies ((6)) — quotes the six CI durations from the a1 logs, and names the backlog line. (8) `git diff --name-only \"$(git merge-base HEAD phase/3)\" HEAD` lists only `packages/core/test/rewrite.test.ts`, `docs/V1.1-BACKLOG.md`, `docs/lessons.md` (if written) and `docs/progress/journal-main.md`. (9) No manifest or lockfile change; zero new dependencies (PRD §4). (10) Each attempt appends its own `- [3.30] ` journal line.",
+  "dependencies": [
+   "3.verify.r3.g1h"
+  ],
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verify.r3.g2",
+  "model": "sonnet",
+  "description": "Phase 3 verification for review attempt r3, repair 2 of 3.verify.r3 after the 3.verify.r3.g1h GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a), §3, §5.5; DECISIONS #058): freeze dependencies (no lockfile change allowed), run the full suite in the container after 3.30, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. No procedure change and no code, test, fixture or config edit. 3.verify.r3 promoted no lessons; none are promoted here.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `git diff --stat` against 3.30's integrated commit shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "3.30"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify.r3.g2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite green on ubuntu and macOS (windows recorded, DECISIONS #047); every spec file under e2e/shell/test/, one-workflow steps 1–6 included, green on ubuntu and macOS (windows recorded) at the implementation SHA; logs in /logs/ci/3.verify.r3.g2h/accepted/.",
+  "phase": "3",
+  "execution": "loop",
+  "targetBranch": "phase/3"
+ },
+ {
+  "id": "3.verify.r3.g2h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "3.verify.r3.g2",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/3.verify.r3.g2/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "3",
+  "targetBranch": "phase/3",
+  "description": "CI gate for 3.verify.r3.g2: scripts/gate.sh 3.verify.r3.g2h pushes integrated_sha of 3.verify.r3.g2 to ci/3.verify.r3.g2/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\"] into /logs/ci/3.verify.r3.g2/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite green on ubuntu and macOS (windows recorded, DECISIONS #047); every spec file under e2e/shell/test/, one-workflow steps 1–6 included, green on ubuntu and macOS (windows recorded) at the implementation SHA; logs in /logs/ci/3.verify.r3.g2h/accepted/.",
+  "dependencies": [
+   "3.verify.r3.g2"
+  ]
+ },
+ {
   "id": "3.7.r3a",
   "model": "claude-opus",
   "execution": "reviewer",
   "reviewer": "claude",
   "reviewSet": "3.7",
   "reviewAttempt": "r3",
-  "description": "Review attempt r3, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3, attempt r3 (after the r2 FAIL, DECISIONS #review-3-r2; the two r2 reports were independent — DECISIONS #025's condition, the #044 warning on r2b read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/3.verify.r3.g1h/accepted/; the accepted logs stand for the cold build), that C15 is fixed by 3.28 — a table cell holding a literal link whose url has an already-escaped `\\|`, loaded from disk, saves byte-identical to the input with two cells on three consecutive saves, by the editor route and the core route, while 3.27's typed member keeps its escape, with the named guards — and that the r2 dispositions hold. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; literal-URL regression is read from the accepted test.log (url-bytes, url-typing, positions-corpus), not re-run; no new sweep, probe generator or browser drive beyond re-running your own r2 C15 probe once (your own r1 and r2 directories under /logs/reviews/3/ may be read), whose non-reproduction is the confirmation. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
+  "description": "Review attempt r3, claude reviewer, for review set 3.7 (phase 3). Review set for Phase 3, attempt r3 (after the r2 FAIL, DECISIONS #review-3-r2; the two r2 reports were independent — DECISIONS #025's condition, the #044 warning on r2b read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/3.verify.r3.g2h/accepted/; the accepted logs stand for the cold build), that C15 is fixed by 3.28 — a table cell holding a literal link whose url has an already-escaped `\\|`, loaded from disk, saves byte-identical to the input with two cells on three consecutive saves, by the editor route and the core route, while 3.27's typed member keeps its escape, with the named guards — and that the r2 dispositions hold. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; literal-URL regression is read from the accepted test.log (url-bytes, url-typing, positions-corpus), not re-run; no new sweep, probe generator or browser drive beyond re-running your own r2 C15 probe once (your own r1 and r2 directories under /logs/reviews/3/ may be read), whose non-reproduction is the confirmation. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
   "acceptance": "/logs/reviews/3/r3/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "3.verify.r3h"
+   "3.verify.r3.g2h"
   ],
   "phase": "3",
   "targetBranch": "phase/3"
@@ -5429,10 +5497,10 @@
   "reviewer": "sol",
   "reviewSet": "3.7",
   "reviewAttempt": "r3",
-  "description": "Review attempt r3, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3, attempt r3 (after the r2 FAIL, DECISIONS #review-3-r2; the two r2 reports were independent — DECISIONS #025's condition, the #044 warning on r2b read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/3.verify.r3.g1h/accepted/; the accepted logs stand for the cold build), that C15 is fixed by 3.28 — a table cell holding a literal link whose url has an already-escaped `\\|`, loaded from disk, saves byte-identical to the input with two cells on three consecutive saves, by the editor route and the core route, while 3.27's typed member keeps its escape, with the named guards — and that the r2 dispositions hold. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; literal-URL regression is read from the accepted test.log (url-bytes, url-typing, positions-corpus), not re-run; no new sweep, probe generator or browser drive beyond one bounded core-route probe over the loaded cell named in 3.28's text and its astral twin, each saved three times through format(parse(·)), whose non-reproduction is the confirmation. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
+  "description": "Review attempt r3, sol reviewer, for review set 3.7 (phase 3). Review set for Phase 3, attempt r3 (after the r2 FAIL, DECISIONS #review-3-r2; the two r2 reports were independent — DECISIONS #025's condition, the #044 warning on r2b read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/3.verify.r3.g2h/accepted/; the accepted logs stand for the cold build), that C15 is fixed by 3.28 — a table cell holding a literal link whose url has an already-escaped `\\|`, loaded from disk, saves byte-identical to the input with two cells on three consecutive saves, by the editor route and the core route, while 3.27's typed member keeps its escape, with the named guards — and that the r2 dispositions hold. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; literal-URL regression is read from the accepted test.log (url-bytes, url-typing, positions-corpus), not re-run; no new sweep, probe generator or browser drive beyond one bounded core-route probe over the loaded cell named in 3.28's text and its astral twin, each saved three times through format(parse(·)), whose non-reproduction is the confirmation. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
   "acceptance": "/logs/reviews/3/r3/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "3.verify.r3h"
+   "3.verify.r3.g2h"
   ],
   "phase": "3",
   "targetBranch": "phase/3"
