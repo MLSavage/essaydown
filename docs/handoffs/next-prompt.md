@@ -1,49 +1,43 @@
-Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 074: read it with `git show handoff/074:docs/handoffs/074-phase-3-r3-g1-gate-failed-plan-gate.md`. It is on `handoff/074`, stacked on `16072b3` (DECISIONS #057), which is cut from `phase/3` at `d75e722`; neither commit is in `phase/3` yet. Handoff 073 is already in `phase/3`, and 074 supersedes it.
+Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 075: read it with `git show handoff/075:docs/handoffs/075-phase-3-r3-reviews-done-principal-r3d.md`. It is on `handoff/075`, cut from `phase/3` at `1508473`, and is the only commit on that branch. Handoff 074 and DECISIONS #057 are already in `phase/3` (in `f87e8c0`); 075 supersedes 074. You are the fresh session that runs the reconciliation.
 
 **State.**
-- `3.29` and `3.verify.r3.g1` passed at attempt 1.
-- The `3.verify.r3.g1h` gate is `GATE-FAILED a1` (run 37575244182). The `test` job failed on all three OSes, on the same test: 3.29's new per-fixture sum test (`rewrite.test.ts:199`) has no trailing timeout and timed out at Vitest's default 5000 ms. e2e was green on all three OSes.
-- The runner is idle with `PLAN-GATE plan.3.verify.r3.g1h.r0` pending.
-- The runner's cached spec was loaded from `handoff/074` (`sync-state --ref`, #057), which rewires `3.7.r3a/b`. Every planning commit and the reconciliation must cherry-pick `phase/3..handoff/074` first.
-- `phase/3` is at `d75e722`, 3 commits ahead of origin (`27c6c86`).
+- The plan `plan.3.verify.r3.g1h.r0` (DECISIONS #058) has integrated.
+- 3.30 and `3.verify.r3.g2` passed at attempt 1, and the gate `3.verify.r3.g2h` ACCEPTed at a1 (run 37579169198).
+- The reviewers `3.7.r3a` (claude) and `3.7.r3b` (sol) passed at attempt 1.
+- The runner is idle at `PRINCIPAL 3.7.r3d`. Its spec comes from `phase/3` again; #057's deviation has ended.
+- The runner raised `WARN 3.7.r3b` (sibling name ×1, runner.log line 272764). It looks like `3.7.r3a`'s `tasks.json` row echoed in Sol's transcript; the reconciliation decides whether it is a read or a mention.
+- `phase/3` is at `1508473`, equal to origin.
 - The runner pane `essaydown:runner` is at a zsh prompt; no watcher is running.
 
 Your job this session, in order:
 
-1. Run `ralph/ralph.sh status` (expected: `plan requests: plan.3.verify.r3.g1h.r0:pending; blocked: 3.verify.r3.g1h:blocked`) and `ralph/ralph.sh doctor` (clean). Give Michael the one-line state and `git push origin phase/3` (recount with `git rev-list --count origin/phase/3..phase/3` first).
-2. PLAN-GATE is on Fable's trigger list. Brief Fable in writing on handoff 074's one question: is 3.30's scope a trailing `30_000` on the per-fixture sum test and the corpus totals test, or that plus a cheaper count pass? The route is rule (a), `.g2`: the failure is deterministic on three OSes, so it is not a rerun. Bring Michael the route only if the rules do not fully determine it.
-3. Answer the plan request through the plan protocol: `ralph/ralph.sh plan plan.3.verify.r3.g1h.r0`, working in `.wt/plan.3.verify.r3.g1h.r0`.
-   - **Cherry-pick `phase/3..handoff/074` (2 commits) first.**
-   - In PRD §8, append `3.30` and `3.verify.r3.g2`.
-   - Rewire `3.7.r3a/b`: change the **producer** id in `"dependencies":["3.verify.r3.g1"]` to `["3.verify.r3.g2"]`, and change their `/logs/ci/…g1h/accepted/` paths to `…g2h…`.
-   - Set `EXPECTED_COUNT` to 375, then run `generate-tasks` and `validate-tasks`.
-   - **Read `3.7.r3a/b`'s dependencies in the generated `ralph/tasks.json` with `node -e`.**
-   - Write DECISIONS `#058`, then commit `wip(plan.3.verify.r3.g1h.r0)` with the promise only in the message.
-   - Run `--dry-run`, then restart. A plan the runner integrates syncs its own spec (`ralph/lib/run.mjs:250`).
-4. Restart with `tmux send-keys -t essaydown:runner 'ralph/ralph.sh run --phase 3 2>&1 | tee -a .evidence/runner.log' Enter`, then arm handoff 074's watcher:
+1. Run `ralph/ralph.sh status` (expected: `3.7.r3d principal-pending`) and `ralph/ralph.sh doctor` (clean). Give Michael the one-line state.
+2. Run the reconciliation `PRINCIPAL 3.7.r3d` (the Phase 3 review set id is `3.7`, from `ralph/tasks.json`). It works in `.wt/3.7.r3d` on `task/3.7.r3d`:
+   - `git cherry-pick handoff/075`;
+   - read the two reports at `.evidence/reviews/3/r3/{claude,sol}/report.md` and copy them to `docs/reviews/phase-3-r3-{claude,sol}.md`;
+   - decide `WARN 3.7.r3b` as read or mention (#025, #044), from Sol's transcript lines around the match;
+   - brief Fable in writing on the verdict;
+   - write DECISIONS `#review-3-r3` and regenerate progress.md's current state.
+
+   It touches only `docs/**`, `ralph/tasks.json` and `ralph/EXPECTED_COUNT`.
+   - On PASS: no planning rows. Commit as `wip(3.7.r3d)` with the DONE promise only in the message and its own `- [3.7.r3d] ` journal line in the same commit (check the journal's last byte first). Then restart and arm the watcher; `3.close` follows.
+   - On a blocker: it goes to Michael before any planning commit (#041 D1); the task stays principal-pending until he answers.
+3. Restart with `tmux send-keys -t essaydown:runner 'ralph/ralph.sh run --phase 3 2>&1 | tee -a .evidence/runner.log' Enter`, then arm handoff 075's watcher:
    - set `start=` to the runner.log line count + 1 at restart;
    - make it a persistent Monitor (30-minute cap);
    - on every expiry, re-arm it, run `status`, and run a catch-up grep from the same start;
    - filter lines already reported in awk;
    - never add a free-text term to its filter.
-
-   Run each CI gate with `scripts/gate.sh <gate-id>`, backgrounded with its output in a scratchpad file (about 35 minutes). The next gate is `3.verify.r3.g2h`.
-5. At `PRINCIPAL 3.7.r3d` (the Phase 3 review set id is `3.7`, from `ralph/tasks.json`), the reconciliation is run by a fresh session. Rotate first, unless this session is itself fresh at that stop. The reconciliation works in `.wt/3.7.r3d` on `task/3.7.r3d`:
-   - cherry-pick the newest handoff range not yet in `phase/3`;
-   - read the two reports at `.evidence/reviews/3/r3/{claude,sol}/report.md` and copy them to `docs/reviews/phase-3-r3-{claude,sol}.md`;
-   - brief Fable in writing on the verdict, decide any `WARN 3.7.r3*` as read or mention (#025, #044), write DECISIONS `#review-3-r3`, and regenerate progress.md's current state.
-
-   It touches only `docs/**`, `ralph/tasks.json` and `ralph/EXPECTED_COUNT`.
-   - On PASS: no planning rows. Commit as `wip(3.7.r3d)` with the DONE promise only in the message and its own `- [3.7.r3d] ` journal line in the same commit (check the journal's last byte first), restart, and `3.close` follows.
-   - On a blocker: it goes to Michael before any planning commit (#041 D1); the task stays principal-pending until he answers.
-6. At the Phase 3→4 boundary, raise handoff 074's boundary Open Questions with Michael:
+4. At the Phase 3→4 boundary (after `3.close`), raise handoff 075's boundary Open Questions with Michael:
    - Fable's both-legs rule for e2e/shell tasks;
    - which re-pointed hard stops become tasks before `4.verify` (coverage glob G7/U10/C12, packages/modes G1, the typescript range U26/G6, C2 + C13);
    - whether any line of 3.26's other-corpus-sweeps backlog list is taken before `4.verify`;
    - whether r1's two riskiest things (the source burst during an awaited flush; the §6.2 occurrence-shift) become tasks or backlog lines;
    - whether the `\|`-in-a-cell parse divergence (`#review-3-r2`) becomes a task before `4.verify`;
    - the autosave `:91` 600 ms margin (#056).
-7. Rotate (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
+
+   Then delete `handoff/061`–`075` and hand Michael the pushes.
+5. Rotate (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
    - While the runner is mid-phase, the relaunch line is `git show handoff/NNN:docs/handoffs/next-prompt.md | pbcopy && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
    - At an idle boundary it is `pbcopy < docs/handoffs/next-prompt.md && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
    - Before cutting a new `handoff/NNN`, check whether the newest handoff file is already on `phase/3` (`git show phase/3:docs/handoffs/<file>`). A cherry-picked handoff fails `merge-base --is-ancestor` but needs no restacking.

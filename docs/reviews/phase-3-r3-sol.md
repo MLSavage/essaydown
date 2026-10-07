@@ -1,0 +1,45 @@
+# Phase 3 review — Sol
+
+Reviewer: Codex (GPT-6), reviewer `sol`, attempt r3. Inputs: docs/PRD.md §7/§8 phase 3 and §9, docs/RUNNER-SPEC.md, docs/lessons.md, ralph/tasks.json task 3.7.r3b, docs/DECISIONS.md #025/#041/#review-3-r2, docs/V1.1-BACKLOG.md, the committed r2 reports, `git diff da7d07b0d3bc51857d7e18fecdf4f51c60da9421...150847386a6b9c68d0d79c9742993b6908bef865` (phase index and focused serializer/position-map changes, with the complete product/test delta since r2), accepted CI for 3.verify.g1h, 3.verify.r1.g1h, 3.verify.r2h and 3.verify.r3.g2h, and phase 3 task transcripts (3.28/3.29/3.30 and verifier evidence). No phase 3 human accepted records exist. Coverage baseline: accepted 2.verify.r3h. Files read under /logs/reviews/: only /logs/reviews/3/r3/phase_base_sha, /logs/reviews/3/r3/implementation_sha, /logs/reviews/3/r3/verification_sha, /logs/reviews/3/r3/verifier_id. No sibling directory read. Cold build: supplied scratch local clone /scratch/sol at implementation_sha. Commands run: `pnpm install --frozen-lockfile`, `scripts/check` (pnpm lint, pnpm test, cargo test), `digestDir` from ralph/lib/util.mjs over accepted artifacts, and `node /report/c15-probe.mjs` (the permitted bounded core-route probe, two loaded cells × three saves). Scope follows 3.7.r3b and Michael's #041 D1: C15 confirmation and r2 dispositions, blockers only; no new sweep or browser drive. Literal-URL regression conclusions below use accepted CI, not a new targeted regression run.
+
+## Gate table
+
+| Criterion (from PRD §7) | Result (pass / fail / unverifiable) | Evidence (command + output line, or file:line) |
+|---|---|---|
+| Phase 3: one-workflow steps 1–6 in WebdriverIO on Linux and macOS | pass | /logs/ci/3.verify.r3.g2h/accepted/e2e-shell/e2e-shell-ubuntu-latest/e2e-shell.log:106–113 and e2e-shell-macos-latest/e2e-shell.log:106–113 each show six passing steps; :239 shows 15/15 spec files, matching the directory count. These are CI observations, not locally executed macOS tests. |
+| Step 1: fresh folder and Untitled file | pass | one-workflow.spec.ts:255 creates a temporary workspace; :259–264 opens it, creates the file, and asserts Outline and exact `# Untitled-1\n`. Both accepted logs:106. |
+| Step 2: outline three questions | pass | one-workflow.spec.ts:267–285; both accepted logs:107. The first question uses the H1 question field; C11's distinction from the topic-question field remains explicitly dispositioned in docs/V1.1-BACKLOG.md:182. |
+| Step 3: produce two paragraphs under each heading | pass | one-workflow.spec.ts:288–318 types through the editor and compares exact Markdown and disk output. Both accepted logs:108. |
+| Step 4: rewrite a sentence | pass | one-workflow.spec.ts:321–354 creates and uses a variant, asserting exact Markdown and disk bytes. Both accepted logs:109. |
+| Step 5: reorder sentences | pass | one-workflow.spec.ts:357–381 drags sentence chips and compares the committed golden and disk bytes. Both accepted logs:110. |
+| Step 6: source toggle and back | pass | one-workflow.spec.ts:384–417 uses the keyboard toggle and asserts source bytes, restored rendered view, unchanged snapshot count and disk bytes. Both accepted logs:111. |
+| Windows recorded; xfail allowed (#047) | pass | Accepted Windows test.log:319–320: 72 files / 7,380 tests passed; cargo-test.log: 75 passed; e2e-shell.log:106–113 and :239: six workflow steps and 15/15 specs passed. |
+| r3 confirmation: C15 loaded ASCII and astral cells retain their bytes through three saves | pass | /report/c15-probe.log:1–6: both members preserve the URL and row widths `[2,2]` on all three core saves. Pre-existing column padding is added on save 1 of the unpadded input; subsequent full output is identical. The cell bytes themselves never change. Core guards at packages/core/test/url-bytes.test.ts:311–372 and editor guards at packages/editor/test/url-typing.test.ts:374–398 explicitly test that qualification. Accepted Ubuntu test.log:93/:99/:121: url-bytes 35, url-typing 285, positions-corpus 533 pass; macOS :76/:63/:105 likewise. |
+| Named C15 guards and typed C14 member retained | pass | format.ts:1250–1265 follows the installed table tokenizer's bodyRowData/bodyRowEscape backslash consumption. url-bytes.test.ts:348/:358/:368 covers even-run, mixed escaped/raw pipes, and unchanged typed-member bytes. journal-main.md:481 names all seven guards and records four failures when the old predicate is restored, then restoration of the fix; /report/3.28-evidence-extract.txt retains transcript evidence. positions.ts is unchanged since r2. |
+| r2 dispositions hold | pass | docs/DECISIONS.md:1208 onward and docs/V1.1-BACKLOG.md:190–197 retain the pre-existing angle-autolink/editor-display divergences and C2/C13 for Phase 3→4, hard stop 4.verify. The corpus budget trigger was taken by 3.29/3.30; current accepted CI passes on all three OSes. No examined premise was falsified. |
+| Evidence matches the implementation SHA | pass | accepted.json names 150847386a6b9c68d0d79c9742993b6908bef865, run 37579169198, ref ci/3.verify.r3.g2/a1. /report/digests.json: all eight phase 3 artifact hashes and byte counts match; baseline artifacts also match. Current test-logs: `04f42006434b95ad6683103e8c5a612fceb761811c0db187853f0a03b1965311`, 262526 bytes; e2e-shell: `c9876185bd8cc21716c565a601fdb1821ec260ad7efa40e07c027d1376952902`, 54840 bytes. |
+
+## Test counts and coverage
+
+Local cold build: install and lint passed; Vitest **7,380 passed / 0 failed in 72 files**; cargo test **78 passed / 0 failed / 0 ignored** (three suites including two empty suites). Evidence: /report/install.log, /report/cold-check.log, /report/test.log:220–221, /report/cargo.log. The full suite ran once without source edits or timeout changes. Local coverage agrees with accepted CI. Both /snapshot and /scratch/sol have empty `git status --porcelain` output at exit; scratch HEAD equals the implementation SHA.
+
+Accepted CI: Vitest **7,380 passed / 0 failed in 72 files on each OS**. cargo test: Linux and macOS **78 passed / 0 failed / 0 ignored** each; Windows **75 passed / 0 failed / 0 ignored**. e2e: **79 passing cases across 15/15 spec files on each OS**, including all six workflow steps. No local browser drive was run in this bounded review.
+
+Coverage delta vs main: statements **99.54% → 99.48% (−0.06 percentage points)**; branches **97.25% → 97.54% (+0.29)**; functions **100% → 100% (0)**; lines **100% → 99.87% (−0.13)**. Baseline is digest-verified 2.verify.r3h; its covered source and vitest.config.ts are unchanged through phase base. Current accepted Ubuntu test.log:315 and macOS :216 agree. Coverage is unchanged from r2 and measures packages/*/src, excluding desktop mode wiring and Rust.
+
+## Findings (≤ 20, most severe first)
+
+Severity, rated by the consequence for the gate's criterion and never by the size of the fix (DECISIONS #review-1-r1): **blocker** — a gate criterion is not met, or wrong output reaches the user silently (example: Copy Markdown puts stale text on the clipboard and reports "Copied"); **should-fix** — a defect or a missing guard the phase should not close with, while the criterion still holds or the path is not the gate's own instrument (example: a redo chord bound under two names with no test that reads the binding table, so deleting one name stays green); **nit** — wording, citations, style, or an assertion with no behaviour behind it (example: `expect(checked).toBe(Object.keys(index).length)` where both sides are the same list). Mark a should-fix **Required** when the reconciliation should fail without it.
+
+None within task 3.7.r3b's blockers-only scope. Verdict: **PASS**. C15 does not reproduce in the permitted bounded probe. The first-save table padding is the existing canonical formatter behavior, not the double-escaping/link-loss defect under review.
+
+## Three riskiest things
+
+1. **Deferred GFM interpretation differences.** The angle-autolink twin and the editor's displayed pipe escape remain the r2 backlog item (V1.1-BACKLOG.md:190), with hard stop 4.verify. This review confirms the loaded literal route only; it does not erase those differences.
+2. **Uninstrumented literal fallback and package-only coverage.** C2/C13 remain deferred to the Phase 3→4 boundary (:191); the give-up path and desktop wiring are not established by the headline coverage percentages.
+3. **Timing evidence and pending source edits.** Corpus-test and browser timing limitations remain recorded (:188/:194–197). The prior barrier-to-discard/source-window dispositions also remain assigned to Phase 3→4 planning; no new timing probe was authorized in r3.
+
+## Class-level lessons (for docs/lessons.md)
+
+- LESSON: a character's presence does not prove it is a structural delimiter → derive the predicate from tokenizer escape consumption and cover loaded escaped data, raw data, and both in one value.
+- LESSON: whole-document byte identity can be confused with pre-existing canonical padding → preserve the exact input and output, assert the affected cell bytes independently, and state precisely which save establishes the full-document fixed point.
