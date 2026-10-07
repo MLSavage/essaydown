@@ -1,0 +1,211 @@
+# spike-pdf.yml (task 4.0) — disposable spike workflow answering the PRD row-46 open question: can
+# pandoc + typst embed essay-fixture.md's two relative images (fixtures/markdown/assets/essay/*.png)
+# on all three OSes? GitHub's runner images carry neither tool (only the container does, task 0.0),
+# so each OS downloads the exact pandoc/typst versions pinned in docker/versions.env from their own
+# GitHub releases. 4.0r reads this workflow's artifacts, writes the pipeline decision to
+# docs/DECISIONS.md#004, and deletes this file from the phase branch in the same commit — nothing
+# here ships. Triggers on push to ci/** refs only, as every needsCI workflow does (CLAUDE.md,
+# docs/RUNNER-SPEC.md §3): there is no push-to-main or pull_request trigger.
+name: Spike PDF
+
+on:
+  push:
+    branches:
+      - 'ci/**'
+
+jobs:
+  spike-pdf:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load pinned tool versions (docker/versions.env)
+        shell: bash
+        run: grep -E '^[A-Z_]+=' docker/versions.env >> "$GITHUB_ENV"
+
+      # Each OS's pinned archive is pulled straight from the project's own GitHub release, its
+      # internal layout read from the release itself: linux and macOS ship a tar/zip with a bin/
+      # subdirectory, Windows a flat zip with the .exe at its root.
+      - name: Install pandoc ${{ env.PANDOC_VERSION }} (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/pandoc.tar.gz" \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-amd64.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/pandoc.tar.gz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/pandoc-${PANDOC_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Install pandoc ${{ env.PANDOC_VERSION }} (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/pandoc.zip" \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-arm64-macOS.zip"
+          unzip -q "${RUNNER_TEMP}/pandoc.zip" -d "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/pandoc-${PANDOC_VERSION}-arm64/bin" >> "$GITHUB_PATH"
+
+      - name: Install pandoc ${{ env.PANDOC_VERSION }} (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/pandoc.zip" \
+            "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-windows-x86_64.zip"
+          unzip -q "${RUNNER_TEMP}/pandoc.zip" -d "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/pandoc-${PANDOC_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Install typst ${{ env.TYPST_VERSION }} (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/typst.tar.xz" \
+            "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+          tar -xJf "${RUNNER_TEMP}/typst.tar.xz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/typst-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+
+      - name: Install typst ${{ env.TYPST_VERSION }} (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/typst.tar.xz" \
+            "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-aarch64-apple-darwin.tar.xz"
+          tar -xJf "${RUNNER_TEMP}/typst.tar.xz" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/typst-aarch64-apple-darwin" >> "$GITHUB_PATH"
+
+      - name: Install typst ${{ env.TYPST_VERSION }} (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/typst.zip" \
+            "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-pc-windows-msvc.zip"
+          unzip -q "${RUNNER_TEMP}/typst.zip" -d "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/typst-x86_64-pc-windows-msvc" >> "$GITHUB_PATH"
+
+      # poppler-utils (pdfimages), the same per-OS install ci.yml uses (task 0.2).
+      - name: Install poppler-utils (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+
+      - name: Install poppler-utils (macOS)
+        if: runner.os == 'macOS'
+        run: brew install poppler
+
+      - name: Install poppler-utils (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: choco install poppler --yes --no-progress
+
+      - name: Print tool versions
+        shell: bash
+        run: |
+          pandoc --version
+          typst --version
+          pdfimages -v
+
+      # The spike question itself: pandoc -f gfm --resource-path=<docdir> --pdf-engine=typst on
+      # essay-fixture.md and its two relative images. On failure, the fallback copies the document
+      # and its images into a fresh temp directory (a Typst root with nothing but the document
+      # beside its images) and retries from inside that directory, per PRD row 46's stated
+      # fallback. Neither route's failure fails this step directly: route.txt and the two logs are
+      # the evidence 4.0r reads to decide the pipeline per OS. Two things confirmed in the
+      # container before writing this: (1) pandoc exits 0 even when --resource-path cannot resolve
+      # an image (it warns and replaces the image with its alt text), so "did it work" is read
+      # from pdfimages -list's count, not from pandoc's exit status alone — an embedded count under
+      # 2 is the failure that sends the primary attempt to the fallback; (2) with no
+      # --resource-path, pandoc resolves a relative image path against the process's current
+      # working directory, not the input file's directory, so the fallback must `cd` into the temp
+      # root before invoking pandoc there — copying the images beside the document is not by
+      # itself enough.
+      - name: Export essay-fixture.md to PDF (pandoc + typst, with fallback)
+        shell: bash
+        run: |
+          set -u
+          mkdir -p spike-out
+          DOCDIR="fixtures/markdown"
+          EXPECTED_IMAGES=2
+
+          embedded_count() {
+            if [ -s "$1" ]; then
+              pdfimages -list "$1" 2>/dev/null | tail -n +3 | wc -l | tr -d ' '
+            else
+              echo 0
+            fi
+          }
+
+          primary_ok=0
+          if pandoc -f gfm --resource-path="$DOCDIR" --pdf-engine=typst \
+               -o spike-out/essay-fixture.pdf "$DOCDIR/essay-fixture.md" \
+               >spike-out/pandoc-primary.log 2>&1; then
+            if [ "$(embedded_count spike-out/essay-fixture.pdf)" -eq "$EXPECTED_IMAGES" ]; then
+              primary_ok=1
+            fi
+          fi
+
+          if [ "$primary_ok" -eq 1 ]; then
+            echo "primary" > spike-out/route.txt
+          else
+            echo "--- primary attempt embedded fewer than $EXPECTED_IMAGES images (or pandoc failed); falling back to a temp Typst root with the images copied beside the document ---" \
+              >> spike-out/pandoc-primary.log
+            FALLBACK_ROOT="$(mktemp -d)"
+            mkdir -p "$FALLBACK_ROOT/assets/essay"
+            cp "$DOCDIR/essay-fixture.md" "$FALLBACK_ROOT/"
+            cp "$DOCDIR"/assets/essay/*.png "$FALLBACK_ROOT/assets/essay/"
+            OUT_ABS="$(pwd)/spike-out/essay-fixture.pdf"
+            fallback_ok=0
+            if (cd "$FALLBACK_ROOT" && pandoc -f gfm --pdf-engine=typst \
+                 -o "$OUT_ABS" essay-fixture.md) \
+                 >spike-out/pandoc-fallback.log 2>&1; then
+              if [ "$(embedded_count spike-out/essay-fixture.pdf)" -eq "$EXPECTED_IMAGES" ]; then
+                fallback_ok=1
+              fi
+            fi
+            if [ "$fallback_ok" -eq 1 ]; then
+              echo "fallback" > spike-out/route.txt
+            else
+              echo "failed" > spike-out/route.txt
+            fi
+          fi
+          cat spike-out/route.txt
+
+      - name: pdfimages -list (evidence of embedded images)
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p spike-out
+          if [ -s spike-out/essay-fixture.pdf ]; then
+            pdfimages -list spike-out/essay-fixture.pdf > spike-out/pdfimages-list.txt
+          else
+            echo "no PDF was produced by either route" > spike-out/pdfimages-list.txt
+          fi
+          cat spike-out/pdfimages-list.txt
+
+      - name: Upload spike-pdf-${{ matrix.os }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-pdf-${{ matrix.os }}
+          path: spike-out
+          if-no-files-found: warn
+
+      - name: Fail if neither route produced a PDF
+        shell: bash
+        run: test "$(cat spike-out/route.txt)" != "failed"
+
+  merge-artifacts:
+    needs: [spike-pdf]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge per-OS artifacts into one spike-pdf artifact
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: spike-pdf
+          pattern: spike-pdf-*
+          separate-directories: true
+          delete-merged: true
