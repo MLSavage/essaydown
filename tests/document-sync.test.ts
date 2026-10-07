@@ -1161,3 +1161,88 @@ describe("a sidecar that was not written is a failed save (S3, through the pane)
     expect(pane.errors).toEqual([]);
   });
 });
+
+// Task 4.8 (#review-3-r1, Claude r1 riskiest thing 2): a source burst typed while the barrier's
+// IPC is in flight. The pane's `flush` and `rename` settle once, before the sync's chain; each
+// leg below types inside the awaited write or move, still inside the source window, so only a
+// settle inside the chain can commit the burst before the outcome is decided.
+
+/** Hold `command`'s next call until `release`; `started` is true once the call is waiting. */
+function hold(command: string): { release: () => void; started: () => boolean } {
+  let release: () => void = () => {};
+  ipc.holds.set(command, new Promise<void>((resolve) => (release = resolve)));
+  return { release: () => release(), started: () => !ipc.holds.has(command) };
+}
+
+describe("a source burst during the barrier's awaited IPC is on disk before saved (task 4.8)", () => {
+  it("reproduction 1 (drain): typing during the flush's held write → saved only with the typed text on disk", async () => {
+    const pane = await openPane("Alpha.\n");
+    pane.type("Alpha.ONE\n");
+    const write = hold("write_doc");
+    const flushed = pane.sync.flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(write.started()).toBe(true);
+    pane.type("Alpha.ONE TWO\n");
+    write.release();
+    const result = await flushed;
+    // Still inside the window: only a settle inside the drain can have committed the burst.
+    expect(result).toBe("saved");
+    expect(ipc.files.get(DOC)).toBe("Alpha.ONE TWO\n");
+    expect(pane.sync.sync.dirty).toBe(false);
+  });
+
+  it("reproduction 2 (rename): typing during the rename's held move → the typed text is at the new path before the outcome", async () => {
+    const pane = await openPane("Alpha.\n");
+    pane.type("Alpha.ONE\n");
+    let release: () => void = () => {};
+    let moving = false;
+    const move = async (): Promise<void> => {
+      moving = true;
+      await new Promise<void>((resolve) => (release = resolve));
+      const text = ipc.files.get(DOC);
+      if (text === undefined) throw new Error("nothing to move");
+      ipc.files.delete(DOC);
+      ipc.files.set("renamed.md", text);
+    };
+    const renamed = pane.sync.rename("renamed.md", move);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(moving).toBe(true);
+    expect(ipc.files.get(DOC)).toBe("Alpha.ONE\n");
+    pane.type("Alpha.ONE TWO\n");
+    release();
+    const outcome = await renamed;
+    expect(outcome).toEqual({ moved: true, result: "saved" });
+    expect(ipc.files.get("renamed.md")).toBe("Alpha.ONE TWO\n");
+    expect(pane.sync.sync.dirty).toBe(false);
+  });
+
+  it("guard (flush after the in-flight write): typing while flush waits behind an autosave's held write → saved only with the typed text on disk", async () => {
+    const pane = await openPane("Alpha.\n");
+    pane.type("Alpha.ONE\n");
+    const write = hold("write_doc");
+    // The burst commits at the end of its window, and the autosave starts its (held) write.
+    await vi.advanceTimersByTimeAsync(coalesceWindowMs + saveDelayMs);
+    expect(write.started()).toBe(true);
+    const flushed = pane.sync.flush();
+    await vi.advanceTimersByTimeAsync(0);
+    pane.type("Alpha.ONE TWO\n");
+    write.release();
+    const result = await flushed;
+    expect(result).toBe("saved");
+    expect(ipc.files.get(DOC)).toBe("Alpha.ONE TWO\n");
+    expect(pane.sync.sync.dirty).toBe(false);
+  });
+
+  it("absence: no burst during the held write → saved with the barrier's text, and one write", async () => {
+    const pane = await openPane("Alpha.\n");
+    pane.type("Alpha.ONE\n");
+    const write = hold("write_doc");
+    const flushed = pane.sync.flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(write.started()).toBe(true);
+    write.release();
+    expect(await flushed).toBe("saved");
+    expect(ipc.files.get(DOC)).toBe("Alpha.ONE\n");
+    expect(pane.sync.sync.dirty).toBe(false);
+  });
+});

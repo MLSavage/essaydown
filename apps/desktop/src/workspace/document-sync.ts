@@ -86,7 +86,9 @@ export interface SyncCallbacks {
    * window), so that it reports it through {@link DocumentSync.edited} before this returns. The
    * watcher's check runs it before its clean/dirty decision and again after its awaited read, and
    * Keep mine runs it before it serialises (DECISIONS #review-3-r0 S1): a reader that decides
-   * clean or dirty settles first (CLAUDE.md). Absent: the editor reports every edit at once.
+   * clean or dirty settles first (CLAUDE.md). A barrier runs it again after every await that typing
+   * can outlast (task 4.8): `flush` after the write in flight, the drain before each recheck of
+   * `dirty`, and a rename after its move and re-read. Absent: the editor reports every edit at once.
    */
   settle?(): void;
 }
@@ -257,11 +259,13 @@ export function createDocumentSync(
 
   // Only ever inside a `serialised` operation, after a barrier's write: while an edit landed
   // during the write (`saved` but still dirty), write the newer document the way a save does, so
-  // `saved` means the disk holds the latest generation (DECISIONS #review-2-r2 W1). A dispose
-  // stops the drain, and the edit it leaves unwritten is `failed`, as `flush` reports it.
+  // `saved` means the disk holds the latest generation (DECISIONS #review-2-r2 W1). An edit still
+  // pending in the editor (a source burst typed during the write) is committed before each recheck
+  // (task 4.8). A dispose stops the drain, and the edit it leaves unwritten is `failed`, as `flush`
+  // reports it.
   const drain = async (first: FlushResult): Promise<FlushResult> => {
     let result = first;
-    while (result === "saved" && dirty) {
+    while (result === "saved" && settled()) {
       if (disposed) return "failed";
       clearSave();
       result = await saveOnce();
@@ -272,6 +276,12 @@ export function createDocumentSync(
   };
 
   const save = (): Promise<FlushResult> => serialised(saveOnce);
+
+  // Commit any edit the editor still holds, then read `dirty`.
+  const settled = (): boolean => {
+    callbacks.settle?.();
+    return dirty;
+  };
 
   const check = (): void => {
     changeTimer = null;
@@ -362,9 +372,11 @@ export function createDocumentSync(
     async flush() {
       const wasDirty = dirty;
       await settle();
-      if (disposed) return dirty ? "failed" : "clean";
+      // Typing during the write in flight is pending again (task 4.8).
+      const pending = settled();
+      if (disposed) return pending ? "failed" : "clean";
       if (conflict) return "conflict";
-      if (!dirty) return wasDirty ? "saved" : "clean";
+      if (!pending) return wasDirty ? "saved" : "clean";
       clearSave();
       return serialised(async () => drain(await saveOnce()));
     },
@@ -394,6 +406,8 @@ export function createDocumentSync(
           callbacks.failed(error);
           return "failed";
         }
+        // Typing during the move or the read is part of the document written there (task 4.8).
+        callbacks.settle?.();
         if (disposed) return dirty ? "failed" : "clean";
         clearSave();
         if (dirty && disk !== known) {
