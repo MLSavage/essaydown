@@ -12,6 +12,8 @@
     "lint": "eslint . && node scripts/check-deps.mjs && pnpm -r --if-present typecheck",
     "format": "prettier --check .",
     "fetch-sidecars": "node scripts/fetch-sidecars.ts",
+    "assemble-sidecars": "node scripts/assemble-sidecars.ts",
+    "postinstall": "node scripts/fetch-sidecars.ts && node scripts/assemble-sidecars.ts",
     "tauri": "pnpm --filter @essaydown/desktop tauri"
   },
   "devDependencies": {

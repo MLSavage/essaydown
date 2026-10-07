@@ -65,6 +65,7 @@
     "tauri-plugin-dialog": "PRD §4 Rust crates row",
     "tauri-plugin-fs": "PRD §4 Rust crates row",
     "tauri-plugin-persisted-scope": "PRD §4 Rust crates row",
+    "tauri-plugin-shell": "PRD §4 Rust crates row",
     "tauri-plugin-wdio-webdriver": "PRD §4 Rust crates row",
     "trash": "PRD §4 Rust crates row",
     "keyring": "PRD §4 Secrets row"

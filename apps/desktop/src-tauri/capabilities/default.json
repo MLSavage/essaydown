@@ -7,6 +7,41 @@
     "core:default",
     "core:window:allow-destroy",
     "wdio-webdriver:default",
-    "dialog:default"
+    "dialog:default",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "binaries/pandoc",
+          "sidecar": true,
+          "args": [
+            "-f",
+            "gfm",
+            "--standalone",
+            {
+              "validator": "--resource-path=(\\.|[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*)"
+            },
+            "-o",
+            {
+              "validator": "[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*"
+            },
+            "--pdf-engine=typst",
+            "-t",
+            {
+              "validator": "[a-z][a-z0-9_]*"
+            }
+          ]
+        },
+        {
+          "name": "binaries/typst",
+          "sidecar": true,
+          "args": [
+            {
+              "validator": "--version"
+            }
+          ]
+        }
+      ]
+    }
   ]
 }

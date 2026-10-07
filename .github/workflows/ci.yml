@@ -124,6 +124,19 @@ jobs:
         shell: bash
         run: pnpm test 2>&1 | tee test.log
 
+      # tauri_build::try_build (apps/desktop/src-tauri/build.rs) requires the externalBin entry
+      # matching *this runner's own* target triple to exist on every cargo build, not only
+      # `tauri build`'s bundling step (task 4.2's clean-checkout repair) — `pnpm install`'s own
+      # postinstall hook already runs this pipeline, but it is repeated here explicitly so a
+      # disabled or skipped lifecycle script doesn't silently leave cargo test unbuildable.
+      - name: Fetch and verify the real sidecar archives
+        shell: bash
+        run: pnpm fetch-sidecars
+
+      - name: Assemble the 6 distributables (lipo on macOS)
+        shell: bash
+        run: pnpm assemble-sidecars
+
       - name: Cargo test
         shell: bash
         run: cargo test 2>&1 | tee cargo-test.log
@@ -261,6 +274,17 @@ jobs:
         shell: bash
         run: pnpm --filter @essaydown/desktop build
 
+      # tauri_build::try_build requires the externalBin entry matching this runner's own target
+      # triple to exist before any cargo build (task 4.2's clean-checkout repair); see the `test`
+      # job's identical pair of steps for the full rationale.
+      - name: Fetch and verify the real sidecar archives
+        shell: bash
+        run: pnpm fetch-sidecars
+
+      - name: Assemble the 6 distributables (lipo on macOS)
+        shell: bash
+        run: pnpm assemble-sidecars
+
       # `custom-protocol` embeds the built frontend into the binary (tauri.conf.json's
       # `frontendDist`) instead of loading `build.devUrl`, so the app is self-contained for
       # tauri-driver / the embedded provider; a plain debug build without it always loads the Vite
@@ -361,6 +385,17 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      # tauri_build::try_build requires the externalBin entry matching this runner's own target
+      # triple to exist before any cargo build, and `tauri build`'s own bundling step needs the
+      # real universal macOS binaries (task 4.2's clean-checkout repair).
+      - name: Fetch and verify the real sidecar archives
+        shell: bash
+        run: pnpm fetch-sidecars
+
+      - name: Assemble the 6 distributables (lipo on macOS)
+        shell: bash
+        run: pnpm assemble-sidecars
+
       - name: Build the debug .dmg (tauri build --debug --bundles dmg)
         shell: bash
         run: pnpm --filter @essaydown/desktop exec tauri build --debug --bundles dmg
@@ -375,8 +410,122 @@ jobs:
           name: macos-debug-dmg
           path: EssayDown-debug-${{ github.sha }}.dmg
 
+  # tauri-build (task 4.2) — the real macOS/Windows sidecar pipeline: `pnpm fetch-sidecars`
+  # downloads and checksum-verifies the real pandoc/typst release archives from
+  # scripts/sidecars.lock.json, `pnpm assemble-sidecars` lipo-combines macOS's two slices per tool
+  # (macos-latest carries the real `lipo`; this dev container does not) and copies the platform
+  # binaries into apps/desktop/src-tauri/binaries/, then `pnpm tauri build` bundles them. The
+  # `test`/`e2e-shell`/`macos-debug-dmg` jobs now run the same fetch+assemble pair before their own
+  # cargo builds (task 4.2's clean-checkout repair: `tauri_build::try_build` needs the host-triple
+  # externalBin file present on every `cargo build`/`cargo test`, not only a real bundle), so Linux
+  # and Windows x86_64 externalBin wiring is exercised there too, alongside `shell_scope.rs`'s
+  # cargo tests (the ACL, not sidecar bytes); this job is the only place the universal binary's two
+  # architectures and a bundled sidecar actually running are proven.
+  tauri-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load pinned tool versions (docker/versions.env)
+        shell: bash
+        run: grep -E '^[A-Z_]+=' docker/versions.env >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm ${{ env.PNPM_VERSION }}
+        shell: bash
+        run: npm install -g "pnpm@${PNPM_VERSION}"
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust toolchain ${{ env.RUST_TOOLCHAIN }}
+        shell: bash
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --no-self-update
+          rustup default "${RUST_TOOLCHAIN}"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            apps/desktop/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Fetch and verify the real sidecar archives
+        shell: bash
+        run: pnpm fetch-sidecars
+
+      - name: Assemble the 6 distributables (lipo on macOS)
+        shell: bash
+        run: pnpm assemble-sidecars
+
+      - name: Verify both universal sidecars report both architectures (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          lipo -info apps/desktop/src-tauri/binaries/pandoc-universal-apple-darwin | tee lipo-pandoc.log
+          lipo -info apps/desktop/src-tauri/binaries/typst-universal-apple-darwin | tee lipo-typst.log
+          grep -q "x86_64" lipo-pandoc.log
+          grep -q "arm64" lipo-pandoc.log
+          grep -q "x86_64" lipo-typst.log
+          grep -q "arm64" lipo-typst.log
+
+      - name: Build the Tauri app
+        shell: bash
+        run: pnpm tauri build 2>&1 | tee tauri-build.log
+
+      - name: Run pandoc --version from inside the built .app (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app=$(find target/release/bundle/macos -maxdepth 1 -iname "*.app")
+          "$app/Contents/MacOS/pandoc" --version | tee pandoc-version.log
+
+      - name: Run pandoc --version from inside the built app (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: ./target/release/pandoc.exe --version | tee pandoc-version.log
+
+      - name: Upload tauri-build-${{ matrix.os }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-build-${{ matrix.os }}
+          path: |
+            lipo-pandoc.log
+            lipo-typst.log
+            tauri-build.log
+            pandoc-version.log
+          if-no-files-found: ignore
+
   merge-logs:
-    needs: [test, e2e-shell]
+    needs: [test, e2e-shell, tauri-build]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -404,5 +553,14 @@ jobs:
         with:
           name: e2e-shell
           pattern: e2e-shell-*
+          separate-directories: true
+          delete-merged: true
+
+      - name: tauri-build
+        if: always()
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: tauri-build
+          pattern: tauri-build-*
           separate-directories: true
           delete-merged: true

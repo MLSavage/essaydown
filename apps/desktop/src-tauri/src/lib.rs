@@ -2,6 +2,7 @@ mod coach_key;
 mod commands;
 mod menu;
 mod settings;
+mod shell_scope;
 mod watch;
 mod workspace;
 
@@ -34,6 +35,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .manage(WorkspaceState::default())
         .manage(WatchState::default())
         // `SystemKeyring` in production; `cargo test` compiles this crate with `cfg(test)` set

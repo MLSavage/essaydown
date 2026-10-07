@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// fetch-sidecars.ts — task 4.1. Downloads the 8 archives scripts/sidecars.lock.json names (exact
-// pandoc and typst release URLs and SHA-256s), verifies each against its locked checksum, and
-// extracts one pre-lipo binary/slice per archive into scripts/.cache/sidecars/ (gitignored; task
+// fetch-sidecars.ts — task 4.1 (dev-only aarch64 Linux entries added by 4.2's clean-checkout
+// repair). Downloads the archives scripts/sidecars.lock.json names (exact pandoc and typst
+// release URLs and SHA-256s), verifies each against its locked checksum, and extracts one
+// pre-lipo binary/slice/dev artifact per archive into scripts/.cache/sidecars/ (gitignored; task
 // 4.2's `lipo -create` combines the four macOS slices, and nothing here writes under
 // src-tauri/binaries/). Every downloaded archive is re-verified by its own checksum before
 // extraction, so a tampered or corrupted lock entry aborts with a non-zero exit before anything
-// is written to the output directory.
+// is written to the output directory. The CLI entrypoint also refuses before any of that if the
+// lock's own pandocVersion/typstVersion disagree with docker/versions.env (assertLockVersionsMatch).
 //
 // pandoc's two macOS archives are Apple installer `.pkg` files rather than tarballs (pandoc ships
 // no macOS tarball with the Linux build's `bin/` layout): a `.pkg` is a xar archive whose Payload
@@ -25,7 +27,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export interface SidecarArtifact {
   target: string;
   tool: string;
-  kind: "binary" | "slice";
+  kind: "binary" | "slice" | "dev";
   url: string;
   sha256: string;
   format: "tar.gz" | "tar.xz" | "zip" | "pkg";
@@ -33,7 +35,9 @@ export interface SidecarArtifact {
   component?: string[];
 }
 
-interface SidecarLock {
+export interface SidecarLock {
+  pandocVersion?: string;
+  typstVersion?: string;
   artifacts: SidecarArtifact[];
 }
 
@@ -223,9 +227,41 @@ export function extractMember(
 
 // --- orchestration -----------------------------------------------------------------------------
 
+export function loadLockFile(lockPath: string): SidecarLock {
+  return JSON.parse(readFileSync(lockPath, "utf8")) as SidecarLock;
+}
+
 export function loadLock(lockPath: string): SidecarArtifact[] {
-  const lock = JSON.parse(readFileSync(lockPath, "utf8")) as SidecarLock;
-  return lock.artifacts;
+  return loadLockFile(lockPath).artifacts;
+}
+
+/** Reads `NAME=value` lines out of docker/versions.env (ignoring comments/blank lines). */
+export function readVersionsEnv(versionsEnvPath: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of readFileSync(versionsEnvPath, "utf8").split("\n")) {
+    const m = /^([A-Z_]+)=(.*)$/.exec(line.trim());
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+/** Refuses when the lock's own `pandocVersion`/`typstVersion` disagree with docker/versions.env's
+ * `PANDOC_VERSION`/`TYPST_VERSION` — the lock's release URLs are hand-pinned to those versions, so
+ * a version bumped in one place and not the other would otherwise fetch the wrong release
+ * silently. A lock missing either field (every lock built by this file's own tests, which care
+ * about other things) skips that field's check rather than failing on an unrelated fixture. */
+export function assertLockVersionsMatch(lock: SidecarLock, versionsEnvPath: string): void {
+  const env = readVersionsEnv(versionsEnvPath);
+  if (lock.pandocVersion !== undefined && lock.pandocVersion !== env.PANDOC_VERSION) {
+    throw new Error(
+      `sidecars.lock.json pandocVersion (${lock.pandocVersion}) does not match docker/versions.env PANDOC_VERSION (${env.PANDOC_VERSION})`,
+    );
+  }
+  if (lock.typstVersion !== undefined && lock.typstVersion !== env.TYPST_VERSION) {
+    throw new Error(
+      `sidecars.lock.json typstVersion (${lock.typstVersion}) does not match docker/versions.env TYPST_VERSION (${env.TYPST_VERSION})`,
+    );
+  }
 }
 
 export async function fetchSidecars(opts: {
@@ -287,11 +323,14 @@ async function main(): Promise<void> {
   };
   const lockPath = flag("--lock", join(HERE, "sidecars.lock.json"));
   const outDir = flag("--out", join(HERE, ".cache/sidecars"));
+  const versionsEnvPath = flag("--versions-env", join(HERE, "..", "docker/versions.env"));
+  assertLockVersionsMatch(loadLockFile(lockPath), versionsEnvPath);
   const artifacts = await fetchSidecars({ lockPath, outDir });
   const binaries = artifacts.filter((a) => a.kind === "binary").length;
   const slices = artifacts.filter((a) => a.kind === "slice").length;
+  const dev = artifacts.filter((a) => a.kind === "dev").length;
   console.log(
-    `fetch-sidecars: ${artifacts.length} verified artifacts in ${outDir} (${binaries} platform binaries + ${slices} macOS slices)`,
+    `fetch-sidecars: ${artifacts.length} verified artifacts in ${outDir} (${binaries} platform binaries + ${slices} macOS slices + ${dev} dev-only entries)`,
   );
   for (const summary of verifyHostBinaries(outDir, artifacts))
     console.log(`fetch-sidecars: ${summary}`);

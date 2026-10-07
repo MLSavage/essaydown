@@ -19,6 +19,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { deflateSync, gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertLockVersionsMatch,
   extractMember,
   extractPkgPayloadMember,
   fetchAndVerify,
@@ -28,6 +29,7 @@ import {
   sha256,
   verifyHostBinaries,
   type SidecarArtifact,
+  type SidecarLock,
 } from "../scripts/fetch-sidecars.ts";
 
 const scriptPath = join(import.meta.dirname, "..", "scripts", "fetch-sidecars.ts");
@@ -60,10 +62,17 @@ afterEach(() => {
 describe("the committed lock file", () => {
   const artifacts = loadLock(join(import.meta.dirname, "..", "scripts", "sidecars.lock.json"));
 
-  it("has exactly 8 artifacts: 4 platform binaries + 4 macOS slices", () => {
-    expect(artifacts).toHaveLength(8);
+  it("has exactly 10 artifacts: 4 platform binaries + 4 macOS slices + 2 dev-only aarch64 Linux entries", () => {
+    expect(artifacts).toHaveLength(10);
     expect(artifacts.filter((a) => a.kind === "binary")).toHaveLength(4);
     expect(artifacts.filter((a) => a.kind === "slice")).toHaveLength(4);
+    expect(artifacts.filter((a) => a.kind === "dev")).toHaveLength(2);
+  });
+
+  it("the dev-only entries cover both tools on aarch64-unknown-linux-gnu", () => {
+    const devTargets = artifacts.filter((a) => a.kind === "dev").map((a) => a.target);
+    expect(devTargets).toContain("pandoc-aarch64-unknown-linux-gnu");
+    expect(devTargets).toContain("typst-aarch64-unknown-linux-gnu");
   });
 
   it("every artifact names a 64-character hex sha256 and a unique target", () => {
@@ -446,5 +455,44 @@ describe("verifyHostBinaries", () => {
 
   it("throws naming the tool when the lock has no artifact for this host's triple", () => {
     expect(() => verifyHostBinaries(scratch(), [])).toThrow(/no locked pandoc artifact/);
+  });
+});
+
+describe("assertLockVersionsMatch: the lock's pandocVersion/typstVersion vs docker/versions.env", () => {
+  function writeVersionsEnv(dir: string): string {
+    const path = join(dir, "versions.env");
+    writeFileSync(
+      path,
+      "# comment\nNODE_VERSION=22.22.1\nPANDOC_VERSION=3.11\nTYPST_VERSION=0.15.1\n",
+    );
+    return path;
+  }
+
+  it("does not throw when both versions match", () => {
+    const dir = scratch();
+    const lock: SidecarLock = { pandocVersion: "3.11", typstVersion: "0.15.1", artifacts: [] };
+    expect(() => assertLockVersionsMatch(lock, writeVersionsEnv(dir))).not.toThrow();
+  });
+
+  it("throws naming pandocVersion when the lock's pandocVersion disagrees with PANDOC_VERSION", () => {
+    const dir = scratch();
+    const lock: SidecarLock = { pandocVersion: "3.10", typstVersion: "0.15.1", artifacts: [] };
+    expect(() => assertLockVersionsMatch(lock, writeVersionsEnv(dir))).toThrow(
+      /pandocVersion \(3\.10\).*PANDOC_VERSION \(3\.11\)/,
+    );
+  });
+
+  it("throws naming typstVersion when the lock's typstVersion disagrees with TYPST_VERSION", () => {
+    const dir = scratch();
+    const lock: SidecarLock = { pandocVersion: "3.11", typstVersion: "0.14.0", artifacts: [] };
+    expect(() => assertLockVersionsMatch(lock, writeVersionsEnv(dir))).toThrow(
+      /typstVersion \(0\.14\.0\).*TYPST_VERSION \(0\.15\.1\)/,
+    );
+  });
+
+  it("skips a field's check when the lock omits it, rather than failing on an unrelated fixture", () => {
+    const dir = scratch();
+    const lock: SidecarLock = { artifacts: [] };
+    expect(() => assertLockVersionsMatch(lock, writeVersionsEnv(dir))).not.toThrow();
   });
 });

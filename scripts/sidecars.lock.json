@@ -1,5 +1,5 @@
 {
-  "_note": "Committed by task 4.1. One archive per artifact, fetched and verified by scripts/fetch-sidecars.ts. `target` is the Rust/Tauri target-triple name the extracted binary is written as under scripts/.cache/sidecars/ (gitignored); the four `kind: slice` entries are pre-lipo macOS artifacts task 4.2 combines with `lipo -create`. pandoc's two macOS archives are the Apple installer `.pkg` (a xar archive whose Payload is a gzip-compressed cpio archive); typst ships plain tarballs for every OS, pandoc does not ship a macOS tarball with a `bin/` layout matching the Linux build, so its two macOS slices go through the `.pkg` payload instead.",
+  "_note": "Committed by task 4.1 (binary/slice entries); the two `kind: dev` entries were added by 4.2's clean-checkout repair (principal lesson [4.2] 2026-10-07T17:19:11Z). One archive per artifact, fetched and verified by scripts/fetch-sidecars.ts. `target` is the Rust/Tauri target-triple name the extracted binary is written as under scripts/.cache/sidecars/ (gitignored); the four `kind: slice` entries are pre-lipo macOS artifacts task 4.2 combines with `lipo -create`. pandoc's two macOS archives are the Apple installer `.pkg` (a xar archive whose Payload is a gzip-compressed cpio archive); typst ships plain tarballs for every OS, pandoc does not ship a macOS tarball with a `bin/` layout matching the Linux build, so its two macOS slices go through the `.pkg` payload instead. The two `kind: dev` entries are real pandoc/typst binaries for aarch64-unknown-linux-gnu, the Rust target triple this container's own host (and any aarch64 Linux dev machine) actually builds for — not a shipped packaging target (PRD §4 names only Linux/Windows x86_64 and universal macOS), but `tauri_build::try_build` checks `binaries/<tool>-<host-triple>` exists on every `cargo build`/`cargo test`, host triple included, so a real (never a text stand-in) binary must be assembled there too; assemble-sidecars.ts copies them into src-tauri/binaries/ without counting them among the 6 shipped distributables.",
   "pandocVersion": "3.11",
   "typstVersion": "0.15.1",
   "artifacts": [
@@ -76,6 +76,24 @@
       "sha256": "7f9fdd9584866245de9a79e0add8f9236fae6f40a8a45e2c4771ccc14db4e0fa",
       "format": "tar.xz",
       "member": "typst-x86_64-apple-darwin/typst"
+    },
+    {
+      "target": "pandoc-aarch64-unknown-linux-gnu",
+      "tool": "pandoc",
+      "kind": "dev",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-linux-arm64.tar.gz",
+      "sha256": "56ed5566ec41d22ec9ee0704e6ac0b98ba102e92384efd5306173a22d314c79a",
+      "format": "tar.gz",
+      "member": "pandoc-3.11/bin/pandoc"
+    },
+    {
+      "target": "typst-aarch64-unknown-linux-gnu",
+      "tool": "typst",
+      "kind": "dev",
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-aarch64-unknown-linux-musl.tar.xz",
+      "sha256": "5aa8d74a3d906e60ea12a66ac2f37f8eef1b14cbad7182a745e393a10c23dcee",
+      "format": "tar.xz",
+      "member": "typst-aarch64-unknown-linux-musl/typst"
     }
   ]
 }
