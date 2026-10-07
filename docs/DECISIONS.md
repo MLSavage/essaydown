@@ -1306,3 +1306,35 @@ verdict: PASS
 - **Also in this commit.** 4.4's acceptance gains the both-legs clause; `4.verify`'s description gains 3.verify's listing clause for `4.verify` hard stops (as `[review-3-r0, 3.verify hard stops re-pointed]` asked); one backlog line records the taken and kept items. The untaken lines keep hard stop `4.verify`; its journal lists them, and the Phase 4 review set's reconciliation gives each a real trigger (#050's pattern).
 - **Graph.** EXPECTED_COUNT 375 → 380 (five loop tasks, no new gate). `validate-tasks: OK 380`, byte-identical to PRD §8. Then `sync-state` and `run --phase 4 --dry-run`, which must name 4.6 (#051).
 - **Reversal.** `git revert` of this commit, then `ralph/ralph.sh sync-state`, before the runner starts 4.6. Once a new task has passed there is no undo; a later planning commit replaces the remainder.
+
+## #004-pdf-pipeline (2026-10-07, task 4.0r; principal SPIKE decision from the accepted 4.0h record, gate 4.0h ACCEPT a1, run 37612096346 at 11cdbe9d4842d0bd712df89aaf38898f34ef5ee6 on `ci/4.0/a1`; nothing in this entry is Michael's)
+
+- **Decision: the primary pipeline on all three OSes; the fallback is not used anywhere.** Export runs `pandoc -f gfm --resource-path=<docdir> --pdf-engine=typst -o <out.pdf> <doc.md>` with pandoc 3.11 and typst 0.15.1 (`docker/versions.env`). It embedded both of essay-fixture.md's relative images on each OS: `route.txt` reads `primary` on `ubuntu-latest`, `macos-latest` and `windows-latest`, each `pandoc-primary.log` is empty (0 bytes, no warning), and no leg wrote a `pandoc-fallback.log`. PRD §9's stated fallback (images copied into a temp Typst root) stays a fallback and is not built.
+- **Per OS, `pdfimages -list` on the exported PDF** (`spike-pdf/spike-pdf-<os>/pdfimages-list.txt`; all three files are identical):
+  - Linux (`ubuntu-latest`, x86_64; pandoc `linux-amd64` tarball, typst `x86_64-unknown-linux-musl`):
+    ```
+    page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+    --------------------------------------------------------------------------------------------
+       4     0 image     320   240  icc     3   8  image  no       283  0    72    72  252B 0.1%
+       5     1 image     320   240  icc     1   8  image  no       284  0    72    72   99B 0.1%
+    ```
+  - macOS (`macos-latest`, arm64; pandoc `arm64-macOS` zip, typst `aarch64-apple-darwin`):
+    ```
+    page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+    --------------------------------------------------------------------------------------------
+       4     0 image     320   240  icc     3   8  image  no       283  0    72    72  252B 0.1%
+       5     1 image     320   240  icc     1   8  image  no       284  0    72    72   99B 0.1%
+    ```
+  - Windows (`windows-latest`, x86_64; pandoc `windows-x86_64` zip, typst `x86_64-pc-windows-msvc`):
+    ```
+    page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+    --------------------------------------------------------------------------------------------
+       4     0 image     320   240  icc     3   8  image  no       283  0    72    72  252B 0.1%
+       5     1 image     320   240  icc     1   8  image  no       284  0    72    72   99B 0.1%
+    ```
+  - The two rows are the fixture's two images, both 320×240: `golden-age-advert.png` (a 1-bit colormap PNG, embedded as 3 components) and `pen-materials.png` (8-bit grayscale, 1 component).
+- **What the spike did not cover.** The macOS leg ran the arm64 binaries only. The x86_64 macOS slices that 4.1 fetches were not exercised. The Windows leg ran under `continue-on-error`, but it reached `primary` on its own, so nothing was masked. These are readings, not tasks; 4.4's own CI legs are where a slice-specific failure would show.
+- **For 4.4 (orientation, not scope).** Lesson [4.0] records that pandoc exits 0 when `--resource-path` cannot resolve an image: it replaces the image with its alt text. Exit status alone therefore does not show that the images were embedded. The spike read `pdfimages -list`'s row count instead, which is also what CLAUDE.md's external-reader rule asks of exported artifacts.
+- **Evidence path.** The task text names `/logs/ci/4.0/accepted/`. The gate wrote its record under the gate id: `/logs/ci/4.0h/accepted/` → `a1` (host `.evidence/ci/4.0h/`), with `accepted.json` beside it. This is the same reading as deviation 23 (the evidence path) and needs no change.
+- **Also in this commit.** `.github/workflows/spike-pdf.yml` is deleted, as the task requires. No other product file changed.
+- **Reversal.** Before this task integrates: `git -C .wt/4.0r reset --hard HEAD~1`. After it integrates, a passed task is not edited; a later task restores the workflow with `git checkout 11cdbe9 -- .github/workflows/spike-pdf.yml` if a re-run is ever needed, and a new DECISIONS entry supersedes this one.
