@@ -1078,21 +1078,30 @@ function writesLiteralsRaw(state: ToMarkdownState, node: Nodes): boolean {
  * cell's `<…>` form, whose emptied stack hides the cell — the value is `safe`'s with every `|`
  * written `\|`, the same rewrite.
  *
+ * A `text` node written directly after a literal link written bare writes its leading trailing
+ * punctuation as the writer's bytes when that run holds a `*`, `_` or `~` ({@link rawTrail},
+ * task 4.7): the tokenizer ended the literal before the run, and `safe`'s `\_` would put a `\`
+ * the literal takes into its url. {@link settleLiterals} checks that the parser reads the run back
+ * as text and not as a delimiter.
+ *
  * The spans written raw are recorded on the `State` per node ({@link writtenLiteralSpans}), last
  * call wins — `containerPhrasing` calls a peek-less handler twice — so the position map reads
  * which units were written as themselves instead of guessing it from the bytes.
  */
-export function handleText(node: Text, _parent: Parents, state: ToMarkdownState, info: Info): string {
+export function handleText(node: Text, parent: Parents, state: ToMarkdownState, info: Info): string {
   const widened = state as WidenedState;
   if (widened.cellAutolink === true) {
     return escapeCellPipes(state.safe(node.value, info));
   }
-  const spans = writesLiteralsRaw(state, node) ? cellLiteralSpans(state, node.value) : [];
-  if (spans.length === 0) {
-    widened.literalSpans?.delete(node);
-    return state.safe(node.value, info);
-  }
-  (widened.literalSpans ??= new Map()).set(node, spans);
+  const raw = writesLiteralsRaw(state, node);
+  const spans = raw ? cellLiteralSpans(state, node.value) : [];
+  // No bound at the first span is needed: a span starting inside the run (`_a@b.cd`) is one
+  // non-whitespace stretch with it, which the tokenizer takes into the bare literal before it, so
+  // that round is a misread and `settleLiterals` escapes the link, which ends the trail.
+  const trail = raw && followsBareLiteral(state, node, parent) ? rawTrail(node.value) : 0;
+  if (spans.length === 0) widened.literalSpans?.delete(node);
+  else (widened.literalSpans ??= new Map()).set(node, spans);
+  if (spans.length === 0 && trail === 0) return state.safe(node.value, info);
   const { value } = node;
   const plain = (start: number, end: number): string =>
     start === end
@@ -1102,14 +1111,52 @@ export function handleText(node: Text, _parent: Parents, state: ToMarkdownState,
           before: start === 0 ? info.before : value.charAt(start - 1),
           after: end === value.length ? info.after : value.charAt(end),
         });
-  let out = "";
-  let at = 0;
+  let out = value.slice(0, trail);
+  let at = trail;
   for (const span of spans) {
     const bytes = value.slice(span.start, span.end);
     out += plain(at, span.start) + (span.pipesEscaped === true ? escapeCellPipes(bytes) : bytes);
     at = span.end;
   }
   return out + plain(at, value.length);
+}
+
+/**
+ * The trailing punctuation the installed tokenizer ends a GFM autolink literal before
+ * (`micromark-extension-gfm-autolink-literal` 2.1.0, `dev/lib/syntax.js`, `tokenizeTrail`'s
+ * `trail`: its "regular trailing punctuation" branch), read from that branch and not from the
+ * GFM spec's list. Its `&…;` and `]` sub-branches are left out: a run that reaches one ends there.
+ */
+const TRAIL_RUN = /^[!"')*,.:;?_~]+/;
+
+/** The trail characters `safe` escapes in phrasing (`lib/unsafe.js`: `*`, `_`, `~`). */
+const ATTENTION_TRAIL = /[*_~]/;
+
+/**
+ * How many leading units of a `text` value written directly after a literal link written bare
+ * {@link handleText} writes as the writer's bytes (task 4.7, DECISIONS #review-3-r0 C2): the
+ * value's leading run of {@link TRAIL_RUN} when it holds a `*`, `_` or `~`; else 0. The loaded
+ * `https://a.b/x_` is the literal `https://a.b/x` and the text `_`, because the tokenizer reads a
+ * trailing `_` as the literal's end; but in `safe`'s `https://a.b/x\_` the `\` is no trail
+ * character, so `pathInside` takes it into the url and the literal becomes `https://a.b/x\`
+ * (DECISIONS #review-3-r0 C2: `<https://a.b/x>\_` was the settled form). Every escape of the run
+ * is swallowed so; the raw run is the one spelling the tokenizer ends the literal before, and
+ * {@link settleLiterals} decides whether the parser reads it back as text.
+ */
+export function rawTrail(value: string): number {
+  const run = TRAIL_RUN.exec(value)?.[0] ?? "";
+  return ATTENTION_TRAIL.test(run) ? run.length : 0;
+}
+
+/**
+ * Whether `node`'s previous sibling in `parent` is a literal link written bare in `state` — the
+ * test `installAutolinkFallback`'s `bare` makes, read on the same stack, since both are children
+ * of one phrasing parent.
+ */
+function followsBareLiteral(state: ToMarkdownState, node: Text, parent: Parents | undefined): boolean {
+  const children: readonly Nodes[] = parent !== undefined && "children" in parent ? (parent.children as Nodes[]) : [];
+  const previous = children[children.indexOf(node) - 1];
+  return previous?.type === "link" && writesLiteralsRaw(state, previous) && writesBare(previous);
 }
 
 /**
@@ -1226,6 +1273,18 @@ function parsedLinks(root: Root): LinkSignature[] {
 }
 
 /**
+ * Where {@link settleLiterals} gave up on keeping any literal raw and wrote every literal escaped
+ * (DECISIONS #review-3-r0 C13, CLAUDE.md N3): `node` is the node of the tree at the first
+ * disagreement {@link literalMisread} found — the expected link there, or the one before it, or
+ * the root when the parse held more links than the tree names — and neither it nor its
+ * neighbour was written raw, or it was escaped already, so no escape of one node could settle it.
+ * `formatWithMap` reports `node`'s path in `map.unresolved`, the instrument a corpus case reads.
+ */
+export interface LiteralGiveUp {
+  giveUp: Nodes;
+}
+
+/**
  * Whether `text` — `root` serialised with `escaped` — parses to exactly the links
  * {@link expectedLinks} names, in order (task 3.14), and if not, which node to escape next. A
  * literal written raw is read by the parser's tokenizer on the bytes around it, which no
@@ -1235,9 +1294,14 @@ function parsedLinks(root: Root): LinkSignature[] {
  *
  * Returns `null` when the links hold; else the first raw node at the first disagreement — the
  * expected link there, or the one before it, which is the literal that swallowed it — for
- * {@link settleLiterals} to escape; else `"all"`, when neither was written raw.
+ * {@link settleLiterals} to escape; else, when neither was written raw, a {@link LiteralGiveUp}
+ * naming the node at the disagreement.
  */
-export function literalMisread(root: Root, text: string, escaped: ReadonlySet<Nodes>): Nodes | null | "all" {
+export function literalMisread(
+  root: Root,
+  text: string,
+  escaped: ReadonlySet<Nodes>,
+): Nodes | null | LiteralGiveUp {
   const expected = expectedLinks(root, escaped);
   if (expected === undefined) return null;
   const parsed = parsedLinks(parse(text));
@@ -1247,7 +1311,42 @@ export function literalMisread(root: Root, text: string, escaped: ReadonlySet<No
   for (const candidate of [expected[at], expected[at - 1]]) {
     if (candidate?.raw === true) return candidate.node;
   }
-  return "all";
+  return { giveUp: expected[at]?.node ?? expected[at - 1]?.node ?? root };
+}
+
+/**
+ * The literal links of `root` whose next sibling is a `text` node with a {@link rawTrail} — the
+ * links after which {@link handleText} may write a trailing `*`, `_` or `~` raw. A superset of
+ * the ones it does write so (it cannot read the construct stack), which costs a comparison and
+ * changes nothing: escaping a link that was not written bare writes the same bytes.
+ */
+function trailedLiterals(root: Root, escaped: ReadonlySet<Nodes>): Link[] {
+  const out: Link[] = [];
+  const walk = (node: Nodes): void => {
+    if (!("children" in node)) return;
+    const children = node.children as Nodes[];
+    children.forEach((child, index) => {
+      const next = children[index + 1];
+      if (
+        child.type === "link" &&
+        !escaped.has(child) &&
+        writesBare(child) &&
+        next?.type === "text" &&
+        !escaped.has(next) &&
+        rawTrail(next.value) > 0
+      ) {
+        out.push(child);
+      }
+      walk(child);
+    });
+  };
+  walk(root);
+  return out;
+}
+
+/** A parsed tree as {@link settleLiterals} compares two: no `position`, no `data`. */
+function shapeOf(root: Root): string {
+  return JSON.stringify(root, (key, value: unknown) => (key === "position" || key === "data" ? undefined : value));
 }
 
 /**
@@ -1255,21 +1354,40 @@ export function literalMisread(root: Root, text: string, escaped: ReadonlySet<No
  * with no escapes, and while {@link literalMisread} names a node, again with that node escaped as
  * well — one node per round, so one literal flush against a letter costs that literal its bare
  * form and no other literal of the document anything. A misread no escape can fix falls back to
- * every literal escaped: the form every link and text had before task 3.14. Terminates: each
- * round escapes one more node of a finite tree. {@link format} and `formatWithMap` both settle
- * through this, so the map is always built for the very bytes `format` returns.
+ * every literal escaped: the form every link and text had before task 3.14, and the give-up is
+ * handed to `onGiveUp` ({@link LiteralGiveUp}). Terminates: each round escapes one more node of a
+ * finite tree. {@link format} and `formatWithMap` both settle through this, so the map is always
+ * built for the very bytes `format` returns.
+ *
+ * A trailing `*`, `_` or `~` written raw after a bare literal ({@link rawTrail}, task 4.7) is a
+ * delimiter the parser may pair with one the formatter wrote for a mark (`*https://a.b/*. x*`:
+ * the raw `*` closes the emphasis), which {@link literalMisread} cannot see, because the links
+ * are the same. So when the links hold and such a run was written, the parse of the bytes is
+ * compared with the parse of the bytes those literals escaped write — the form before task 4.7,
+ * where `safe` escapes the run — and a difference escapes them and settles again.
  */
 export function settleLiterals<T>(
   root: Root,
   run: (escaped: LiteralEscapes) => T,
   textOf: (result: T) => string,
+  onGiveUp?: (giveUp: LiteralGiveUp) => void,
 ): T {
   const escaped = new Set<Nodes>();
   for (;;) {
     const result = run(escaped);
     const misread = literalMisread(root, textOf(result), escaped);
-    if (misread === null) return result;
-    if (misread === "all" || escaped.has(misread)) return run("all");
+    if (misread === null) {
+      const trailed = trailedLiterals(root, escaped);
+      if (trailed.length === 0) return result;
+      const without = run(new Set([...escaped, ...trailed]));
+      if (shapeOf(parse(textOf(result))) === shapeOf(parse(textOf(without)))) return result;
+      for (const link of trailed) escaped.add(link);
+      continue;
+    }
+    if ("giveUp" in misread || escaped.has(misread)) {
+      onGiveUp?.("giveUp" in misread ? misread : { giveUp: misread });
+      return run("all");
+    }
     escaped.add(misread);
   }
 }

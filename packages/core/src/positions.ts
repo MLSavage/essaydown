@@ -49,7 +49,10 @@ export interface PositionEntry extends NodeRange {
  * sibling unwidened; that child and those siblings are reported here, as is the one child whose
  * edit the walk had to drop as an overlap. The walk's own enumeration is stricter than
  * {@link locateEmission}'s, so this is the only guard that can go red when it gives up: a path
- * appears here whether or not the node was placed.
+ * appears here whether or not the node was placed. A third kind is the node at which
+ * `settleLiterals` gave up keeping any GFM autolink literal as the writer's bytes and wrote every
+ * one escaped (format.ts `LiteralGiveUp`, task 4.7, DECISIONS #review-3-r0 C13): its
+ * `literalMisread` mirrors the parser's link rules, so a case it lacks lands here.
  */
 export interface PositionMap {
   ranges: Record<string, NodeRange>;
@@ -218,17 +221,39 @@ interface Line {
  * instrumented handlers are pushed as one more extension and `root` is not among them. Every
  * give-up that walk records on the `State` is therefore this call's own, and is reported in
  * `map.unresolved` as the path of the child it names (DECISIONS #review-1-r8 N3, see
- * {@link PositionMap}).
+ * {@link PositionMap}), and so is the node a `settleLiterals` give-up names — the round that
+ * writes every literal escaped because no escape of one node made the parse read the links back
+ * (`LiteralGiveUp`, task 4.7, DECISIONS #review-3-r0 C13).
  *
  * `formatWithMap(root).text` is `format(root)`, and the map is a pure function of `root`: the
  * tree is never mutated and nothing is carried between calls.
  */
 export function formatWithMap(root: Root): FormatWithMapResult {
-  return settleLiterals(
+  const giveUps: Nodes[] = [];
+  const result = settleLiterals(
     root,
     (escaped) => formatWithMapAs(root, escaped),
     (result) => result.text,
+    ({ giveUp }) => giveUps.push(giveUp),
   );
+  for (const node of giveUps) {
+    const path = pathOf(root, node) ?? ROOT_PATH;
+    if (!result.map.unresolved.includes(path)) result.map.unresolved.push(path);
+  }
+  return result;
+}
+
+/** The path of `node` in `root`, or `undefined` when it is not a node of that tree. */
+function pathOf(root: Root, node: Nodes): string | undefined {
+  const walk = (at: Nodes, path: string): string | undefined => {
+    if (at === node) return path;
+    for (const [index, child] of childrenOf(at).entries()) {
+      const found = walk(child, childPath(path, index));
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  return walk(root, ROOT_PATH);
 }
 
 /**
