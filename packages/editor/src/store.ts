@@ -1,6 +1,7 @@
 import type { Root, Yaml } from "mdast";
 import {
   amendSidecar,
+  carryEdit,
   createUndoStack,
   current,
   endCoalescing,
@@ -10,6 +11,7 @@ import {
   undo,
   type DocumentState,
   type PushOptions,
+  type TopLevelEdit,
   type Sidecar,
   type UndoStack,
   type UndoStackOptions,
@@ -17,9 +19,10 @@ import {
 import type { Extension } from "@codemirror/state";
 import { keymap as codeMirrorKeymap, type KeyBinding } from "@codemirror/view";
 import { keymap as proseMirrorKeymap } from "prosemirror-keymap";
+import type { Node as PMNode } from "prosemirror-model";
 import { Selection, type Command, type EditorState, type Plugin, type Transaction } from "prosemirror-state";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import { mdastToPM, pmToMdast } from "./schema.js";
+import { mdastToPM, pmToMdastWithSources } from "./schema.js";
 
 /**
  * The Zustand document store of PRD §4 and §6.5: one `{root, sidecar}` snapshot stack (task
@@ -280,6 +283,91 @@ function replaceKeepingCaret(state: EditorState, doc: EditorState["doc"]): Trans
   return transaction.setSelection(Selection.near(transaction.doc.resolve(position)));
 }
 
+/**
+ * One doc-changing transaction as core's `carryEdit` reads it (task 4.9; PRD §6.2, in-app
+ * operations update anchors live), in the indices of the two mdast roots either side of it.
+ * `offset` is the front matter the editable document never holds (1 when the root has it);
+ * `sources` is {@link pmToMdastWithSources}' list for `transaction.doc`, and the same list for
+ * `transaction.before` is computed only when the sidecar has an entry to ask about.
+ *
+ * **Regions** are {@link replacedRuns}, with every block the conversion drops left out (it has
+ * no mdast index and no candidates).
+ *
+ * **mapBlock**: an old block goes to the block holding its first content position, mapped forward
+ * with the position kept after anything inserted there — a block typed above or below leaves it
+ * where its own text went, a split at its start sends it to the half its text kept, a join at its
+ * start to the block it merged into. It goes nowhere when that position's next token was deleted,
+ * or when the block it lands in is one the conversion drops.
+ */
+export function carryThrough(
+  transaction: Transaction,
+  offset: number,
+  sources: readonly number[],
+): TopLevelEdit {
+  let before: readonly number[] | null = null;
+  const beforeSources = (): readonly number[] =>
+    (before ??= pmToMdastWithSources({ doc: transaction.before, frontMatter: null }).sources);
+  const toMdast = (list: readonly number[], blocks: readonly number[]): number[] =>
+    blocks.flatMap((block) => {
+      const at = list.indexOf(block);
+      return at === -1 ? [] : [at + offset];
+    });
+
+  return {
+    regions: () =>
+      replacedRuns(transaction.before, transaction.doc).map((run) => ({
+        before: toMdast(beforeSources(), run.before),
+        after: toMdast(sources, run.after),
+      })),
+    mapBlock: (index) => {
+      const old = beforeSources()[index - offset];
+      if (old === undefined) return null;
+      let from = 0;
+      for (let i = 0; i < old; i += 1) from += transaction.before.child(i).nodeSize;
+      const inner = transaction.mapping.mapResult(from + 1, 1);
+      if (inner.deleted) return null;
+      const at = sources.indexOf(transaction.doc.resolve(inner.pos).index(0));
+      return at === -1 ? null : at + offset;
+    },
+  };
+}
+
+/**
+ * The runs of top-level blocks a transaction replaced, read from ProseMirror's structural sharing:
+ * a block the transaction did not touch is the same node object in both documents. Old blocks are
+ * matched to new ones greedily in document order; a new block that is not an old one, or is one
+ * already passed (a node moved, or reused twice by a paste), belongs to the current run, and every
+ * old block skipped over by a match is replaced. The matched blocks are therefore in the same order
+ * on both sides and every run sits between the same two of them — which is all `carryEdit` relies
+ * on; a run larger than the edit is only slower, never wrong.
+ */
+export function replacedRuns(
+  before: PMNode,
+  after: PMNode,
+): { before: number[]; after: number[] }[] {
+  const oldIndex = new Map<PMNode, number>();
+  before.forEach((child, _offset, index) => oldIndex.set(child, index));
+  const runs: { before: number[]; after: number[] }[] = [];
+  let run: { before: number[]; after: number[] } = { before: [], after: [] };
+  let kept = -1;
+  const close = (upTo: number): void => {
+    for (let i = kept + 1; i < upTo; i += 1) run.before.push(i);
+    if (run.before.length + run.after.length > 0) runs.push(run);
+    run = { before: [], after: [] };
+  };
+  after.forEach((child, _offset, index) => {
+    const old = oldIndex.get(child);
+    if (old === undefined || old <= kept) {
+      run.after.push(index);
+      return;
+    }
+    close(old);
+    kept = old;
+  });
+  close(before.childCount);
+  return runs;
+}
+
 export function bindProseMirror(
   store: DocumentStore,
   view: BoundView,
@@ -310,9 +398,16 @@ export function bindProseMirror(
       view.updateState(next);
       if (transaction.docChanged) {
         const { document, commit } = store.getState();
-        const root = pmToMdast({ doc: next.doc, frontMatter: frontMatterOf(document.root) });
+        const frontMatter = frontMatterOf(document.root);
+        const after = pmToMdastWithSources({ doc: next.doc, frontMatter });
+        const root = after.root;
         shown = root;
-        commit(root, document.sidecar, { coalesceKey, at: now() });
+        const sidecar = carryEdit(
+          document,
+          root,
+          carryThrough(transaction, frontMatter === null ? 0 : 1, after.sources),
+        );
+        commit(root, sidecar, { coalesceKey, at: now() });
       }
       store.getState().setCursor(next.selection.head);
     },

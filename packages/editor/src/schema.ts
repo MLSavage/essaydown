@@ -516,12 +516,13 @@ function blocksToPM(children: readonly RootContent[]): PMNode[] {
   return blocks.length > 0 ? blocks : [schema.node("paragraph")];
 }
 
-function blocksToMdast(node: PMNode): RootContent[] {
+function blocksToMdast(node: PMNode, sources?: number[]): RootContent[] {
   const out: RootContent[] = [];
-  node.forEach((child) => {
+  node.forEach((child, _offset, index) => {
     const block = blockToMdast(child);
     if (block.type === "paragraph" && block.children.length === 0) return;
     out.push(block);
+    sources?.push(index);
   });
   return out;
 }
@@ -1495,9 +1496,35 @@ export function mdastToPM(root: Root): EditorDocument {
  * root's first child with its bytes untouched.
  */
 export function pmToMdast(document: EditorDocument): Root {
-  const children = blocksToMdast(document.doc);
+  return pmToMdastWithSources(document).root;
+}
+
+/** {@link pmToMdastWithSources}' answer. */
+export interface MdastWithSources {
+  readonly root: Root;
+  /**
+   * For each top-level child of `root` after the front matter, the index of the ProseMirror block
+   * of `doc` it was converted from — ascending, and missing every block {@link blocksToMdast}
+   * dropped, so the two lists line up even when the user has opened a blank line.
+   */
+  readonly sources: readonly number[];
+}
+
+/**
+ * {@link pmToMdast}, with the block correspondence it makes on the way (task 4.9): the rendered
+ * view's binding carries the sidecar's anchors through an edit by the ProseMirror mapping, and has
+ * to say which mdast child each ProseMirror block is. Read from the one loop that drops the empty
+ * paragraphs, never re-derived beside it.
+ */
+export function pmToMdastWithSources(document: EditorDocument): MdastWithSources {
+  const sources: number[] = [];
+  const children = blocksToMdast(document.doc, sources);
   return {
-    type: "root",
-    children: document.frontMatter === null ? children : [{ ...document.frontMatter }, ...children],
+    root: {
+      type: "root",
+      children:
+        document.frontMatter === null ? children : [{ ...document.frontMatter }, ...children],
+    },
+    sources,
   };
 }

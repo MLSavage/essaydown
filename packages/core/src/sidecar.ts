@@ -689,6 +689,129 @@ export function applyMoveBlock(
   return carryTopLevelMove(state, (root) => moveBlock(root, from, to), options);
 }
 
+/**
+ * One run of top-level children an edit replaced, between two children it left alone: their
+ * indices in the document before the edit and in the document after it. Either side may be empty
+ * (a block typed between two others, a block deleted whole).
+ */
+export interface EditRegion {
+  readonly before: readonly number[];
+  readonly after: readonly number[];
+}
+
+/** What {@link carryEdit} needs to know about an edit, read lazily — nothing is asked of an empty sidecar. */
+export interface TopLevelEdit {
+  /**
+   * Every run the edit replaced, in document order. The children outside them are the ones the
+   * edit left alone, in the same order on both sides, so run `k` sits between the same two
+   * untouched children before and after.
+   */
+  readonly regions: () => readonly EditRegion[];
+  /** The index the old child `index` has after the edit, or null when the edit removed it. */
+  readonly mapBlock: (index: number) => number | null;
+}
+
+/** An anchor's identity key: what `occurrence` is counted over (one kind, one hash). */
+function keyOf(anchor: { kind: AnchorKind; hash: string }): string {
+  return `${anchor.kind} ${anchor.hash}`;
+}
+
+/** The candidates of `root`'s top-level children at `indices`, as a document of their own. */
+function candidatesAt(root: Root, indices: readonly number[], options: SegmentOptions): AnchorCandidate[] {
+  return candidatesOf({ type: "root", children: indices.map((index) => root.children[index]) }, options);
+}
+
+/**
+ * An edit in the app's own writing surface (typing in the rendered view) with the sidecar carried
+ * along — §6.2's "In-app operations update anchors live", for the operation the user performs
+ * most. A paragraph typed above two byte-identical twins shifts their document-wide `occurrence`,
+ * and the Markdown holds no evidence of which twin an anchor meant; the editor's own mapping does.
+ *
+ * **Which entries move.** An entry's `hash` + `occurrence` is its rank among the items of its kind
+ * and hash (its **key**) in document order. The children the edit left alone keep their order, so
+ * a key whose count inside every replaced run is unchanged still has every rank where it was, and
+ * its entries stay as they are — typing that creates or destroys no item of an anchored key costs
+ * two runs' worth of segmentation, never the document's. An entry whose key's count changed in some
+ * run is **dirty**, and only dirty entries are carried.
+ *
+ * **Where a dirty entry goes.** From the item it names exactly in `state.root` (§6.2 steps 1–2), to
+ * the candidate of its key in the child `mapBlock` names that is nearest the item's old position
+ * (ties → lowest index) — in a child the edit left alone, the item itself at its old index. Its
+ * anchor is rebuilt there, so the sidecar object is replaced only when a rank actually moved. A
+ * dirty entry resolved only by steps 3–5, or whose own text the edit changed or removed (no
+ * candidate of its key in the child it went to), is left as it was, for the next save's `refresh`
+ * to resolve in §6.2 order: no live carry can follow an item whose bytes it no longer finds without
+ * inventing an identity.
+ *
+ * Pure: neither argument is mutated; `state.sidecar` itself is returned when nothing moved, and
+ * without asking `edit` anything when it has no entries.
+ */
+export function carryEdit(
+  state: DocumentState,
+  root: Root,
+  edit: TopLevelEdit,
+  options: SegmentOptions = {},
+): Sidecar {
+  const { sidecar } = state;
+  const anchors = [...sidecar.headings, ...sidecar.rewrites, ...sidecar.coach].map(
+    (entry) => entry.anchor,
+  );
+  if (anchors.length === 0) return sidecar;
+  const anchored = new Set(anchors.map(keyOf));
+
+  const dirty = new Set<string>();
+  for (const region of edit.regions()) {
+    const counts = new Map<string, number>();
+    for (const candidate of candidatesAt(state.root, region.before, options))
+      counts.set(keyOf(candidate), (counts.get(keyOf(candidate)) ?? 0) + 1);
+    for (const candidate of candidatesAt(root, region.after, options))
+      counts.set(keyOf(candidate), (counts.get(keyOf(candidate)) ?? 0) - 1);
+    for (const [key, count] of counts) if (count !== 0 && anchored.has(key)) dirty.add(key);
+  }
+  if (dirty.size === 0) return sidecar;
+
+  const before = candidatesOf(state.root, options);
+  const after = candidatesOf(root, options);
+  let moved = false;
+
+  const carry = (anchor: Anchor): Anchor => {
+    if (!dirty.has(keyOf(anchor))) return anchor;
+    const resolution = resolveAnchor(anchor, state.root, { ...options, candidates: before });
+    if (resolution === null || resolution.step > 2) return anchor;
+    const block = edit.mapBlock(resolution.anchor.pos[0]);
+    if (block === null) return anchor;
+    const target = nearestInBlock(after, resolution.anchor, block);
+    if (target === null) return anchor;
+    if (target.hash === anchor.hash && target.occurrence === anchor.occurrence) return anchor;
+    moved = true;
+    return anchorOf(target);
+  };
+
+  const carried: Sidecar = {
+    ...sidecar,
+    headings: sidecar.headings.map((entry) => ({ ...entry, anchor: carry(entry.anchor) })),
+    rewrites: sidecar.rewrites.map((entry) => ({ ...entry, anchor: carry(entry.anchor) })),
+    coach: sidecar.coach.map((entry) => ({ ...entry, anchor: carry(entry.anchor) })),
+  };
+  return moved ? carried : sidecar;
+}
+
+/** {@link carryEdit}'s rule: the candidate of `anchor`'s kind and hash in block `at` nearest `anchor.pos`. */
+function nearestInBlock(
+  candidates: readonly AnchorCandidate[],
+  anchor: Anchor,
+  at: number,
+): AnchorCandidate | null {
+  let best: AnchorCandidate | null = null;
+  for (const candidate of candidates) {
+    if (candidate.kind !== anchor.kind || candidate.hash !== anchor.hash || candidate.pos[0] !== at)
+      continue;
+    if (best === null || distanceIsLess(posDistance(candidate.pos, anchor.pos), posDistance(best.pos, anchor.pos)))
+      best = candidate;
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------------------
 // Front matter: the two app-owned keys (§6.1)
 // ---------------------------------------------------------------------------
