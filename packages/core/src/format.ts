@@ -1059,8 +1059,9 @@ function writesLiteralsRaw(state: ToMarkdownState, node: Nodes): boolean {
  * stretch is passed to `safe` with its real neighbours: the literal's edge character where one
  * touches it, `info`'s otherwise.
  *
- * A literal holding `|` inside a table cell is the exception ({@link cutsCell}, DECISIONS
- * #review-3-r1 C14): the table tokenizer cuts the row at its raw `|` before the literal is read,
+ * A literal holding a `|` the table tokenizer cuts at — one after an even run of backslashes,
+ * zero included — inside a table cell is the exception ({@link cutsCell}, DECISIONS #review-3-r1
+ * C14, #review-3-r2 C15): the tokenizer cuts the row at that `|` before the literal is read,
  * and when every row is cut alike the parse holds no table and the same links, which
  * {@link literalMisread} cannot tell apart — so it is a plain stretch, escaped by `safe` in the
  * cell's stack (`https\://a.b/x\|y`), which the parser reads back as the same literal.
@@ -1246,13 +1247,22 @@ function autolinkCarriesUrl(value: string, url: string): boolean {
   return between === url || `mailto:${between}` === url;
 }
 
+/** A `|` after an even run of backslashes (zero included): the table tokenizer cuts there. */
+const CELL_CUT = /(?:^|[^\\])(?:\\\\)*\|/;
+
 /**
- * Whether `bytes`, written inside the current construct, hold a `|` that would cut a table cell
- * (DECISIONS #review-3-r1 C14): the stack holds `tableCell` and the bytes a `|`. Read on the
- * stack the `link` handler is called with, before the built-in's `<…>` branch empties it.
+ * Whether `bytes`, as they will stand on disk inside the current construct, hold a `|` that would
+ * cut a table cell (DECISIONS #review-3-r1 C14, #review-3-r2 C15): the stack holds `tableCell` and
+ * the bytes a `|` the GFM table tokenizer cuts at. Inside a row the tokenizer
+ * (`micromark-extension-gfm-table/lib/syntax.js`, `bodyRowData` → `bodyRowEscape`, and their head
+ * twins `headRowData` → `headRowEscape`) consumes a `\` and then the one `\` or `|` after it as
+ * cell data, so a `|` after an odd run of backslashes is content (`x\|y`, how GitHub and Typora
+ * write a url's `|` in a cell) and one after an even run, zero included, cuts the row (`x|y`,
+ * `x\\|y`). Read on the stack the `link` handler is called with, before the built-in's `<…>`
+ * branch empties it.
  */
 function cutsCell(state: ToMarkdownState, bytes: string): boolean {
-  return state.stack.includes("tableCell") && bytes.includes("|");
+  return state.stack.includes("tableCell") && CELL_CUT.test(bytes);
 }
 
 /**
@@ -1277,10 +1287,12 @@ function cutsCell(state: ToMarkdownState, bytes: string): boolean {
  * still reads there (DECISIONS #review-3-r1 C14): the GFM table tokenizer cuts the row at every
  * unescaped `|` before any inline construct is parsed, so `| c <https://a.b/x|y> | d |` is three
  * cells, and `mdast-util-gfm-table`'s `{character: '|', inConstruct: 'tableCell'}` is the pattern
- * `state.stack = []` hides. Every other `inConstruct` pattern the `<…>` branch hides is either read
+ * `state.stack = []` hides. A `|` after an odd run of backslashes is cell data, not a cut
+ * (`bodyRowEscape`; DECISIONS #review-3-r2 C15), so a loaded literal written `x\|y` keeps its bytes. Every other `inConstruct` pattern the `<…>` branch hides is either read
  * literally inside `<…>` (§6.4: no escape, no emphasis, no literal applies there) or a character
  * `formatLinkAsAutolink` already refuses (`[\0- <>\u007F]`). So inside a `tableCell` a `<…>` form
- * whose bytes hold `|` is not taken either ({@link cutsCell}): such a link that is a literal
+ * whose bytes hold a `|` the tokenizer cuts at is not taken either ({@link cutsCell}, read on the
+ * post-`safe` value, the bytes as they will stand on disk): such a link that is a literal
  * written bare is still its text child alone, which {@link handleText} writes escaped in the
  * cell's stack — `https\://a.b/x\|y`, the bytes the escaped text of the first save already holds,
  * which the parser reads back as the same literal — so the position map's text instrumentation

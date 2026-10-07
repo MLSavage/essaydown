@@ -299,3 +299,74 @@ describe("a link holding `|` inside a table cell keeps its cell (task 3.27, DECI
     assertSettled(paragraph(text("See https://a.b/x|y end")), "See https://a.b/x|y end\n");
   });
 });
+
+/**
+ * A loaded `|` the table tokenizer does not cut at keeps its bytes (task 3.28, DECISIONS
+ * #review-3-r2 C15). Inside a row the tokenizer (`micromark-extension-gfm-table/lib/syntax.js`
+ * `bodyRowData` → `bodyRowEscape`, head twins alike) consumes a `\` and the one `\` or `|` after
+ * it as cell data, so `x\|y` (how GitHub and Typora write that url in a cell) is one cell, and
+ * `x\\|y` cuts. 3.27's `cutsCell` answered true for any `|`, so the loaded cell was written
+ * `https\://a.b/x\\\|y`, which every other GFM reader shows as plain text.
+ */
+describe("a loaded url holding an escaped `\\|` in a table cell keeps its bytes (task 3.28, DECISIONS #review-3-r2 C15)", () => {
+  /** The probe `| a | b |\n| - | - |\n| c <cell> | d |\n` in the formatter's own table padding. */
+  const probe = (cell: string): string => {
+    const width = "c ".length + cell.length;
+    return `| a${" ".repeat(width - 1)} | b |\n| ${"-".repeat(width)} | - |\n| c ${cell} | d |\n`;
+  };
+  const nodeCount = (node: Nodes): number =>
+    1 + ("children" in node ? (node.children as Nodes[]).reduce((n, child) => n + nodeCount(child), 0) : 0);
+
+  const LOADED: [string, string][] = [
+    ["guard 1: the loaded literal `https://a.b/x\\|y`", "https://a.b/x\\|y"],
+    ["guard 2: the astral member `https://a.b/x\\|𝒜`", "https://a.b/x\\|𝒜"],
+  ];
+  for (const [title, cell] of LOADED) {
+    it(`${title}, saved three times by the core route: byte-identical to the input, two cells, node count kept`, () => {
+      const input = probe(cell);
+      // The unpadded probe's cell is written as it stands; only the column padding is the formatter's.
+      const unpadded = `| a | b |\n| - | - |\n| c ${cell} | d |\n`;
+      expect(format(parse(unpadded))).toBe(input);
+      let bytes = input;
+      for (let k = 1; k <= 3; k += 1) {
+        const tree = parse(bytes);
+        bytes = format(tree);
+        expect(bytes, `save ${k} is byte-identical to the input`).toBe(input);
+        expect(rowWidths(parse(bytes)), `save ${k}: two cells in every row`).toEqual([2, 2]);
+        expect(nodeCount(parse(bytes)), `save ${k}: node count after parse(format(·))`).toBe(nodeCount(tree));
+        expect(linksOf(parse(bytes)), `save ${k}: the literal kept`).toEqual([[cell, cell, true]]);
+      }
+      const mapped = formatWithMap(parse(input));
+      expect(mapped.text).toBe(input);
+      expect(mapped.map.unresolved, "nothing unresolved").toEqual([]);
+    });
+  }
+
+  it("guard 3 (absence): a hand-built literal whose url holds `x\\\\|y` (an even run, so the `|` cuts) is still written escaped in the cell's stack", () => {
+    const url = "https://a.b/x\\\\|y";
+    const root = inCell(literal(url));
+    const out = format(root);
+    expect(bodyCell(out)).toBe("https\\://a.b/x\\\\\\\\\\|y");
+    expect(rowWidths(parse(out))).toEqual([1, 1]);
+    expect(linksOf(parse(out))).toEqual([[url, url, true]]);
+    assertSettled(root, out);
+  });
+
+  it("guard 4 (presence of both): a hand-built literal whose url holds `x\\|y|z` (one escaped, one raw `|`) is written escaped", () => {
+    const url = "https://a.b/x\\|y|z";
+    const root = inCell(literal(url));
+    const out = format(root);
+    expect(bodyCell(out)).toBe("https\\://a.b/x\\\\\\|y\\|z");
+    expect(rowWidths(parse(out))).toEqual([1, 1]);
+    expect(linksOf(parse(out))).toEqual([[url, url, true]]);
+    assertSettled(root, out);
+  });
+
+  it("guard 5 (absence): 3.27's typed member keeps 3.27's bytes `https\\://a.b/x\\|y`", () => {
+    const out = format(inCell(text("https://a.b/x|y")));
+    expect(bodyCell(out)).toBe("https\\://a.b/x\\|y");
+    expect(format(inCell(literal("https://a.b/x|y")))).toBe(out);
+    expect(rowWidths(parse(out))).toEqual([1, 1]);
+    assertSettled(inCell(text("https://a.b/x|y")), out);
+  });
+});

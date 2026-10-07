@@ -366,3 +366,33 @@ describe("the `|` URL typed into every table cell of every fixture holding a tab
     expect(exercised).toBe(withTables.length);
   });
 });
+
+/**
+ * A loaded url holding an already-escaped `\|` in a cell keeps its bytes through the editor (task
+ * 3.28, DECISIONS #review-3-r2 C15): the GFM table tokenizer (`bodyRowEscape`) takes `\|` as cell
+ * data, so the formatter writes the literal raw, not escaped a second time.
+ */
+describe("guard 6: a loaded url holding `\\|` in a table cell keeps its bytes by the editor route (task 3.28, DECISIONS #review-3-r2 C15)", () => {
+  const LOADED: [string, string][] = [
+    ["guard 1 by the editor route: `https://a.b/x\\|y`", "https://a.b/x\\|y"],
+    ["guard 2 by the editor route: the astral member `https://a.b/x\\|𝒜`", "https://a.b/x\\|𝒜"],
+  ];
+  for (const [title, cell] of LOADED) {
+    it(`${title}, saved three times as format(pmToMdast(mdastToPM(parse(·)))): byte-identical to the input, two cells, node count kept`, () => {
+      const width = "c ".length + cell.length;
+      const input = `| a${" ".repeat(width - 1)} | b |\n| ${"-".repeat(width)} | - |\n| c ${cell} | d |\n`;
+      expect(reloaded(`| a | b |\n| - | - |\n| c ${cell} | d |\n`), "the unpadded probe's cell as it stands").toBe(input);
+      const saves = threeSaves(reloaded(input), reloaded);
+      for (const [k, save] of saves.entries()) {
+        expect(save, `save ${k + 1} is byte-identical to the input`).toBe(input);
+        expect(rowWidths(parse(save)), `save ${k + 1}: two cells in every row`).toEqual([2, 2]);
+        const editorTree = pmToMdast(mdastToPM(parse(save)));
+        expect(nodeCount(parse(format(editorTree))), `save ${k + 1}: node count after parse(format(·))`).toBe(
+          nodeCount(editorTree),
+        );
+        expect(literalsOf(parse(save), cell), `save ${k + 1}: one literal link`).toBe(1);
+      }
+      expect(formatWithMap(pmToMdast(mdastToPM(parse(input)))).map.unresolved, "nothing unresolved").toEqual([]);
+    });
+  }
+});
