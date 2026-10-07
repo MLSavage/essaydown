@@ -1284,3 +1284,25 @@ verdict: PASS
 - **Handoff stack.** The 1 commit of `phase/3..handoff/075` (handoff 075 and `next-prompt.md`; `docs/**` only) was cherry-picked into this worktree before this entry, with no conflict (deviation 29).
 - **Graph.** No rows appended; `3.close` already depends on `3.7.r3d`. `ralph/EXPECTED_COUNT` stays 375.
 - **Reversal.** Before this commit integrates: `git -C .wt/3.7.r3d reset --hard phase/3` (the task stays `principal-pending`). After integration a reconciliation has no undo: its verdict is written to `.evidence/reviews/3/r3/verdict`, and `3.close` follows; any change is a further planning commit.
+
+## #059-phase-4-boundary-planning-five-tasks-before-4.0 (2026-10-07, Michael's decisions; planning commit by the principal, runner idle at the Phase 3→4 boundary, host checkout on `phase/4`, #017)
+
+- **Where this commit goes.** On `phase/4`, not `phase/3`. `3.close` cut `phase/4` at `main` (`8aba511`); every Phase 4 row has `targetBranch` `phase/4`, and `ralph/lib/integrate.mjs:22–27` creates `task/<id>` from `refs/heads/<targetBranch>`. `phase/3` is closed, so a commit there would never reach Phase 4. #017's "host checkout on `phase/3`" was written at the Phase 2→3 boundary, when `phase/3` was the new phase's branch (#047–#051 went there). Michael asked for this check before the commit.
+- **Michael's answers at the boundary, in order** (the principal session, 2026-10-07, verbatim: "1: quote the rule and the failures it prevents. 2: coverage glob and C2+C13 (+ tonight's line) become tasks; G1, U26/G6 stay backlog. 3: none. 4: both become tasks, reproduce first. 5: task, early in Phase 4. 6: keep the trigger."; then, on the rule as quoted and on placement: "Yes, rule + acceptance" and "All before 4.0").
+  1. **Fable's both-legs rule** (handoff 065, from 3.21's lesson): adopted as a CLAUDE.md/AGENTS.md code rule and as an acceptance clause in 4.4 and in 4.8 and 4.9. The failures it prevents: the Phase 3 shell specs ran only on the external leg in the container, so `3.verifyh` was their first embedded run and found three route defects (named-key chords without modifiers, widget text in block offsets, a Refresh that returned before the old document was gone), and 3.21 attempt 1 then found a fourth (`clickCentreOf`'s focus emulation after the click's re-render left a variant radio focused) — one gate failure, one `.g` repair and one clean break (lessons [3.21], docs/lessons.md:567–569).
+  2. **Re-pointed hard stops:** the coverage glob (G7/U10/C12) and C2 + C13 with `[review-3-r3, …]` become tasks; `packages/modes` G1 and the typescript range U26/G6 stay on the backlog.
+  3. **3.26's other-corpus-sweeps list:** none taken.
+  4. **r1's two riskiest things:** both become tasks, reproduce first (the 3.11 pattern: fix only if it reproduces, otherwise no product file changes).
+  5. **The `\|`-in-a-cell divergence (#review-3-r2):** a task, early in Phase 4.
+  6. **The autosave `:91` 600 ms margin (#056):** the trigger is kept.
+- **The tasks, all before `4.0`, in one chain** (`4.0` now depends on `4.10`):
+  - 4.6 the `\|`-in-a-cell divergence (opus; Fable's #review-3-r2 fix shape; 3.27/3.28 guard bytes updated per guard);
+  - 4.7 URL literal spans (opus; C2, C13's instrument, the r3 guard);
+  - 4.8 the source burst during an awaited flush (opus; reproduce first);
+  - 4.9 §6.2 occurrence-shift (opus; reproduce first; the fix stays inside §6.2's resolution order or stops);
+  - 4.10 the coverage glob (sonnet; last, so its per-file thresholds are measured after 4.6–4.9's tests; no product or test file changes).
+
+  4.6 and 4.7 both touch format.ts and go first, before Export reads the serializer. The chain is the #050 shape.
+- **Also in this commit.** 4.4's acceptance gains the both-legs clause; `4.verify`'s description gains 3.verify's listing clause for `4.verify` hard stops (as `[review-3-r0, 3.verify hard stops re-pointed]` asked); one backlog line records the taken and kept items. The untaken lines keep hard stop `4.verify`; its journal lists them, and the Phase 4 review set's reconciliation gives each a real trigger (#050's pattern).
+- **Graph.** EXPECTED_COUNT 375 → 380 (five loop tasks, no new gate). `validate-tasks: OK 380`, byte-identical to PRD §8. Then `sync-state` and `run --phase 4 --dry-run`, which must name 4.6 (#051).
+- **Reversal.** `git revert` of this commit, then `ralph/ralph.sh sync-state`, before the runner starts 4.6. Once a new task has passed there is no undo; a later planning commit replaces the remainder.
