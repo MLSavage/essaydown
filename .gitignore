@@ -13,3 +13,6 @@ coverage/
 # Playwright run output (task 1.3)
 test-results/
 playwright-report/
+
+# fetched/extracted pandoc and typst sidecars (task 4.1); never under src-tauri/binaries/
+scripts/.cache/

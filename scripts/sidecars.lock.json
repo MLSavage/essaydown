@@ -1,0 +1,81 @@
+{
+  "_note": "Committed by task 4.1. One archive per artifact, fetched and verified by scripts/fetch-sidecars.ts. `target` is the Rust/Tauri target-triple name the extracted binary is written as under scripts/.cache/sidecars/ (gitignored); the four `kind: slice` entries are pre-lipo macOS artifacts task 4.2 combines with `lipo -create`. pandoc's two macOS archives are the Apple installer `.pkg` (a xar archive whose Payload is a gzip-compressed cpio archive); typst ships plain tarballs for every OS, pandoc does not ship a macOS tarball with a `bin/` layout matching the Linux build, so its two macOS slices go through the `.pkg` payload instead.",
+  "pandocVersion": "3.11",
+  "typstVersion": "0.15.1",
+  "artifacts": [
+    {
+      "target": "pandoc-x86_64-unknown-linux-gnu",
+      "tool": "pandoc",
+      "kind": "binary",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-linux-amd64.tar.gz",
+      "sha256": "37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6",
+      "format": "tar.gz",
+      "member": "pandoc-3.11/bin/pandoc"
+    },
+    {
+      "target": "pandoc-x86_64-pc-windows-msvc.exe",
+      "tool": "pandoc",
+      "kind": "binary",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-windows-x86_64.zip",
+      "sha256": "2ab72baf2399450e148ddf7a2a8689806c42e1bba71862b57e220fd9b8456d3d",
+      "format": "zip",
+      "member": "pandoc-3.11/pandoc.exe"
+    },
+    {
+      "target": "pandoc-aarch64-apple-darwin",
+      "tool": "pandoc",
+      "kind": "slice",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-arm64-macOS.pkg",
+      "sha256": "eaf6e2fbe212e2c380c44802434f01aa74e8f311744ba94b0ae281383eea3cb4",
+      "format": "pkg",
+      "component": ["pandoc.pkg"],
+      "member": "./usr/local/bin/pandoc"
+    },
+    {
+      "target": "pandoc-x86_64-apple-darwin",
+      "tool": "pandoc",
+      "kind": "slice",
+      "url": "https://github.com/jgm/pandoc/releases/download/3.11/pandoc-3.11-x86_64-macOS.pkg",
+      "sha256": "0fd0f1ebd439da17121a148f9afa624e9a3bb8e6a5c5822dea01232e8d9f3de6",
+      "format": "pkg",
+      "component": ["pandoc.pkg"],
+      "member": "./usr/local/bin/pandoc"
+    },
+    {
+      "target": "typst-x86_64-unknown-linux-gnu",
+      "tool": "typst",
+      "kind": "binary",
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz",
+      "sha256": "a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c",
+      "format": "tar.xz",
+      "member": "typst-x86_64-unknown-linux-musl/typst"
+    },
+    {
+      "target": "typst-x86_64-pc-windows-msvc.exe",
+      "tool": "typst",
+      "kind": "binary",
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-pc-windows-msvc.zip",
+      "sha256": "19ce3551153c2fe7ee9fa2f95208310c8f4d3209fedb699e0333faf8913f6736",
+      "format": "zip",
+      "member": "typst-x86_64-pc-windows-msvc/typst.exe"
+    },
+    {
+      "target": "typst-aarch64-apple-darwin",
+      "tool": "typst",
+      "kind": "slice",
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-aarch64-apple-darwin.tar.xz",
+      "sha256": "48f62ed034aa3a7978309579ac6ca00045e2ef0da73114e8af27cfd8e74dc05a",
+      "format": "tar.xz",
+      "member": "typst-aarch64-apple-darwin/typst"
+    },
+    {
+      "target": "typst-x86_64-apple-darwin",
+      "tool": "typst",
+      "kind": "slice",
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-apple-darwin.tar.xz",
+      "sha256": "7f9fdd9584866245de9a79e0add8f9236fae6f40a8a45e2c4771ccc14db4e0fa",
+      "format": "tar.xz",
+      "member": "typst-x86_64-apple-darwin/typst"
+    }
+  ]
+}

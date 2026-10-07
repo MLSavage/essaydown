@@ -11,6 +11,7 @@
     "coverage": "vitest run --coverage",
     "lint": "eslint . && node scripts/check-deps.mjs && pnpm -r --if-present typecheck",
     "format": "prettier --check .",
+    "fetch-sidecars": "node scripts/fetch-sidecars.ts",
     "tauri": "pnpm --filter @essaydown/desktop tauri"
   },
   "devDependencies": {
