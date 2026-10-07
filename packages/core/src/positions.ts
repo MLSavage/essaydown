@@ -322,6 +322,8 @@ export function pathDepth(path: string): number {
  * `writtenLiteralSpans`): inside one, a character is spelled by itself and nothing else — no escape
  * and no reference is ever written there, so `\\` in a url is two backslashes, each its own
  * spelling, where the escape rule would read the pair as one escaped backslash and refuse the next.
+ * The one exception is a span `handleText` marked `pipesEscaped` (task 4.6): inside a table cell
+ * it wrote each `|` of the literal as `\|`, which spells that `|` and is read back as it by `parse`.
  *
  * `eolAsSpace` is set by {@link placeChildren} exactly when the child was found in the form the
  * parent rewrote before an `html` sibling ({@link rewrittenEmissions}' fourth candidate): the
@@ -367,12 +369,16 @@ export function spellingOffsets(
     }
     // A unit of a literal `handleText` wrote raw is spelled by itself, never as the escape a
     // backslash before it would otherwise read as: `\\` inside a url is two characters.
-    const inLiteral = raw.some((span) => index >= span.start && index < span.end);
-    let end = inLiteral
-      ? written.startsWith(character, at)
-        ? at + 1
-        : undefined
-      : spellingEnd(written, at, character);
+    const literal = raw.find((span) => index >= span.start && index < span.end);
+    // Inside a table cell `handleText` writes a raw literal's `|` as `\|` (`pipesEscaped`, task
+    // 4.6): that `|` is spelled by its two bytes, and every other unit of the span by itself.
+    const spelled = literal?.pipesEscaped === true && character === PIPE ? `\\${PIPE}` : character;
+    let end =
+      literal !== undefined
+        ? written.startsWith(spelled, at)
+          ? at + spelled.length
+          : undefined
+        : spellingEnd(written, at, character);
     // A surrogate pair written as one reference: the leading unit takes the whole reference and
     // the trailing unit is the zero-width item {@link SpellingTable}'s ownership rule names. The
     // raw pair was tried first (one unit at a time), so it keeps its two one-unit spellings.

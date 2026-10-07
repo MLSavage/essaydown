@@ -55,6 +55,7 @@ export function parse(markdown: string): Root {
   const normalised = markdown.replace(/\r\n?/g, "\n");
   const root = createParser().parse(normalised);
   markAutolinkLiterals(root, normalised);
+  unescapeCellLinkPipes(root, normalised, false);
   return root;
 }
 
@@ -85,4 +86,43 @@ function markAutolinkLiterals(node: Nodes, source: string): void {
     if (first !== "<" && first !== "[") node.data = { ...node.data, autolinkLiteral: true };
   }
   if ("children" in node) for (const child of node.children) markAutolinkLiterals(child, source);
+}
+
+/**
+ * A table cell's `\|` read the way GFM §4.10 reads it (task 4.6, DECISIONS #review-3-r2): the
+ * spec replaces the pipe escape with `|` in a cell before any inline construct is parsed, while
+ * micromark leaves the cell's bytes as they stand and lets each inline construct decode them. Every
+ * construct that decodes a backslash escape (text, a resource link's label and destination)
+ * already reads `\|` as `|`; the two that read their bytes literally keep the backslash, and
+ * so differ from every other GFM reader: inline code, which `mdast-util-gfm-table`'s
+ * `exitCodeText` already normalises (`lib/index.js`), and a link whose bytes the parser takes raw —
+ * a `<…>` autolink and a GFM autolink literal the tokenizer made. Those are the links that start
+ * at a byte other than `[` and carry a `position`: the transform-made literal (no `position`)
+ * was found in already-decoded text, where a second pass would remove a backslash the source
+ * escaped. Their url and their text child are rewritten with `exitCodeText`'s own rule,
+ * {@link unescapeCellPipes}.
+ */
+function unescapeCellLinkPipes(node: Nodes, source: string, inCell: boolean): void {
+  if (inCell && node.type === "link") {
+    const start = node.position?.start.offset;
+    if (start !== undefined && source.charAt(start) !== "[") {
+      node.url = unescapeCellPipes(node.url);
+      for (const child of node.children) {
+        if (child.type === "text") child.value = unescapeCellPipes(child.value);
+      }
+    }
+    return;
+  }
+  const inside = inCell || node.type === "tableCell";
+  if ("children" in node) for (const child of node.children) unescapeCellLinkPipes(child, source, inside);
+}
+
+/**
+ * `value` with each `\|` read as `|`, scanning left to right so that a `\\` pair is kept as it
+ * stands and never lends its second backslash to a `|` after it — `mdast-util-gfm-table`'s
+ * `exitCodeText` rule (`value.replace(/\\([\\|])/g, …)`, "pipes work, backslashes don't"), the
+ * same pairing the table tokenizer's `bodyRowEscape` makes.
+ */
+export function unescapeCellPipes(value: string): string {
+  return value.replace(/\\([\\|])/g, (pair, next: string) => (next === "|" ? next : pair));
 }

@@ -21,7 +21,7 @@ import type {
 import remarkStringify, { type Options } from "remark-stringify";
 import { unified, type Data, type Processor } from "unified";
 
-import { parse } from "./parse.js";
+import { parse, unescapeCellPipes } from "./parse.js";
 
 type ToMarkdownExtensions = NonNullable<Data["toMarkdownExtensions"]>;
 type Handlers = NonNullable<Options["handlers"]>;
@@ -360,6 +360,8 @@ const PHRASING_TYPES: ReadonlySet<string> = new Set([
 type WidenedState = ToMarkdownState & {
   astralWidened?: true;
   autolinkGuarded?: true;
+  /** Set by {@link installAutolinkFallback} for the one call that writes a cell's `<…>` form. */
+  cellAutolink?: true;
   literalSpans?: Map<Text, LiteralSpan[]>;
   wideningGiveUps?: RecordedGiveUp[];
   childOrigins?: ChildOrigins;
@@ -976,6 +978,12 @@ export interface LiteralSpan {
   start: number;
   end: number;
   url: string;
+  /**
+   * Set by {@link handleText} on a span it wrote raw inside a table cell with every `|` written
+   * `\|` ({@link cellLiteralSpans}, task 4.6) — the one rewrite inside a raw span, which the
+   * position map reads so that such a `|` is spelled by its two bytes. Absent everywhere else.
+   */
+  pipesEscaped?: true;
 }
 
 /**
@@ -1059,22 +1067,27 @@ function writesLiteralsRaw(state: ToMarkdownState, node: Nodes): boolean {
  * stretch is passed to `safe` with its real neighbours: the literal's edge character where one
  * touches it, `info`'s otherwise.
  *
- * A literal holding a `|` the table tokenizer cuts at — one after an even run of backslashes,
- * zero included — inside a table cell is the exception ({@link cutsCell}, DECISIONS #review-3-r1
- * C14, #review-3-r2 C15): the tokenizer cuts the row at that `|` before the literal is read,
- * and when every row is cut alike the parse holds no table and the same links, which
- * {@link literalMisread} cannot tell apart — so it is a plain stretch, escaped by `safe` in the
- * cell's stack (`https\://a.b/x\|y`), which the parser reads back as the same literal.
+ * Inside a table cell a literal's `|` is written `\|` and nothing else is escaped
+ * ({@link cellLiteralSpans}, task 4.6): the tokenizer cuts the row at a raw `|` before the literal
+ * is read, and when every row is cut alike the parse holds no table and the same links, which
+ * {@link literalMisread} cannot tell apart (DECISIONS #review-3-r1 C14); `\|` is cell data, and
+ * `parse` reads it back as `|` in the literal it makes, as every GFM reader does. A literal whose
+ * escaped bytes would still cut the row or read back as another url is a plain stretch, escaped
+ * by `safe` in the cell's stack, which the parser reads back as the same literal. While
+ * `state.cellAutolink` is set — the one call in which {@link installAutolinkFallback} writes a
+ * cell's `<…>` form, whose emptied stack hides the cell — the value is `safe`'s with every `|`
+ * written `\|`, the same rewrite.
  *
  * The spans written raw are recorded on the `State` per node ({@link writtenLiteralSpans}), last
  * call wins — `containerPhrasing` calls a peek-less handler twice — so the position map reads
  * which units were written as themselves instead of guessing it from the bytes.
  */
 export function handleText(node: Text, _parent: Parents, state: ToMarkdownState, info: Info): string {
-  const spans = writesLiteralsRaw(state, node)
-    ? literalSpans(node.value).filter((span) => !cutsCell(state, node.value.slice(span.start, span.end)))
-    : [];
   const widened = state as WidenedState;
+  if (widened.cellAutolink === true) {
+    return escapeCellPipes(state.safe(node.value, info));
+  }
+  const spans = writesLiteralsRaw(state, node) ? cellLiteralSpans(state, node.value) : [];
   if (spans.length === 0) {
     widened.literalSpans?.delete(node);
     return state.safe(node.value, info);
@@ -1092,10 +1105,37 @@ export function handleText(node: Text, _parent: Parents, state: ToMarkdownState,
   let out = "";
   let at = 0;
   for (const span of spans) {
-    out += plain(at, span.start) + value.slice(span.start, span.end);
+    const bytes = value.slice(span.start, span.end);
+    out += plain(at, span.start) + (span.pipesEscaped === true ? escapeCellPipes(bytes) : bytes);
     at = span.end;
   }
   return out + plain(at, value.length);
+}
+
+/**
+ * The {@link literalSpans} of `value` that {@link handleText} writes raw in `state`'s construct
+ * (task 4.6). Outside a table cell, and for a span with no `|`, every span as it stands. Inside a
+ * cell a span holding a `|` is written with each `|` as `\|` ({@link escapeCellPipes}), marked
+ * `pipesEscaped`, exactly when those bytes cut no row ({@link CELL_CUT}); otherwise it is
+ * dropped, and `handleText` writes it as plain text through `safe`. A span that already holds
+ * `\|` is the one that cuts (its escape becomes `\\|`). Bytes that cut no row read back as the
+ * span under {@link unescapeCellPipes}, the rule `parse` applies to the literal it makes: every
+ * `|` follows an odd run, the one `\` this added and the even run the span had.
+ */
+function cellLiteralSpans(state: ToMarkdownState, value: string): LiteralSpan[] {
+  const spans = literalSpans(value);
+  if (!state.stack.includes("tableCell")) return spans;
+  return spans.flatMap((span) => {
+    const bytes = value.slice(span.start, span.end);
+    if (!bytes.includes("|")) return [span];
+    const escaped = escapeCellPipes(bytes);
+    return CELL_CUT.test(escaped) ? [] : [{ ...span, pipesEscaped: true as const }];
+  });
+}
+
+/** `value` with every `|` written `\|`, as `mdast-util-gfm-table`'s `inlineCodeWithTable` writes code. */
+function escapeCellPipes(value: string): string {
+  return value.replace(/\|/g, "\\$&");
 }
 
 /**
@@ -1260,6 +1300,13 @@ const CELL_CUT = /(?:^|[^\\])(?:\\\\)*\|/;
  * write a url's `|` in a cell) and one after an even run, zero included, cuts the row (`x|y`,
  * `x\\|y`). Read on the stack the `link` handler is called with, before the built-in's `<…>`
  * branch empties it.
+ *
+ * It is a first pass, judged on one link's bytes alone: a backslash run formed across two
+ * children (a link ending in `\` before a text `|`) is not seen here, and the instrument that
+ * settles it is {@link settleLiterals}, which re-parses the joined output through
+ * {@link literalMisread} and escapes the node the parser misreads (DECISIONS #review-3-r3,
+ * lesson [3.7.r3d]). {@link cellLiteralSpans} reads the same {@link CELL_CUT} for a literal's
+ * bytes and is settled by the same instrument.
  */
 function cutsCell(state: ToMarkdownState, bytes: string): boolean {
   return state.stack.includes("tableCell") && CELL_CUT.test(bytes);
@@ -1288,17 +1335,21 @@ function cutsCell(state: ToMarkdownState, bytes: string): boolean {
  * unescaped `|` before any inline construct is parsed, so `| c <https://a.b/x|y> | d |` is three
  * cells, and `mdast-util-gfm-table`'s `{character: '|', inConstruct: 'tableCell'}` is the pattern
  * `state.stack = []` hides. A `|` after an odd run of backslashes is cell data, not a cut
- * (`bodyRowEscape`; DECISIONS #review-3-r2 C15), so a loaded literal written `x\|y` keeps its bytes. Every other `inConstruct` pattern the `<…>` branch hides is either read
- * literally inside `<…>` (§6.4: no escape, no emphasis, no literal applies there) or a character
- * `formatLinkAsAutolink` already refuses (`[\0- <>\u007F]`). So inside a `tableCell` a `<…>` form
- * whose bytes hold a `|` the tokenizer cuts at is not taken either ({@link cutsCell}, read on the
- * post-`safe` value, the bytes as they will stand on disk): such a link that is a literal
- * written bare is still its text child alone, which {@link handleText} writes escaped in the
- * cell's stack — `https\://a.b/x\|y`, the bytes the escaped text of the first save already holds,
- * which the parser reads back as the same literal — so the position map's text instrumentation
- * spells it (CLAUDE.md K2), and no `safe` is called here; any other such link takes the resource
- * form, `[https://a.b/x\|y](https://a.b/x\|y)`, label and destination escaped by `safe` in the
- * cell's stack.
+ * (`bodyRowEscape`; DECISIONS #review-3-r2 C15). Every other `inConstruct` pattern the `<…>`
+ * branch hides is either read literally inside `<…>` (§6.4: no escape, no emphasis, no literal
+ * applies there) or a character `formatLinkAsAutolink` already refuses (`[\0- <>\u007F]`). So
+ * inside a `tableCell` a `<…>` form whose bytes hold a `|` the tokenizer cuts at
+ * ({@link cutsCell}, read on the post-`safe` value, the bytes as they will stand on disk) is
+ * written again with its text's every `|` as `\|` (task 4.6, DECISIONS #review-3-r2: the
+ * original called once more with `state.cellAutolink` set, which {@link handleText} reads, so the
+ * text child's own emission holds the `\|` and the position map spells it as an escape), and that
+ * form is taken when the bytes between the brackets, read back as `parse` reads a cell's autolink
+ * ({@link unescapeCellPipes}), carry the url: `<https://a.b/x\|y>`, the bytes GitHub and Typora
+ * write. Such bytes cut no row: `safe` writes a backslash before punctuation doubled, so every
+ * `|` follows an odd run, and a run the doubling did not make is one {@link autolinkCarriesUrl}
+ * refuses. Any other such link takes the resource form, label and destination escaped by `safe`
+ * in the cell's stack. A literal written bare is its text child alone, which {@link handleText}
+ * writes with its `|` as `\|` ({@link cellLiteralSpans}), so no `<…>` is involved there.
  *
  * `peek` answers `[` when the fallback will be taken and the original's `peek` (`<`) otherwise,
  * because `containerPhrasing` classifies the previous sibling's `after` by it; both `<` and `[`
@@ -1338,15 +1389,35 @@ function installAutolinkFallback(state: WidenedState): void {
   const bare = (node: Link): boolean => writesLiteralsRaw(state, node) && writesBare(node);
   const keepsAutolink = (value: string, node: Link): boolean =>
     autolinkCarriesUrl(value, node.url) && !(value.startsWith("<") && cutsCell(state, value));
+  // The cell's `<…>` form, its text written with every `|` as `\|` by {@link handleText}, when
+  // those bytes carry the url as `parse` reads them back ({@link unescapeCellPipes}); `""` when not.
+  const asCellAutolink: Handle = (node, parent, _state, info) => {
+    state.cellAutolink = true;
+    let value: string;
+    try {
+      value = original.call(state, node, parent, state, info);
+    } finally {
+      state.cellAutolink = undefined;
+    }
+    return autolinkCarriesUrl(`<${unescapeCellPipes(value.slice(1, -1))}>`, (node as Link).url) ? value : "";
+  };
+  const written = (node: Link, parent: Parents | undefined, info: Info): string => {
+    const value = original.call(state, node, parent, state, info);
+    if (keepsAutolink(value, node)) return value;
+    const piped =
+      value.startsWith("<") && state.stack.includes("tableCell")
+        ? asCellAutolink(node, parent, state, info)
+        : "";
+    return piped === "" ? asResourceLink(node, parent, state, info) : piped;
+  };
   const link: PeekableHandle = (node, parent, _state, info) => {
     if (bare(node)) return state.containerPhrasing(node, info);
-    const value = original.call(state, node, parent, state, info);
-    return keepsAutolink(value, node) ? value : asResourceLink(node, parent, state, info);
+    return written(node, parent, info);
   };
   link.peek = (node, parent, _state, info) => {
     if (bare(node)) return textOf(node).charAt(0);
-    const value = original.call(state, node, parent, state, info);
-    if (!keepsAutolink(value, node)) return "[";
+    const value = written(node, parent, info);
+    if (value.startsWith("[")) return "[";
     return originalPeek.call(state, node, parent, state, info);
   };
   state.handlers.link = link;

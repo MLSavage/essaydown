@@ -297,9 +297,11 @@ const ROUTES: [string, (bytes: string) => string][] = [
 ];
 
 describe("a URL holding `|` typed into a table cell keeps its row on every save (task 3.27, DECISIONS #review-3-r1 C14)", () => {
+  // Task 4.6 moved these bytes: save 1 writes the literal bare with its `|` as `\\|` (it was the
+  // escaped text `https\\://a.b/x\\|y`), the loaded member's bytes, which `parse` reads as `x|y`.
   const PROBES: [string, string, string][] = [
-    ["guard 1: the typed member `https://a.b/x|y`", PIPE_URL, "https\\://a.b/x\\|y"],
-    ["guard 2: the astral member `https://a.b/x|𝒜`", "https://a.b/x|𝒜", "https\\://a.b/x\\|𝒜"],
+    ["guard 1: the typed member `https://a.b/x|y`", PIPE_URL, "https://a.b/x\\|y"],
+    ["guard 2: the astral member `https://a.b/x|𝒜`", "https://a.b/x|𝒜", "https://a.b/x\\|𝒜"],
   ];
   for (const [title, typedUrl, escaped] of PROBES) {
     for (const [routeName, route] of ROUTES) {
@@ -321,8 +323,9 @@ describe("a URL holding `|` typed into a table cell keeps its row on every save 
           );
           expect(literalsOf(reparsed, typedUrl), `save ${k + 1}: one literal link`).toBe(1);
         }
-        // The editor's tree is one text node; the parse of save 1 re-links it (the transform), and
-        // the editor's tree of that parse is the same tree, so save 2 has nothing new to write.
+        // The editor's tree is one text node; the parse of save 1 re-links it (the literal tokenizer
+        // since task 4.6, the transform before it), and the editor's tree of that parse is the same
+        // tree, so save 2 has nothing new to write.
         const cell = (parse(saves[0]).children[0] as { children: { children: { children: Nodes[] }[] }[] })
           .children[1].children[0];
         expect(cell.children.map((node) => node.type)).toEqual(["text", "link"]);
@@ -390,7 +393,8 @@ describe("guard 6: a loaded url holding `\\|` in a table cell keeps its bytes by
         expect(nodeCount(parse(format(editorTree))), `save ${k + 1}: node count after parse(format(·))`).toBe(
           nodeCount(editorTree),
         );
-        expect(literalsOf(parse(save), cell), `save ${k + 1}: one literal link`).toBe(1);
+        // Task 4.6: `parse` reads the cell's `\\|` as `|`, as GFM §4.10 does (it kept the backslash).
+        expect(literalsOf(parse(save), cell.replace("\\|", "|")), `save ${k + 1}: one literal link`).toBe(1);
       }
       expect(formatWithMap(pmToMdast(mdastToPM(parse(input)))).map.unresolved, "nothing unresolved").toEqual([]);
     });

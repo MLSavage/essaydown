@@ -253,10 +253,12 @@ function rowWidths(root: Root): number[] {
 }
 
 describe("a link holding `|` inside a table cell keeps its cell (task 3.27, DECISIONS #review-3-r1 C14)", () => {
-  it("guard 3: a hand-built literal link with `|` in its url is written as its text escaped in the cell's stack, the bytes save 1 writes", () => {
+  // Task 4.6 moved these bytes: the literal is written bare with its `|` as `\\|` (it was its text
+  // escaped through `safe`, `https\\://a.b/x\\|y`), the bytes GitHub and Typora write.
+  it("guard 3: a hand-built literal link with `|` in its url is written bare with its `|` as `\\|` (task 4.6), the bytes save 1 writes", () => {
     const root = inCell(literal("https://a.b/x|y"));
     const out = format(root);
-    expect(bodyCell(out)).toBe("https\\://a.b/x\\|y");
+    expect(bodyCell(out)).toBe("https://a.b/x\\|y");
     expect(rowWidths(parse(out))).toEqual([1, 1]);
     expect(linksOf(parse(out))).toEqual([["https://a.b/x|y", "https://a.b/x|y", true]]);
     assertSettled(root, out);
@@ -264,15 +266,17 @@ describe("a link holding `|` inside a table cell keeps its cell (task 3.27, DECI
     expect(format(inCell(text("https://a.b/x|y")))).toBe(out);
     // The www member: its url is not its text, and the escaped text is still the same literal.
     const www = format(inCell(literal("http://www.a.b/x|y", "www.a.b/x|y")));
-    expect(bodyCell(www)).toBe("www\\.a.b/x\\|y");
+    expect(bodyCell(www)).toBe("www.a.b/x\\|y");
     expect(linksOf(parse(www))).toEqual([["http://www.a.b/x|y", "www.a.b/x|y", true]]);
     assertSettled(inCell(literal("http://www.a.b/x|y", "www.a.b/x|y")), www);
   });
 
-  it("guard 4: a hand-built link that is not a literal, its text its url with `|`, takes the resource form in a cell, saved twice", () => {
+  // Task 4.6 moved these bytes: the `<…>` form is kept with its `|` as `\\|` (it was the resource
+  // form `[https://a.b/x\\|y](https://a.b/x\\|y)`), which `parse` reads back with the same url.
+  it("guard 4: a hand-built link that is not a literal, its text its url with `|`, keeps the `<…>` form with `\\|` in a cell (task 4.6), saved twice", () => {
     const root = inCell({ ...literal("https://a.b/x|y"), data: undefined });
     const first = format(root);
-    expect(bodyCell(first)).toBe("[https://a.b/x\\|y](https://a.b/x\\|y)");
+    expect(bodyCell(first)).toBe("<https://a.b/x\\|y>");
     expect(rowWidths(parse(first))).toEqual([1, 1]);
     expect(linksOf(parse(first))).toEqual([["https://a.b/x|y", "https://a.b/x|y", false]]);
     assertSettled(root, first);
@@ -281,10 +285,18 @@ describe("a link holding `|` inside a table cell keeps its cell (task 3.27, DECI
     expect(format(parse(second)), "save 3").toBe(first);
   });
 
-  it("guard 4: peek answers `[` for the resource form, so the text before the link is escaped against it", () => {
+  // Task 4.6: the member above now keeps `<…>`, so peek answers `<` for it; the resource form's `[`
+  // is held by a url whose `\\|` no `<…>` form carries.
+  it("guard 4: peek answers `<` for the cell's `<…>` form, so the text before the link is escaped against it", () => {
     const root = inCell(text("see \\"), { ...literal("https://a.b/x|y"), data: undefined });
     assertSettled(root, format(root));
-    expect(bodyCell(format(root))).toBe("see \\\\[https://a.b/x\\|y](https://a.b/x\\|y)");
+    expect(bodyCell(format(root))).toBe("see \\\\<https://a.b/x\\|y>");
+  });
+
+  it("guard 4: peek answers `[` for the resource form, so the text before the link is escaped against it", () => {
+    const root = inCell(text("see \\"), { ...literal("https://a.b/x\\|y"), data: undefined });
+    assertSettled(root, format(root));
+    expect(bodyCell(format(root))).toBe("see \\\\[https://a.b/x\\\\\\|y](https://a.b/x\\\\\\|y)");
   });
 
   it("guard 5 (absence): a literal in a cell without `|` stays bare", () => {
@@ -334,7 +346,9 @@ describe("a loaded url holding an escaped `\\|` in a table cell keeps its bytes 
         expect(bytes, `save ${k} is byte-identical to the input`).toBe(input);
         expect(rowWidths(parse(bytes)), `save ${k}: two cells in every row`).toEqual([2, 2]);
         expect(nodeCount(parse(bytes)), `save ${k}: node count after parse(format(·))`).toBe(nodeCount(tree));
-        expect(linksOf(parse(bytes)), `save ${k}: the literal kept`).toEqual([[cell, cell, true]]);
+        // Task 4.6: `parse` reads the cell's `\\|` as `|`, as GFM §4.10 does (it kept the backslash).
+        const url = cell.replace("\\|", "|");
+        expect(linksOf(parse(bytes)), `save ${k}: the literal kept`).toEqual([[url, url, true]]);
       }
       const mapped = formatWithMap(parse(input));
       expect(mapped.text).toBe(input);
@@ -342,11 +356,13 @@ describe("a loaded url holding an escaped `\\|` in a table cell keeps its bytes 
     });
   }
 
-  it("guard 3 (absence): a hand-built literal whose url holds `x\\\\|y` (an even run, so the `|` cuts) is still written escaped in the cell's stack", () => {
+  // Task 4.6 moved these bytes: the literal is written bare, its `|` as `\\|` after the even run (it
+  // was escaped through `safe`, `https\\://a.b/x\\\\\\|y`).
+  it("guard 3 (absence): a hand-built literal whose url holds `x\\\\|y` (an even run, so the `|` cuts) is written bare with that `|` as `\\|` (task 4.6)", () => {
     const url = "https://a.b/x\\\\|y";
     const root = inCell(literal(url));
     const out = format(root);
-    expect(bodyCell(out)).toBe("https\\://a.b/x\\\\\\\\\\|y");
+    expect(bodyCell(out)).toBe("https://a.b/x\\\\\\|y");
     expect(rowWidths(parse(out))).toEqual([1, 1]);
     expect(linksOf(parse(out))).toEqual([[url, url, true]]);
     assertSettled(root, out);
@@ -362,9 +378,10 @@ describe("a loaded url holding an escaped `\\|` in a table cell keeps its bytes 
     assertSettled(root, out);
   });
 
-  it("guard 5 (absence): 3.27's typed member keeps 3.27's bytes `https\\://a.b/x\\|y`", () => {
+  // Task 4.6 moved these bytes: 3.27's `https\\://a.b/x\\|y` became the loaded form `https://a.b/x\\|y`.
+  it("guard 5: 3.27's typed member is written as the loaded member's bytes `https://a.b/x\\|y` (task 4.6)", () => {
     const out = format(inCell(text("https://a.b/x|y")));
-    expect(bodyCell(out)).toBe("https\\://a.b/x\\|y");
+    expect(bodyCell(out)).toBe("https://a.b/x\\|y");
     expect(format(inCell(literal("https://a.b/x|y")))).toBe(out);
     expect(rowWidths(parse(out))).toEqual([1, 1]);
     assertSettled(inCell(text("https://a.b/x|y")), out);
