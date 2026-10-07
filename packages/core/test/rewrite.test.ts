@@ -156,14 +156,31 @@ describe("applyUseVariant", () => {
     return count;
   }
 
-  it.each(names)(
-    "%s: the no-op variant re-serialises byte-identically (corpus identity)",
-    (name) => {
-      const markdown = readFileSync(`${FIXTURES}/${name}`, "utf8");
-      const canonical = format(parse(markdown));
-      let checked = 0;
-      for (const at of paragraphs(markdown)) {
+  // Per-paragraph card counts, counted once and cached, keyed per fixture and paragraph (the
+  // per-fixture counts above are the sum of these, checked by the fixture-level test below).
+  const paragraphCardCounts = new Map<string, Map<number, number>>();
+  function paragraphCardCountOf(name: string, markdown: string, at: number): number {
+    let byParagraph = paragraphCardCounts.get(name);
+    if (byParagraph === undefined) {
+      byParagraph = new Map();
+      paragraphCardCounts.set(name, byParagraph);
+    }
+    const cached = byParagraph.get(at);
+    if (cached !== undefined) return cached;
+    const count = rewriteCards(stateOf(markdown), at)?.length ?? 0;
+    byParagraph.set(at, count);
+    return count;
+  }
+
+  describe.each(names)("%s", (name) => {
+    const markdown = readFileSync(`${FIXTURES}/${name}`, "utf8");
+    const canonical = format(parse(markdown));
+
+    it.each(paragraphs(markdown).map((at, index, all) => ({ at, ordinal: index + 1, total: all.length })))(
+      "paragraph $ordinal of $total: the no-op variant re-serialises byte-identically (corpus identity)",
+      ({ at }) => {
         const before = stateOf(markdown);
+        let checked = 0;
         for (const card of rewriteCards(before, at) ?? []) {
           const added = applyAddVariant(before, card.pos, card.markdown, "t");
           const used = applyUseVariant(added, card.pos, 0, "t");
@@ -173,12 +190,21 @@ describe("applyUseVariant", () => {
           expect(used.sidecar.rewrites[0].history).toEqual([]);
           checked += 1;
         }
-      }
-      // Both summands present: the applied count and the counted card count for this fixture.
-      expect(checked).toBe(cardCountOf(name));
-    },
-    30_000,
-  );
+        // Both summands present: the applied count and this paragraph's counted card count.
+        expect(checked).toBe(paragraphCardCountOf(name, markdown, at));
+      },
+      30_000,
+    );
+
+    it(`${name}: its paragraphs' counted cards sum to the fixture's card count (corpus identity totals)`, () => {
+      const sum = paragraphs(markdown).reduce(
+        (total, at) => total + paragraphCardCountOf(name, markdown, at),
+        0,
+      );
+      // Both summands present: the per-paragraph sum and the independently cached fixture count.
+      expect(sum).toBe(cardCountOf(name));
+    });
+  });
 
   it("the corpus holds more rewrite cards than top-level paragraphs (corpus identity totals)", () => {
     const totalCards = names.reduce((sum, name) => sum + cardCountOf(name), 0);
