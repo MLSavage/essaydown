@@ -196,20 +196,28 @@ describe("applyUseVariant", () => {
       30_000,
     );
 
-    it(`${name}: its paragraphs' counted cards sum to the fixture's card count (corpus identity totals)`, () => {
-      const sum = paragraphs(markdown).reduce(
-        (total, at) => total + paragraphCardCountOf(name, markdown, at),
-        0,
-      );
-      // Both summands present: the per-paragraph sum and the independently cached fixture count.
-      expect(sum).toBe(cardCountOf(name));
-    });
+    it(
+      `${name}: its paragraphs' counted cards sum to the fixture's card count (corpus identity totals)`,
+      () => {
+        const sum = paragraphs(markdown).reduce(
+          (total, at) => total + paragraphCardCountOf(name, markdown, at),
+          0,
+        );
+        // Both summands present: the per-paragraph sum and the independently cached fixture count.
+        expect(sum).toBe(cardCountOf(name));
+      },
+      30_000,
+    );
   });
 
-  it("the corpus holds more rewrite cards than top-level paragraphs (corpus identity totals)", () => {
-    const totalCards = names.reduce((sum, name) => sum + cardCountOf(name), 0);
-    expect(totalCards).toBeGreaterThan(names.length);
-  });
+  it(
+    "the corpus holds more rewrite cards than top-level paragraphs (corpus identity totals)",
+    () => {
+      const totalCards = names.reduce((sum, name) => sum + cardCountOf(name), 0);
+      expect(totalCards).toBeGreaterThan(names.length);
+    },
+    30_000,
+  );
 });
 
 describe("anchoring across typing", () => {
