@@ -441,15 +441,22 @@ describe("the one workflow (task 3.6, PRD §3 steps 1-6)", () => {
 
     await clickCentreOf('[data-testid="export-format-pdf"]');
     await clickCentreOf('[data-testid="export-run"]');
+    // Resolves on either outcome — the dialog closing (success) or an `export-error` node
+    // appearing in it (failure) — so a real pandoc/typst failure surfaces its own message below
+    // instead of this `waitUntil` timing out first and masking it (task 4.18, DECISIONS #064).
     await browser.waitUntil(
-      () => browser.execute(() => document.querySelector('[data-testid="export-dialog"]') === null),
+      () =>
+        browser.execute(
+          () =>
+            document.querySelector('[data-testid="export-dialog"]') === null ||
+            document.querySelector('[data-testid="export-error"]') !== null,
+        ),
       { timeout: 20000, interval: 50, timeoutMsg: "the export dialog never closed after Export" },
     );
-    assert.equal(
-      await browser.execute(() => document.querySelector('[data-testid="export-error"]')?.textContent ?? null),
-      null,
-      "the export reported an error",
+    const exportError = await browser.execute(
+      () => document.querySelector('[data-testid="export-error"]')?.textContent ?? null,
     );
+    assert.equal(exportError, null, `the export reported an error: ${exportError}`);
 
     const pdfPath = join(workspace, outputPathFor(FILE, "pdf"));
     const text = execFileSync("pdftotext", [pdfPath, "-"], { encoding: "utf8" });

@@ -217,8 +217,19 @@ pub async fn export<R: tauri::Runtime>(
     workspace::resolve_workspace_path(&root, &path, false)?;
     workspace::resolve_workspace_path(&root, &out_path, false)?;
     let resource_dir = export::resource_dir_of(&path);
+    // `--pdf-engine=typst` stays the literal bare name (task 4.18, DECISIONS #064; lessons [4.17]):
+    // pandoc's typst builder keys its media-placement rule on that exact string, so the fix instead
+    // makes the spawned pandoc's own `PATH` resolve the name to the sidecar tauri-plugin-shell
+    // placed beside this binary, ahead of anything the GUI's inherited `PATH` would otherwise find.
+    let exe_dir = tauri::utils::platform::current_exe()
+        .map_err(|e| ExportError::Spawn(e.to_string()))?
+        .parent()
+        .ok_or_else(|| ExportError::Spawn("the running executable has no parent directory".to_string()))?
+        .to_path_buf();
+    let path_env = export::pandoc_path_env(&exe_dir, std::env::var_os("PATH").as_deref())
+        .map_err(|e| ExportError::Spawn(e.to_string()))?;
     let args = export::pandoc_args(&resource_dir, &out_path, &format);
-    export::run_pandoc(&app, &root, &out_path, &args, &contents).await
+    export::run_pandoc(&app, &root, &out_path, &args, &contents, &path_env).await
 }
 
 /// Reveals `path` in the OS file manager: `open -R` selects the file on macOS, `explorer /select,`

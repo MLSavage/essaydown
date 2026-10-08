@@ -3,7 +3,11 @@
 //! This module only hosts the cargo test that drives that scope through real IPC (the same
 //! `tauri::test::MockRuntime` + `get_ipc_response` pattern `commands::tests` uses), so a change to
 //! the capability file is exercised against the exact ACL `run()` ships, not a hand-rolled copy of
-//! the regex rules.
+//! the regex rules. This ACL governs only the webview-facing `plugin:shell|spawn` IPC command (no
+//! `@tauri-apps/plugin-shell` import exists under `apps/desktop/src`, so the frontend never calls
+//! it) — `export.rs`'s own Rust-side `ShellExt::sidecar`/`Command::spawn` route to `pandoc` never
+//! consults it at all (confirmed by reading the installed `tauri-plugin-shell` 2.3.6 crate), so
+//! 4.18's `PATH` prepend on the Rust-side pandoc `Command` needs no capability change here.
 
 #[cfg(test)]
 mod tests {

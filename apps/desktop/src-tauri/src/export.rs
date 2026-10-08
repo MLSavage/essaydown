@@ -5,7 +5,8 @@
 //! that package's `buildPandocArgs` shape in Rust, since the two cannot share code across the
 //! language boundary — a change to one's argument order must be read against the other's.
 
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
@@ -77,7 +78,14 @@ pub(crate) fn resource_dir_of(relative_doc_path: &str) -> String {
 }
 
 /// The fixed 9-token invocation `packages/export`'s `buildPandocArgs` also builds: no positional
-/// input argument (the source is fed over stdin).
+/// input argument (the source is fed over stdin). The 7th token, `--pdf-engine=typst`, is load-
+/// bearing as the literal bare name — never an absolute or relative path, and never any other
+/// spelling of the same binary (task 4.17's own fix shape, reverted; lessons [4.17]): pandoc 3.11's
+/// typst PDF builder picks its media-extraction directory by literal equality on the engine
+/// argument's text (`withTempDir (program == "typst") "media"`, upstream `PDF.hs:86`), so anything
+/// but the exact string `typst` extracts images to the system temp directory and writes a `.typ`
+/// path typst cannot resolve, breaking every image-bearing export. `pandoc_path_env` is what makes
+/// this literal immune to `PATH` shadowing instead.
 pub(crate) fn pandoc_args(resource_dir: &str, out_path: &str, format: &str) -> Vec<String> {
     vec![
         "-f".to_string(),
@@ -92,17 +100,68 @@ pub(crate) fn pandoc_args(resource_dir: &str, out_path: &str, format: &str) -> V
     ]
 }
 
+/// The `typst` sidecar's absolute path, beside whichever binary is actually running — mirroring
+/// exactly how the installed tauri-plugin-shell 2.3.6 resolves `shell().sidecar("pandoc")`
+/// (`relative_command_path`, `src/process/mod.rs` in the cargo registry): `exe_dir` is the running
+/// executable's own parent directory (the caller's `tauri::utils::platform::current_exe()?`'s
+/// parent), bumped up one level when it is named `deps` (`cargo test`'s own layout), then joined
+/// with `typst` (`typst.exe` under `cfg(windows)`, mirroring that function's own extension rule).
+/// `--pdf-engine=typst` stays the bare name (see `pandoc_args`), so pandoc resolves it by a `PATH`
+/// lookup on that name alone: the file this function points at must be named exactly `typst`
+/// (`typst.exe` on Windows), never anything else, or the lookup misses it — Michael's condition
+/// (the extracted `.deb`'s sidecar layout) is this function's own correctness, not a separate rule.
+pub(crate) fn typst_sidecar_path(exe_dir: &Path) -> PathBuf {
+    let base_dir = if exe_dir.ends_with("deps") {
+        exe_dir.parent().unwrap_or(exe_dir)
+    } else {
+        exe_dir
+    };
+    #[cfg(windows)]
+    {
+        let mut path = base_dir.join("typst");
+        path.as_mut_os_string().push(".exe");
+        path
+    }
+    #[cfg(not(windows))]
+    base_dir.join("typst")
+}
+
+/// The `PATH` the spawned `pandoc` child should see: `typst_sidecar_path(exe_dir)`'s own directory
+/// first, then every entry of `inherited` in order. Pandoc spawns `--pdf-engine=typst` as a plain
+/// process using *its own* environment (`getEnvironment`, upstream `PDF.hs`/`Process.hs`; GHC's
+/// `process` passes that straight to `posix_spawnp`), so overriding the child's `PATH` — not the
+/// argument's text — is what makes the literal bare name in `pandoc_args` resolve to the sidecar
+/// ahead of any shadowing `typst` the inherited `PATH` might otherwise have found first (lessons
+/// [4.17]). `std::env::join_paths` errs when an entry contains the platform's own separator.
+pub(crate) fn pandoc_path_env(
+    exe_dir: &Path,
+    inherited: Option<&OsStr>,
+) -> Result<OsString, std::env::JoinPathsError> {
+    let sidecar_dir = typst_sidecar_path(exe_dir)
+        .parent()
+        .unwrap_or(exe_dir)
+        .to_path_buf();
+    let mut entries = vec![sidecar_dir];
+    if let Some(inherited) = inherited {
+        entries.extend(std::env::split_paths(inherited));
+    }
+    std::env::join_paths(entries)
+}
+
 /// Spawns the `pandoc` sidecar at `root` (so every relative argument above resolves against the
-/// workspace root, exactly as `--resource-path`'s relative form requires), writes `contents` to its
-/// stdin and closes it (dropping `child` closes the pipe, signalling EOF; the background reader
-/// `spawn()` installs keeps its own handle, so this does not kill the process), and streams every
-/// stderr line to the frontend as it arrives.
+/// workspace root, exactly as `--resource-path`'s relative form requires), with `path_env`
+/// (`pandoc_path_env`'s result) as its own `PATH` — the only way the literal `--pdf-engine=typst`
+/// argument in `args` can resolve to the sidecar rather than a shadowing `typst` elsewhere on the
+/// inherited `PATH` — writes `contents` to its stdin and closes it (dropping `child` closes the
+/// pipe, signalling EOF; the background reader `spawn()` installs keeps its own handle, so this
+/// does not kill the process), and streams every stderr line to the frontend as it arrives.
 pub(crate) async fn run_pandoc<R: Runtime>(
     app: &AppHandle<R>,
     root: &Path,
     out_path: &str,
     args: &[String],
     contents: &str,
+    path_env: &OsStr,
 ) -> Result<ExportOutcome, ExportError> {
     let (mut rx, mut child) = app
         .shell()
@@ -110,6 +169,7 @@ pub(crate) async fn run_pandoc<R: Runtime>(
         .map_err(|e| ExportError::Spawn(e.to_string()))?
         .args(args)
         .current_dir(root)
+        .env("PATH", path_env)
         .spawn()
         .map_err(|e| ExportError::Spawn(e.to_string()))?;
 
@@ -179,6 +239,96 @@ mod tests {
                 "docx",
             ]
         );
+    }
+
+    #[test]
+    fn typst_sidecar_path_dev_layout_is_beside_the_debug_binary() {
+        let exe_dir = Path::new("/work/target/debug");
+        let path = typst_sidecar_path(exe_dir);
+        assert_eq!(path.file_stem().unwrap(), "typst");
+        #[cfg(windows)]
+        assert_eq!(path.file_name().unwrap(), "typst.exe");
+        #[cfg(not(windows))]
+        assert_eq!(path.file_name().unwrap(), "typst");
+        assert_eq!(path.parent().unwrap(), exe_dir);
+    }
+
+    #[test]
+    fn typst_sidecar_path_cargo_test_deps_layout_goes_up_one_level() {
+        let exe_dir = Path::new("/work/target/debug/deps");
+        let path = typst_sidecar_path(exe_dir);
+        assert_eq!(path.file_stem().unwrap(), "typst");
+        #[cfg(windows)]
+        assert_eq!(path.file_name().unwrap(), "typst.exe");
+        #[cfg(not(windows))]
+        assert_eq!(path.file_name().unwrap(), "typst");
+        assert_eq!(path.parent().unwrap(), Path::new("/work/target/debug"));
+    }
+
+    #[test]
+    fn typst_sidecar_path_macos_bundle_layout_is_beside_the_app_binary() {
+        let exe_dir = Path::new("/Applications/EssayDown.app/Contents/MacOS");
+        let path = typst_sidecar_path(exe_dir);
+        assert_eq!(path.file_stem().unwrap(), "typst");
+        #[cfg(windows)]
+        assert_eq!(path.file_name().unwrap(), "typst.exe");
+        #[cfg(not(windows))]
+        assert_eq!(path.file_name().unwrap(), "typst");
+        assert_eq!(path.parent().unwrap(), exe_dir);
+    }
+
+    #[test]
+    fn typst_sidecar_path_linux_package_layout_is_beside_the_installed_binary() {
+        let exe_dir = Path::new("/usr/bin");
+        let path = typst_sidecar_path(exe_dir);
+        assert_eq!(path.file_stem().unwrap(), "typst");
+        #[cfg(windows)]
+        assert_eq!(path.file_name().unwrap(), "typst.exe");
+        #[cfg(not(windows))]
+        assert_eq!(path.file_name().unwrap(), "typst");
+        assert_eq!(path.parent().unwrap(), exe_dir);
+    }
+
+    #[test]
+    fn pandoc_path_env_prepends_the_sidecar_directory_before_every_inherited_entry() {
+        let exe_dir = Path::new("/work/target/debug");
+        let shadow = PathBuf::from("/tmp/shadow");
+        let other = PathBuf::from("/usr/bin");
+        let inherited = std::env::join_paths([&shadow, &other]).unwrap();
+        let result = pandoc_path_env(exe_dir, Some(inherited.as_os_str())).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&result).collect();
+        assert_eq!(entries[0], typst_sidecar_path(exe_dir).parent().unwrap());
+        assert_eq!(&entries[1..], &[shadow, other]);
+    }
+
+    #[test]
+    fn pandoc_path_env_with_no_inherited_path_has_exactly_one_entry() {
+        let exe_dir = Path::new("/work/target/debug");
+        let result = pandoc_path_env(exe_dir, None).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&result).collect();
+        assert_eq!(entries, vec![typst_sidecar_path(exe_dir).parent().unwrap().to_path_buf()]);
+    }
+
+    #[test]
+    fn pandoc_path_env_cargo_test_deps_layout_first_entry_is_debug_not_deps() {
+        let exe_dir = Path::new("/work/target/debug/deps");
+        let result = pandoc_path_env(exe_dir, None).unwrap();
+        let entries: Vec<PathBuf> = std::env::split_paths(&result).collect();
+        assert_eq!(entries[0], Path::new("/work/target/debug"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pandoc_path_env_errs_when_the_sidecar_directory_contains_the_path_list_separator() {
+        let exe_dir = Path::new("/work/weird:dir");
+        assert!(pandoc_path_env(exe_dir, None).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn pandoc_path_env_errs_when_the_sidecar_directory_contains_the_path_list_separator() {
+        let exe_dir = Path::new("/work/weird\"dir");
+        assert!(pandoc_path_env(exe_dir, None).is_err());
     }
 
     #[test]
