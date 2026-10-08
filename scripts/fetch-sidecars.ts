@@ -15,11 +15,20 @@
 // reader for both container formats — no `xar`/`cpio` binary is installed in this image (checked
 // during this task; apt only has unzip/xz-utils/tar for the other six archives) and no npm package
 // is a declared dependency for it.
+//
+// Host portability (task 4.11, after the 4.2h gate's macOS and Windows test jobs): every external
+// command goes through an injected `Runner` (default `spawnSync`), every chmod through
+// `makeExecutable` (a no-op on win32), and the platform is a parameter, so the unit tests drive the
+// win32/darwin routes from this Linux container without a host tool. Tarballs reach `tar` as bytes
+// on stdin (`-f -`), never as a path, because the `tar` first on PATH on a Windows runner is Git for
+// Windows' GNU tar, which reads `C:` in `-f C:\…` as a remote host. Windows has no `unzip`, so a zip
+// member on win32 is read by `%SystemRoot%\System32\tar.exe` (bsdtar/libarchive, which reads zip
+// and drive-letter paths) by its absolute path, never by a `tar` from PATH.
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, win32 } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync, inflateSync } from "node:zlib";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +48,45 @@ export interface SidecarLock {
   pandocVersion?: string;
   typstVersion?: string;
   artifacts: SidecarArtifact[];
+}
+
+/** Runs one external command to completion; the only route by which these scripts reach a host
+ * binary, so a test can stand in for `tar`, `unzip`, `lipo` or a sidecar's `--version`. */
+export type Runner = (
+  cmd: string,
+  args: string[],
+  opts?: { input?: Buffer },
+) => Pick<SpawnSyncReturns<Buffer>, "status" | "stdout" | "stderr" | "error">;
+
+export const defaultRunner: Runner = (cmd, args, opts) =>
+  spawnSync(cmd, args, { maxBuffer: 1024 * 1024 * 1024, input: opts?.input });
+
+/** True when the module at `importMetaUrl` is the script node was asked to run (`argv1`). The
+ * comparison goes through `pathToFileURL` so a Windows `C:\…` path and a path with a space (both
+ * percent- or slash-encoded in `import.meta.url`) still match. */
+export function isMainModule(
+  importMetaUrl: string,
+  argv1: string | undefined,
+  windows: boolean = process.platform === "win32",
+): boolean {
+  if (!argv1) return false;
+  return importMetaUrl === pathToFileURL(argv1, { windows }).href;
+}
+
+/** Marks `path` executable (0o755) off Windows; on win32 there is no mode bit to set and
+ * executability comes from the `.exe` name, so this does nothing there. */
+export function makeExecutable(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+  chmod: (path: string, mode: number) => void = chmodSync,
+): void {
+  if (platform === "win32") return;
+  chmod(path, 0o755);
+}
+
+/** Windows' own bsdtar, by absolute path (`%SystemRoot%\System32\tar.exe`). */
+export function windowsTarPath(env: NodeJS.ProcessEnv = process.env): string {
+  return win32.join(env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
 }
 
 export function sha256(buf: Buffer): string {
@@ -72,8 +120,8 @@ export async function fetchAndVerify(artifact: SidecarArtifact, cacheDir: string
   return downloaded;
 }
 
-function runCapture(cmd: string, args: string[]): Buffer {
-  const r = spawnSync(cmd, args, { maxBuffer: 1024 * 1024 * 1024 });
+function runCapture(runner: Runner, cmd: string, args: string[], input?: Buffer): Buffer {
+  const r = runner(cmd, args, input ? { input } : undefined);
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`${cmd} ${args.join(" ")} exited ${r.status}: ${r.stderr.toString("utf8")}`);
@@ -212,14 +260,19 @@ export function extractMember(
   archive: Buffer,
   archivePath: string,
   artifact: SidecarArtifact,
+  runner: Runner = defaultRunner,
+  platform: NodeJS.Platform = process.platform,
 ): Buffer {
   switch (artifact.format) {
     case "tar.gz":
-      return runCapture("tar", ["-xzOf", archivePath, artifact.member]);
+      return runCapture(runner, "tar", ["-xzO", "-f", "-", artifact.member], archive);
     case "tar.xz":
-      return runCapture("tar", ["-xJOf", archivePath, artifact.member]);
+      return runCapture(runner, "tar", ["-xJO", "-f", "-", artifact.member], archive);
     case "zip":
-      return runCapture("unzip", ["-p", archivePath, artifact.member]);
+      if (platform === "win32") {
+        return runCapture(runner, windowsTarPath(), ["-xOf", archivePath, artifact.member]);
+      }
+      return runCapture(runner, "unzip", ["-p", archivePath, artifact.member]);
     case "pkg":
       return extractPkgPayloadMember(archive, artifact.component ?? [], artifact.member);
   }
@@ -267,6 +320,8 @@ export function assertLockVersionsMatch(lock: SidecarLock, versionsEnvPath: stri
 export async function fetchSidecars(opts: {
   lockPath: string;
   outDir: string;
+  runner?: Runner;
+  platform?: NodeJS.Platform;
 }): Promise<SidecarArtifact[]> {
   const artifacts = loadLock(opts.lockPath);
   const cacheDir = join(opts.outDir, ".downloads");
@@ -274,43 +329,53 @@ export async function fetchSidecars(opts: {
   for (const artifact of artifacts) {
     const archive = await fetchAndVerify(artifact, cacheDir);
     const archivePath = join(cacheDir, `${artifact.target}.download`);
-    const member = extractMember(archive, archivePath, artifact);
+    const member = extractMember(archive, archivePath, artifact, opts.runner, opts.platform);
     const destPath = join(opts.outDir, artifact.target);
     writeFileSync(destPath, member);
-    chmodSync(destPath, 0o755);
+    makeExecutable(destPath, opts.platform);
   }
   return artifacts;
 }
 
 /** The Rust/Tauri target triple this process's own OS+arch would be named under in
  * scripts/sidecars.lock.json — the artifact `verifyHostBinaries` runs `--version` against. */
-export function hostTargetTriple(): string | undefined {
-  if (process.platform === "linux") return "x86_64-unknown-linux-gnu";
-  if (process.platform === "darwin")
-    return process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
-  if (process.platform === "win32") return "x86_64-pc-windows-msvc";
+export function hostTargetTriple(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string | undefined {
+  if (platform === "linux") return "x86_64-unknown-linux-gnu";
+  if (platform === "darwin")
+    return arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  if (platform === "win32") return "x86_64-pc-windows-msvc";
   return undefined;
 }
 
 /** Runs `pandoc --version` and `typst --version` against whichever extracted artifact matches this
  * host's own target triple (the acceptance's "host OS's binary or slice"); a macOS host before 4.2's
  * `lipo` still has its own single-arch slice to run, same as the two platforms with one binary. */
-export function verifyHostBinaries(outDir: string, artifacts: SidecarArtifact[]): string[] {
-  const triple = hostTargetTriple();
-  if (!triple)
-    throw new Error(`unsupported host platform for a sidecar check: ${process.platform}`);
+export function verifyHostBinaries(
+  outDir: string,
+  artifacts: SidecarArtifact[],
+  runner: Runner = defaultRunner,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string[] {
+  const triple = hostTargetTriple(platform, arch);
+  if (!triple) throw new Error(`unsupported host platform for a sidecar check: ${platform}`);
+  const target = (tool: string) => `${tool}-${triple}${platform === "win32" ? ".exe" : ""}`;
   const summaries: string[] = [];
   for (const tool of ["pandoc", "typst"] as const) {
-    const artifact = artifacts.find(
-      (a) => a.tool === tool && a.target.startsWith(`${tool}-${triple}`),
-    );
+    const artifact = artifacts.find((a) => a.tool === tool && a.target === target(tool));
     if (!artifact) throw new Error(`no locked ${tool} artifact for host triple ${triple}`);
     const binPath = join(outDir, artifact.target);
-    const r = spawnSync(binPath, ["--version"], { encoding: "utf8" });
-    if (r.status !== 0 || !r.stdout.toLowerCase().includes(tool)) {
-      throw new Error(`${binPath} --version failed (status ${r.status}): ${r.stderr}`);
+    const r = runner(binPath, ["--version"]);
+    const stdout = r.stdout?.toString("utf8") ?? "";
+    if (r.status !== 0 || !stdout.toLowerCase().includes(tool)) {
+      throw new Error(
+        `${binPath} --version failed (status ${r.status}): ${r.error?.message ?? r.stderr?.toString("utf8")}`,
+      );
     }
-    summaries.push(r.stdout.split("\n")[0]);
+    summaries.push(stdout.split("\n")[0]);
   }
   return summaries;
 }
@@ -336,7 +401,7 @@ async function main(): Promise<void> {
     console.log(`fetch-sidecars: ${summary}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((err: unknown) => {
     console.error(`fetch-sidecars: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);

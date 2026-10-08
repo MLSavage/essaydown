@@ -2,20 +2,16 @@
 // GitHub releases, and tiny synthetic archives stand in for pandoc/typst's real (tens-of-MB) ones,
 // so `pnpm test` stays fast and deterministic. The real `pnpm fetch-sidecars` run against the real
 // 8 locked URLs was done once by hand during this task (its summary is in the journal) and is not
-// re-run here; CI network access for the real sidecars is task 4.2's concern.
+// re-run here; CI network access for the real sidecars is task 4.2's concern. Since task 4.11 the
+// real-archive legs read small archives committed under tests/fixtures/sidecars/ (built once in the
+// Linux container) rather than building them with the host's own tar/zip, and every other external
+// command is a fake `Runner`, so the suite runs alike on the Linux, macOS and Windows test jobs.
 import { createServer, type Server } from "node:http";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-  chmodSync,
-  existsSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { spawn } from "node:child_process";
 import { deflateSync, gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -25,14 +21,36 @@ import {
   fetchAndVerify,
   fetchSidecars,
   hostTargetTriple,
+  isMainModule,
   loadLock,
+  makeExecutable,
   sha256,
   verifyHostBinaries,
+  windowsTarPath,
+  type Runner,
   type SidecarArtifact,
   type SidecarLock,
 } from "../scripts/fetch-sidecars.ts";
 
 const scriptPath = join(import.meta.dirname, "..", "scripts", "fetch-sidecars.ts");
+const fixturesDir = join(import.meta.dirname, "fixtures", "sidecars");
+
+/** A fake runner recording each call (command, argv, stdin) and answering with `stdout`. */
+function recordingRunner(stdout = "member-bytes"): {
+  runner: Runner;
+  calls: { cmd: string; args: string[]; input?: Buffer }[];
+} {
+  const calls: { cmd: string; args: string[]; input?: Buffer }[] = [];
+  const runner: Runner = (cmd, args, opts) => {
+    calls.push({ cmd, args, input: opts?.input });
+    return { status: 0, stdout: Buffer.from(stdout), stderr: Buffer.alloc(0) };
+  };
+  return { runner, calls };
+}
+
+function artifactOf(format: SidecarArtifact["format"], member: string): SidecarArtifact {
+  return { target: "t", tool: "pandoc", kind: "binary", url: "x", sha256: "x", format, member };
+}
 
 function spawnAsync(
   cmd: string,
@@ -91,68 +109,163 @@ describe("the committed lock file", () => {
   });
 });
 
-describe("extractMember: one real archive per format, built with the system's own tar/unzip", () => {
-  function tarGzWith(dir: string, memberPath: string, content: string): string {
-    const archive = join(dir, "a.tar.gz");
-    const full = join(dir, memberPath);
-    mkdirSync(join(dir, memberPath.split("/").slice(0, -1).join("/")), { recursive: true });
-    writeFileSync(full, content);
-    const r = spawnSync("tar", ["-czf", archive, "-C", dir, memberPath]);
-    expect(r.status).toBe(0);
-    return archive;
-  }
-
+describe("extractMember: one committed real archive per format, through the platform's real route", () => {
   it("tar.gz: extracts the named member's exact bytes", () => {
-    const dir = scratch();
-    const archive = tarGzWith(dir, "pkg/bin/tool", "hello-tar-gz");
-    const out = extractMember(readFileSync(archive), archive, {
-      target: "t",
-      tool: "pandoc",
-      kind: "binary",
-      url: "x",
-      sha256: "x",
-      format: "tar.gz",
-      member: "pkg/bin/tool",
-    } satisfies SidecarArtifact);
+    const archive = join(fixturesDir, "member.tar.gz");
+    const out = extractMember(readFileSync(archive), archive, artifactOf("tar.gz", "pkg/bin/tool"));
     expect(out.toString("utf8")).toBe("hello-tar-gz");
   });
 
   it("tar.xz: extracts the named member's exact bytes", () => {
-    const dir = scratch();
-    const full = join(dir, "tool");
-    writeFileSync(full, "hello-tar-xz");
-    const archive = join(dir, "a.tar.xz");
-    const r = spawnSync("tar", ["-cJf", archive, "-C", dir, "tool"]);
-    expect(r.status).toBe(0);
-    const out = extractMember(readFileSync(archive), archive, {
-      target: "t",
-      tool: "typst",
-      kind: "binary",
-      url: "x",
-      sha256: "x",
-      format: "tar.xz",
-      member: "tool",
-    } satisfies SidecarArtifact);
+    const archive = join(fixturesDir, "member.tar.xz");
+    const out = extractMember(readFileSync(archive), archive, artifactOf("tar.xz", "tool"));
     expect(out.toString("utf8")).toBe("hello-tar-xz");
   });
 
   it("zip: extracts the named member's exact bytes", () => {
-    const dir = scratch();
-    const full = join(dir, "tool.exe");
-    writeFileSync(full, "hello-zip");
-    const archive = join(dir, "a.zip");
-    const r = spawnSync("zip", ["-q", archive, "tool.exe"], { cwd: dir });
-    expect(r.status).toBe(0);
-    const out = extractMember(readFileSync(archive), archive, {
-      target: "t",
-      tool: "pandoc",
-      kind: "binary",
-      url: "x",
-      sha256: "x",
-      format: "zip",
-      member: "tool.exe",
-    } satisfies SidecarArtifact);
+    const archive = join(fixturesDir, "member.zip");
+    const out = extractMember(readFileSync(archive), archive, artifactOf("zip", "tool.exe"));
     expect(out.toString("utf8")).toBe("hello-zip");
+  });
+});
+
+describe("extractMember: the argv each format hands the runner", () => {
+  const archive = Buffer.from("archive-bytes");
+  const archivePath = "C:\\Users\\runner\\cache\\t.download";
+
+  it("tar.gz argv: tar -xzO -f - <member> with the archive bytes on stdin, never a path", () => {
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      const { runner, calls } = recordingRunner();
+      const out = extractMember(
+        archive,
+        archivePath,
+        artifactOf("tar.gz", "a/b"),
+        runner,
+        platform,
+      );
+      expect(out.toString("utf8")).toBe("member-bytes");
+      expect(calls).toEqual([{ cmd: "tar", args: ["-xzO", "-f", "-", "a/b"], input: archive }]);
+    }
+  });
+
+  it("tar.xz argv: tar -xJO -f - <member> with the archive bytes on stdin, never a path", () => {
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      const { runner, calls } = recordingRunner();
+      extractMember(archive, archivePath, artifactOf("tar.xz", "a/b"), runner, platform);
+      expect(calls).toEqual([{ cmd: "tar", args: ["-xJO", "-f", "-", "a/b"], input: archive }]);
+    }
+  });
+
+  it("win32 zip argv: the absolute System32 tar.exe, -xOf, the archive path, the member", () => {
+    const { runner, calls } = recordingRunner();
+    extractMember(
+      archive,
+      archivePath,
+      artifactOf("zip", "pandoc-3.11/pandoc.exe"),
+      runner,
+      "win32",
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe(windowsTarPath());
+    expect(calls[0].cmd).toMatch(/^[A-Za-z]:\\.*\\System32\\tar\.exe$/);
+    expect(calls[0].args).toEqual(["-xOf", archivePath, "pandoc-3.11/pandoc.exe"]);
+    expect(calls[0].input).toBeUndefined();
+  });
+
+  it("windowsTarPath reads %SystemRoot%, and falls back to C:\\Windows when it is unset", () => {
+    expect(windowsTarPath({ SystemRoot: "D:\\WINNT" })).toBe("D:\\WINNT\\System32\\tar.exe");
+    expect(windowsTarPath({})).toBe("C:\\Windows\\System32\\tar.exe");
+  });
+
+  it("non-win32 zip argv: unzip -p <archive> <member>, unchanged", () => {
+    for (const platform of ["linux", "darwin"] as const) {
+      const { runner, calls } = recordingRunner();
+      extractMember(archive, "/tmp/t.download", artifactOf("zip", "m.exe"), runner, platform);
+      expect(calls).toEqual([
+        { cmd: "unzip", args: ["-p", "/tmp/t.download", "m.exe"], input: undefined },
+      ]);
+    }
+  });
+
+  it("a runner that exits non-zero throws naming the command", () => {
+    const failing: Runner = () => ({
+      status: 2,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.from("tar: Cannot connect to C: resolve failed"),
+    });
+    expect(() => extractMember(archive, archivePath, artifactOf("tar.gz", "m"), failing)).toThrow(
+      /tar -xzO -f - m exited 2/,
+    );
+  });
+});
+
+describe("isMainModule: the run-as-main check, via pathToFileURL", () => {
+  it("matches a POSIX argv[1]", () => {
+    expect(
+      isMainModule(
+        "file:///repo/scripts/fetch-sidecars.ts",
+        "/repo/scripts/fetch-sidecars.ts",
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  it("matches a C:\\ backslash argv[1] under windows", () => {
+    expect(
+      isMainModule(
+        "file:///C:/a/essaydown/scripts/fetch-sidecars.ts",
+        "C:\\a\\essaydown\\scripts\\fetch-sidecars.ts",
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("matches an argv[1] containing a space (percent-encoded in import.meta.url)", () => {
+    expect(isMainModule("file:///my%20repo/scripts/x.ts", "/my repo/scripts/x.ts", false)).toBe(
+      true,
+    );
+    expect(isMainModule("file:///C:/my%20repo/x.ts", "C:\\my repo\\x.ts", true)).toBe(true);
+  });
+
+  it("is false for a non-main argv[1] (another script, or none)", () => {
+    expect(
+      isMainModule(
+        "file:///repo/scripts/fetch-sidecars.ts",
+        "/repo/node_modules/vitest/vitest.mjs",
+        false,
+      ),
+    ).toBe(false);
+    expect(isMainModule("file:///repo/scripts/fetch-sidecars.ts", undefined, false)).toBe(false);
+  });
+
+  it("this test file's own module URL round-trips through its path on this host", () => {
+    const self = join(import.meta.dirname, "fetch-sidecars.test.ts");
+    expect(isMainModule(pathToFileURL(self).href, self)).toBe(true);
+  });
+});
+
+describe("makeExecutable: the one platform-aware chmod", () => {
+  function chmodSpy() {
+    const calls: [string, number][] = [];
+    return { calls, chmod: (path: string, mode: number) => void calls.push([path, mode]) };
+  }
+
+  it("chmods 0o755 on linux", () => {
+    const { calls, chmod } = chmodSpy();
+    makeExecutable("/x/pandoc", "linux", chmod);
+    expect(calls).toEqual([["/x/pandoc", 0o755]]);
+  });
+
+  it("chmods 0o755 on darwin", () => {
+    const { calls, chmod } = chmodSpy();
+    makeExecutable("/x/pandoc", "darwin", chmod);
+    expect(calls).toEqual([["/x/pandoc", 0o755]]);
+  });
+
+  it("does not chmod on win32", () => {
+    const { calls, chmod } = chmodSpy();
+    makeExecutable("C:\\x\\pandoc.exe", "win32", chmod);
+    expect(calls).toEqual([]);
   });
 });
 
@@ -328,13 +441,7 @@ describe("fetchSidecars: end-to-end against a local server with a tiny synthetic
   it("downloads, verifies and extracts every artifact in the lock", () =>
     new Promise<void>((resolve, reject) => {
       const dir = scratch();
-      const memberContent = "end-to-end-member";
-      const full = join(dir, "tool");
-      writeFileSync(full, memberContent);
-      const archivePath = join(dir, "a.tar.gz");
-      const tarResult = spawnSync("tar", ["-czf", archivePath, "-C", dir, "tool"]);
-      expect(tarResult.status).toBe(0);
-      const archiveBytes = readFileSync(archivePath);
+      const archiveBytes = readFileSync(join(fixturesDir, "member.tar.gz"));
 
       const server = createServer((_req, res) => res.end(archiveBytes));
       server.listen(0, "127.0.0.1", async () => {
@@ -354,7 +461,7 @@ describe("fetchSidecars: end-to-end against a local server with a tiny synthetic
                   url: `http://127.0.0.1:${port}/a.tar.gz`,
                   sha256: sha256(archiveBytes),
                   format: "tar.gz",
-                  member: "tool",
+                  member: "pkg/bin/tool",
                 },
               ],
             }),
@@ -362,7 +469,7 @@ describe("fetchSidecars: end-to-end against a local server with a tiny synthetic
           const artifacts = await fetchSidecars({ lockPath, outDir });
           expect(artifacts).toHaveLength(1);
           const extracted = readFileSync(join(outDir, "tool-x86_64-unknown-linux-gnu"), "utf8");
-          expect(extracted).toBe(memberContent);
+          expect(extracted).toBe("hello-tar-gz");
           resolve();
         } catch (e) {
           reject(e);
@@ -412,45 +519,75 @@ describe("hostTargetTriple", () => {
 });
 
 describe("verifyHostBinaries", () => {
-  it("runs --version against the host-triple artifact for each tool and returns its first line", () => {
-    const dir = scratch();
-    const triple = hostTargetTriple() as string;
-    for (const tool of ["pandoc", "typst"]) {
-      const path = join(dir, `${tool}-${triple}`);
-      writeFileSync(path, `#!/bin/sh\necho "${tool} 9.9.9 (fake)"\n`);
-      chmodSync(path, 0o755);
-    }
-    const artifacts: SidecarArtifact[] = ["pandoc", "typst"].map((tool) => ({
-      target: `${tool}-${triple}`,
-      tool: tool as "pandoc" | "typst",
+  function lockFor(targets: string[]): SidecarArtifact[] {
+    return targets.map((target) => ({
+      target,
+      tool: target.startsWith("pandoc") ? "pandoc" : "typst",
       kind: "binary",
       url: "x",
       sha256: "x",
       format: "tar.gz",
       member: "x",
     }));
-    const summaries = verifyHostBinaries(dir, artifacts);
+  }
+
+  it("runs --version through the runner against the host-triple artifact for each tool and returns its first line", () => {
+    const dir = scratch();
+    const calls: string[][] = [];
+    const runner: Runner = (cmd, args) => {
+      calls.push([cmd, ...args]);
+      const tool = cmd.includes("pandoc") ? "pandoc" : "typst";
+      return {
+        status: 0,
+        stdout: Buffer.from(`${tool} 9.9.9 (fake)\nmore\n`),
+        stderr: Buffer.alloc(0),
+      };
+    };
+    const artifacts = lockFor([
+      "pandoc-x86_64-unknown-linux-gnu",
+      "typst-x86_64-unknown-linux-gnu",
+    ]);
+    const summaries = verifyHostBinaries(dir, artifacts, runner, "linux", "x64");
     expect(summaries).toEqual(["pandoc 9.9.9 (fake)", "typst 9.9.9 (fake)"]);
+    expect(calls).toEqual([
+      [join(dir, "pandoc-x86_64-unknown-linux-gnu"), "--version"],
+      [join(dir, "typst-x86_64-unknown-linux-gnu"), "--version"],
+    ]);
+  });
+
+  it("win32 .exe lookup: under an injected win32 it runs the `.exe` target", () => {
+    const dir = scratch();
+    const { runner, calls } = recordingRunner("pandoc typst 1.0");
+    const artifacts = lockFor([
+      "pandoc-x86_64-unknown-linux-gnu",
+      "pandoc-x86_64-pc-windows-msvc.exe",
+      "typst-x86_64-pc-windows-msvc.exe",
+    ]);
+    verifyHostBinaries(dir, artifacts, runner, "win32", "x64");
+    expect(calls.map((c) => c.cmd)).toEqual([
+      join(dir, "pandoc-x86_64-pc-windows-msvc.exe"),
+      join(dir, "typst-x86_64-pc-windows-msvc.exe"),
+    ]);
+  });
+
+  it("win32 .exe lookup: a lock with only the suffix-less name has no win32 artifact", () => {
+    const { runner } = recordingRunner("pandoc");
+    const artifacts = lockFor(["pandoc-x86_64-pc-windows-msvc", "typst-x86_64-pc-windows-msvc"]);
+    expect(() => verifyHostBinaries(scratch(), artifacts, runner, "win32", "x64")).toThrow(
+      /no locked pandoc artifact for host triple x86_64-pc-windows-msvc/,
+    );
   });
 
   it("throws naming the failing binary when --version exits non-zero", () => {
-    const dir = scratch();
-    const triple = hostTargetTriple() as string;
-    const pandocPath = join(dir, `pandoc-${triple}`);
-    writeFileSync(pandocPath, "#!/bin/sh\nexit 1\n");
-    chmodSync(pandocPath, 0o755);
-    const artifacts: SidecarArtifact[] = [
-      {
-        target: `pandoc-${triple}`,
-        tool: "pandoc",
-        kind: "binary",
-        url: "x",
-        sha256: "x",
-        format: "tar.gz",
-        member: "x",
-      },
-    ];
-    expect(() => verifyHostBinaries(dir, artifacts)).toThrow(/pandoc.*--version failed/);
+    const failing: Runner = () => ({
+      status: 1,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.from("boom"),
+    });
+    const artifacts = lockFor(["pandoc-aarch64-apple-darwin"]);
+    expect(() => verifyHostBinaries(scratch(), artifacts, failing, "darwin", "arm64")).toThrow(
+      /pandoc-aarch64-apple-darwin --version failed \(status 1\): boom/,
+    );
   });
 
   it("throws naming the tool when the lock has no artifact for this host's triple", () => {

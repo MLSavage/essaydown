@@ -21,11 +21,25 @@
 // non-macOS target, without claiming a fat binary this host cannot produce. The fallback is taken
 // only on `lipo`'s own ENOENT (command not found), not by checking `process.platform`, so a host
 // that does carry a working `lipo` always takes the real path.
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+//
+// Task 4.11 (after the 4.2h gate's macOS job): `tauri_build::try_build` on a macOS host checks for
+// `binaries/<base>-<host triple>` (`pandoc-aarch64-apple-darwin`, …) on every `cargo build`/`cargo
+// test`, so every `kind: slice` artifact is also copied into outDir under its own target name, by the
+// same rule as the two dev entries: present for cargo, never counted among the 6 distributables, and
+// the universal files stay what `lipo -info` reads. `lipo` reaches the host only through the
+// injected `Runner` (default `spawnSync`), and every chmod goes through `makeExecutable` (a no-op on
+// win32), so no unit test runs the host's own `lipo`.
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
-import { loadLock, type SidecarArtifact } from "./fetch-sidecars.ts";
+import {
+  defaultRunner,
+  isMainModule,
+  loadLock,
+  makeExecutable,
+  type Runner,
+  type SidecarArtifact,
+} from "./fetch-sidecars.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -38,18 +52,26 @@ export interface LipoResult {
 /** Combines `slices` (exactly 2 paths, one per macOS arch) into `outPath`. Returns whether the real
  * `lipo` ran (true) or the single-slice stand-in was written because `lipo` is not on PATH
  * (false). Any other `lipo` failure (a real invocation that exits non-zero) is not swallowed. */
-export function lipoCreate(tool: string, slices: [string, string], outPath: string): LipoResult {
-  const r = spawnSync("lipo", ["-create", slices[0], slices[1], "-output", outPath]);
+export function lipoCreate(
+  tool: string,
+  slices: [string, string],
+  outPath: string,
+  runner: Runner = defaultRunner,
+  platform: NodeJS.Platform = process.platform,
+): LipoResult {
+  const r = runner("lipo", ["-create", slices[0], slices[1], "-output", outPath]);
   if (r.error && (r.error as NodeJS.ErrnoException).code === "ENOENT") {
     copyFileSync(slices[0], outPath);
-    chmodSync(outPath, 0o755);
+    makeExecutable(outPath, platform);
     return { tool, outPath, usedRealLipo: false };
   }
   if (r.error) throw r.error;
   if (r.status !== 0) {
-    throw new Error(`lipo -create ${slices.join(" ")} -output ${outPath} exited ${r.status}: ${r.stderr.toString("utf8")}`);
+    throw new Error(
+      `lipo -create ${slices.join(" ")} -output ${outPath} exited ${r.status}: ${r.stderr.toString("utf8")}`,
+    );
   }
-  chmodSync(outPath, 0o755);
+  makeExecutable(outPath, platform);
   return { tool, outPath, usedRealLipo: true };
 }
 
@@ -57,6 +79,8 @@ export function assembleSidecars(opts: {
   lockPath: string;
   cacheDir: string;
   outDir: string;
+  runner?: Runner;
+  platform?: NodeJS.Platform;
 }): LipoResult[] {
   const artifacts = loadLock(opts.lockPath);
   mkdirSync(opts.outDir, { recursive: true });
@@ -69,10 +93,12 @@ export function assembleSidecars(opts: {
     );
   }
 
-  for (const artifact of artifacts.filter((a) => a.kind === "binary" || a.kind === "dev")) {
+  // Every artifact under its own target name: the 4 platform binaries (distributables), and the
+  // dev entries and macOS slices as dev artifacts for `tauri_build`'s host-triple check.
+  for (const artifact of artifacts) {
     const dest = join(opts.outDir, artifact.target);
     copyFileSync(join(opts.cacheDir, artifact.target), dest);
-    chmodSync(dest, 0o755);
+    makeExecutable(dest, opts.platform);
   }
 
   const results: LipoResult[] = [];
@@ -88,7 +114,7 @@ export function assembleSidecars(opts: {
       join(opts.cacheDir, slices[1].target),
     ];
     const outPath = join(opts.outDir, `${tool}-universal-apple-darwin`);
-    results.push(lipoCreate(tool, slicePaths, outPath));
+    results.push(lipoCreate(tool, slicePaths, outPath, opts.runner, opts.platform));
   }
   return results;
 }
@@ -103,7 +129,9 @@ async function main(): Promise<void> {
   const cacheDir = flag("--cache", join(HERE, ".cache/sidecars"));
   const outDir = flag("--out", join(HERE, "..", "apps/desktop/src-tauri/binaries"));
   const results = assembleSidecars({ lockPath, cacheDir, outDir });
-  console.log(`assemble-sidecars: 6 distributables written to ${outDir}`);
+  console.log(
+    `assemble-sidecars: 6 distributables written to ${outDir} (plus the dev entries and macOS slices under their own target names)`,
+  );
   for (const r of results) {
     console.log(
       `assemble-sidecars: ${r.tool} universal binary ${r.usedRealLipo ? "lipo-combined" : "single-slice stand-in (no lipo on PATH)"} at ${r.outPath}`,
@@ -111,7 +139,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((err: unknown) => {
     console.error(`assemble-sidecars: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
