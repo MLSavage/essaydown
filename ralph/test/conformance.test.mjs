@@ -14,6 +14,14 @@ const ok = (r, msg) => assert.equal(r.status, 0, `${msg ?? "command"} failed:\n$
 const versionFiles = (v) => ({ "package.json": `{"name":"fixture","version":"${v}"}\n`, "apps/desktop/src-tauri/Cargo.toml": `[package]\nname = "fixture"\nversion = "${v}"\n`, "apps/desktop/src-tauri/tauri.conf.json": `{"version":"${v}"}\n` });
 const approval = { id: "0.5v", model: "opus", execution: "human", description: "approval gate", acceptance: "x", dependencies: ["0.1"], blockedOnHuman: true, gateKind: "approval", recordTarget: "008-visual", outcomes: { ACCEPT: "continue", REJECT: "plan-gate" }, beforeVerify: true };
 const onePhase = (opts = {}) => [{ n: "0", tasks: phaseTasks("0", { next: "1", ...opts }) }];
+// Splits a workflow file into step/job chunks, stopping at the next step or the next job header
+// (a bare `  name:` line at two-space indent), so a step's chunk never runs on into a sibling
+// job's own job-level keys; a run of qualifying newlines (e.g. blank lines before a header) can
+// yield an empty chunk between them, which owns nothing because no caller's filter ever selects it.
+function uploadStepChunks(yml) {
+  const steps = yml.split(/\n(?=  [A-Za-z0-9_-]+:[ \t]*\n|\s*- name: )/);
+  return steps.filter((s) => /uses: actions\/upload-artifact(\/merge)?@/.test(s));
+}
 
 test("integration transaction: candidate without moving the branch, CAS mismatch restarts, detached failure leaves the branch", async (t) => {
   const f = makeFixture({ phases: onePhase() });
@@ -846,11 +854,35 @@ test("stale lock (DECISIONS #review-0-r1 G4): a command that needs the lock refu
 
 test("ci.yml: every artifact upload or merge step runs if: always() (#review-1-r8 N7, Claude r8 nit 3), so a failed run still carries its evidence", () => {
   const yml = readFileSync(join(dirname(new URL(import.meta.url).pathname), "../../.github/workflows/ci.yml"), "utf8");
-  const steps = yml.split(/\n(?=\s*- name: )/);
-  const uploads = steps.filter((s) => /uses: actions\/upload-artifact(\/merge)?@/.test(s));
+  const uploads = uploadStepChunks(yml);
   const names = uploads.map((s) => /- name: (.+)/.exec(s)[1].trim());
   assert.ok(uploads.some((s) => /upload-artifact\/merge@/.test(s)) && uploads.some((s) => /upload-artifact@/.test(s)), `both kinds present: ${names.join(", ")}`);
   for (const s of uploads) assert.match(s, /\n\s+if: always\(\)\n/, `step "${/- name: (.+)/.exec(s)[1].trim()}" lacks if: always()`);
+});
+
+test("uploadStepChunks (#062 m2 guard): a step's chunk stops at the next job header, not the next job's own if: always()", () => {
+  const yml = [
+    "jobs:",
+    "  first:",
+    "    runs-on: ubuntu-latest",
+    "    steps:",
+    "      - name: Upload something",
+    "        uses: actions/upload-artifact@v4",
+    "        with:",
+    "          name: something",
+    "          path: something.txt",
+    "",
+    "  second:",
+    "    if: always()",
+    "    needs: [first]",
+    "    steps:",
+    "      - name: Noop",
+    "        run: echo hi",
+    "",
+  ].join("\n");
+  const chunks = uploadStepChunks(yml);
+  assert.equal(chunks.length, 1, chunks.join("\n---\n"));
+  assert.doesNotMatch(chunks[0], /always\(\)/, "the chunk crossed into the next job's own if: always()");
 });
 
 test("ralph/PROMPT.md's iteration steps 2–5 are CLAUDE.md's steps 2–5 verbatim (#review-1-r2 H7: the wrapper drift at 1.verify.r2.g1)", () => {

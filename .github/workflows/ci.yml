@@ -405,6 +405,7 @@ jobs:
         run: cp target/debug/bundle/dmg/*.dmg "EssayDown-debug-${GITHUB_SHA}.dmg"
 
       - name: Upload macos-debug-dmg
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: macos-debug-dmg
