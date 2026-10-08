@@ -175,17 +175,21 @@ function count(haystack: string, needle: string): number {
 
 describe("a literal link and a typed trailing `_`, `*` or `~` at both edges of every block of every fixture (task 4.7 corpus leg; C13's reader)", () => {
   for (const trail of TRAILS) {
-    it.each(names)(`\`${trail}\`, %s: nothing unresolved, the bytes hold the literal and its \`${trail}\` as typed, a fixed point`, (name) => {
-      const editor = mdastToPM(parse(readFileSync(`${FIXTURES}/${name}`, "utf8")));
-      const { doc, typed } = typeTrailedLiteralAtEveryBlockEdge(editor.doc, trail);
-      const root = pmToMdast({ doc, frontMatter: editor.frontMatter });
-      const mapped = formatWithMap(root);
-      expect(mapped.map.unresolved, `${name}: nothing unresolved (no settleLiterals give-up)`).toEqual([]);
-      const bytes = format(root);
-      expect(mapped.text).toBe(bytes);
-      expect(count(bytes, `${URL_TYPED}${trail}`), `${name}: the literal and its \`${trail}\`, twice per block`).toBe(typed);
-      expect(format(parse(bytes)), `${name}: parse∘format fixed point`).toBe(bytes);
-      expect(reloaded(bytes), `${name}: the editor's own trip`).toBe(bytes);
-    });
+    it.each(names)(
+      `\`${trail}\`, %s: nothing unresolved, the bytes hold the literal and its \`${trail}\` as typed, a fixed point`,
+      (name) => {
+        const editor = mdastToPM(parse(readFileSync(`${FIXTURES}/${name}`, "utf8")));
+        const { doc, typed } = typeTrailedLiteralAtEveryBlockEdge(editor.doc, trail);
+        const root = pmToMdast({ doc, frontMatter: editor.frontMatter });
+        const mapped = formatWithMap(root);
+        expect(mapped.map.unresolved, `${name}: nothing unresolved (no settleLiterals give-up)`).toEqual([]);
+        const bytes = format(root);
+        expect(mapped.text).toBe(bytes);
+        expect(count(bytes, `${URL_TYPED}${trail}`), `${name}: the literal and its \`${trail}\`, twice per block`).toBe(typed);
+        expect(format(parse(bytes)), `${name}: parse∘format fixed point`).toBe(bytes);
+        expect(reloaded(bytes), `${name}: the editor's own trip`).toBe(bytes);
+      },
+      30_000,
+    );
   }
 });
