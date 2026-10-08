@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { caretToEndOf, clickCentreOf, deleteBackward, reloadPage, typeText } from "./routes.js";
+import { parse } from "../../../packages/core/src/index.js";
+import { mdastToPM } from "../../../packages/editor/src/schema.js";
+import { caretToEndOf, clickCentreOf, deleteBackward, editableTextOf, reloadPage, typeText } from "./routes.js";
 
 // Autosave and external-change handling (task 2.5): an edit reaches the disk as canonical Markdown
 // 500 ms later; the watcher (`watch_folder` → `fs:changed`) reloads a clean document silently and
@@ -66,6 +68,66 @@ async function openThroughRestore(folder: string, file: string): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function essaydownCursor(): Promise<number | null> {
+  return browser.execute(() => {
+    const hook = (window as unknown as { __essaydown?: { cursor(): number | null } }).__essaydown;
+    if (hook === undefined) throw new Error("window.__essaydown is not installed");
+    return hook.cursor();
+  });
+}
+
+async function essaydownMarkdown(): Promise<string> {
+  return browser.execute(() => {
+    const hook = (window as unknown as { __essaydown?: { markdown(): string } }).__essaydown;
+    if (hook === undefined) throw new Error("window.__essaydown is not installed");
+    return hook.markdown();
+  });
+}
+
+/** The ProseMirror end position of the last textblock of the document `markdown` parses to (that
+ * block's offset + 1 + its content size). */
+function lastTextblockEnd(markdown: string): number {
+  const { doc } = mdastToPM(parse(markdown));
+  let end = -1;
+  doc.forEach((node, offset) => {
+    end = offset + 1 + node.content.size;
+  });
+  assert.ok(end >= 0, "the document has no textblock");
+  return end;
+}
+
+/**
+ * `caretToEndOf`, confirmed in the editor's own state (the store's cursor) and its focus — this
+ * click is the first pointer event after `openThroughRestore`'s reload, before which the editor
+ * holds no focus at all (source-toggle.spec.ts `caretAtHeading`, DECISIONS #055; lesson [3.25]). A
+ * click whose caret or focus the editor does not confirm is made again.
+ */
+async function caretAtEndConfirmed(blockSelector: string): Promise<void> {
+  let lastCursor: number | null = null;
+  let lastFocused = false;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await caretToEndOf(EDITOR, blockSelector);
+    const end = lastTextblockEnd(await essaydownMarkdown());
+    const placed = await browser
+      .waitUntil(
+        async () => {
+          lastCursor = await essaydownCursor();
+          lastFocused = await browser.execute(
+            (sel) => document.activeElement === document.querySelector(sel),
+            EDITOR,
+          );
+          return lastCursor === end && lastFocused;
+        },
+        { timeout: 1500, interval: 25 },
+      )
+      .catch(() => false);
+    if (placed) return;
+  }
+  assert.fail(
+    `the click never put the editor's caret at the end with focus (cursor ${lastCursor}, focused ${lastFocused})`,
+  );
 }
 
 describe("autosave and external changes", () => {
@@ -245,8 +307,44 @@ describe("autosave and external changes", () => {
 
   it("opening another file saves a pending edit first instead of dropping it", async () => {
     await openThroughRestore(workspace, "a.md");
-    await caretToEndOf(EDITOR, `${EDITOR} p:last-child`);
+    await caretAtEndConfirmed(`${EDITOR} p:last-child`);
     await typeText(EDITOR, "Q");
+
+    // Guard (b): the keystroke reached the editor before the switch, not dropped on the way —
+    // 300 ms is the product's 500 ms save debounce (document-sync.ts `saveDelayMs`) minus margin,
+    // never a measured duration, so the click below still lands inside the pending window.
+    const targetText = "By a sync tool.Q";
+    const targetMarkdown = "# Rewritten\n\nBy a sync tool.Q\n";
+    let lastEditorText = "";
+    let lastMarkdown = "";
+    let lastActive: { tag: string | null; testId: string | null } = { tag: null, testId: null };
+    const delivered = await browser
+      .waitUntil(
+        async () => {
+          lastEditorText = await editableTextOf(`${EDITOR} p:last-child`);
+          lastMarkdown = await essaydownMarkdown();
+          lastActive = await browser.execute(() => ({
+            tag: document.activeElement?.tagName ?? null,
+            testId: document.activeElement?.getAttribute("data-testid") ?? null,
+          }));
+          return lastEditorText === targetText && lastMarkdown === targetMarkdown;
+        },
+        { timeout: 300, interval: 25 },
+      )
+      .catch(() => false);
+    assert.ok(
+      delivered,
+      `the keystroke never reached the editor: text "${lastEditorText}", markdown "${lastMarkdown}", ` +
+        `active <${lastActive.tag} data-testid="${lastActive.testId}">`,
+    );
+
+    // The premise: the edit is still pending (unsaved) when the switch below is clicked.
+    assert.equal(
+      readFileSync(doc, "utf8"),
+      "# Rewritten\n\nBy a sync tool.\n",
+      "the edit is still pending when the switch is clicked",
+    );
+
     // At once, inside the 500 ms window: the pane for a.md unmounts, and its timer with it.
     await clickCentreOf('[data-testid="tree-entry:crlf.md"]');
     await waitFor(
