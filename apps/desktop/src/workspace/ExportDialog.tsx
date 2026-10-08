@@ -12,7 +12,7 @@ export type ExportDialogProps = {
   onWarning: (message: string) => void;
 };
 
-type Preset = "docx" | "html" | "other";
+type Preset = "docx" | "html" | "pdf" | "epub" | "other";
 
 function formatFor(preset: Preset, other: string): string {
   return preset === "other" ? other.trim() : preset;
@@ -25,7 +25,8 @@ function notSavedMessage(flush: "conflict" | "failed"): string {
 }
 
 /**
- * File → Export (task 4.3's description): DOCX / HTML / an "Other" pandoc writer name, pandoc's
+ * File → Export (task 4.3's description, task 4.4 adds PDF and EPUB): DOCX / HTML / PDF / EPUB /
+ * an "Other" pandoc writer name, pandoc's
  * stderr streamed live as it arrives (`export:progress`, `export.rs`'s own sibling of `fs:changed`),
  * and `reveal_in_folder` on success. A missing-image warning does not fail the export (lesson
  * [4.0]) — it closes this dialog exactly as a clean export does, and is reported to `onWarning`
@@ -91,6 +92,14 @@ export default function ExportDialog({ io, docPath, onClose, onWarning }: Export
         <label className="settings-row">
           <input type="radio" name="export-format" data-testid="export-format-html" checked={preset === "html"} onChange={() => selectPreset("html")} />
           HTML
+        </label>
+        <label className="settings-row">
+          <input type="radio" name="export-format" data-testid="export-format-pdf" checked={preset === "pdf"} onChange={() => selectPreset("pdf")} />
+          PDF
+        </label>
+        <label className="settings-row">
+          <input type="radio" name="export-format" data-testid="export-format-epub" checked={preset === "epub"} onChange={() => selectPreset("epub")} />
+          EPUB
         </label>
         <label className="settings-row">
           <input type="radio" name="export-format" data-testid="export-format-other" checked={preset === "other"} onChange={() => selectPreset("other")} />

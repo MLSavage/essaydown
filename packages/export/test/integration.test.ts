@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { XMLParser } from "fast-xml-parser";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { parse } from "../../core/src/parse.js";
 import { buildPandocArgs, isMissingResourceWarning, outputPathFor, resourceDirFor } from "../src/index.js";
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -28,6 +29,36 @@ interface IndexEntry {
 
 const index = JSON.parse(readFileSync(`${FIXTURES}/index.json`, "utf8")) as Record<string, IndexEntry>;
 const sectionCount = index[FIXTURE_DOC].sectionCount;
+
+type MdNode = ReturnType<typeof parse>["children"][number];
+type WithText = MdNode & { readonly value?: string; readonly children?: readonly WithText[] };
+
+/** `root`'s own characters, never a hand-copied transcription (CLAUDE.md): every text node's
+ * value, joined, so a heading's or a table cell's rewrapped bytes still read as one string. */
+function textOf(node: WithText): string {
+  if (node.type === "text") return node.value ?? "";
+  if (node.children !== undefined) return node.children.map(textOf).join("");
+  return "";
+}
+
+const fixtureRoot = parse(readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8"));
+const fixtureHeadings = (fixtureRoot.children as readonly WithText[])
+  .filter((node) => node.type === "heading")
+  .map(textOf);
+const fixtureTables = (fixtureRoot.children as readonly WithText[]).filter((node) => node.type === "table");
+// One cell from each of the 2 tables (task 4.4 acceptance): the first body row's first cell.
+const fixtureTableCells = fixtureTables.map((table) => textOf((table.children as readonly WithText[])[1].children![0]));
+// The code-block text (task 4.4 acceptance): a token with no internal whitespace, read off the
+// fixture's own fenced code blocks, so a pandoc/typst line-wrap cannot split it apart.
+const fixtureCodeBlocks = (fixtureRoot.children as readonly WithText[]).filter((node) => node.type === "code");
+const codeToken = fixtureCodeBlocks.flatMap((code) => (code.value ?? "").match(/pen_safety=\w+/) ?? []).at(0);
+
+/** Collapses pandoc's own line-wrapping (`--wrap=auto`'s default breaks a heading's text across
+ * two source lines at ~72 columns) to one run of spaces, so a content check reads the same text a
+ * reader would see rendered, never pandoc's own line-wrap choice. */
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ");
+}
 
 let pandocVersion = "";
 beforeAll(() => {
@@ -124,6 +155,88 @@ describe("HTML export of essay-fixture (task 4.3 acceptance)", () => {
       execFileSync("html-validate", ["--config", configPath, htmlPath], { encoding: "utf8", stdio: "pipe" }),
     ).not.toThrow();
   });
+
+  it("contains the 12 headings and both <table> elements (task 4.4 acceptance)", () => {
+    const dir = tempDir();
+    const outPath = outputPathFor(FIXTURE_DOC, "html");
+    const resourceDir = resourceDirFor(FIXTURE_DOC);
+    const args = [...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "html" }), "--metadata", "lang=en"];
+    const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
+    const result = runPandoc(FIXTURES, args, source);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const html = normalizeWhitespace(readFileSync(join(dir, outPath), "utf8"));
+    expect(fixtureHeadings).toHaveLength(sectionCount);
+    for (const heading of fixtureHeadings) expect(html).toContain(heading);
+    expect(html.match(/<table/g) ?? []).toHaveLength(2);
+  });
+});
+
+describe("PDF export of essay-fixture (task 4.4 acceptance, DECISIONS #004 pipeline)", () => {
+  it("has >= 3 pages, 2 embedded images, and pdftotext contains the 12 headings, the code-block text and one cell from each of the 2 tables", () => {
+    const dir = tempDir();
+    const outPath = outputPathFor(FIXTURE_DOC, "pdf");
+    const resourceDir = resourceDirFor(FIXTURE_DOC);
+    const args = buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "pdf" });
+    const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
+    const result = runPandoc(FIXTURES, args, source);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const pdfPath = join(dir, outPath);
+    // `pdfinfo` (poppler, CLAUDE.md's external-reader rule): the pinned tool's own page count.
+    const info = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+    const pages = Number(info.match(/^Pages:\s+(\d+)/m)?.[1]);
+    expect(pages).toBeGreaterThanOrEqual(3);
+
+    // `pdfimages -list`: one row per embedded image (the fixture's own 2, per DECISIONS #004).
+    const imagesList = execFileSync("pdfimages", ["-list", pdfPath], { encoding: "utf8" });
+    const imageRows = imagesList.trim().split("\n").slice(2);
+    expect(imageRows).toHaveLength(2);
+
+    const textPath = join(dir, "essay.txt");
+    execFileSync("pdftotext", [pdfPath, textPath]);
+    const text = normalizeWhitespace(readFileSync(textPath, "utf8"));
+    expect(fixtureHeadings).toHaveLength(sectionCount);
+    for (const heading of fixtureHeadings) expect(text).toContain(heading);
+    expect(fixtureTableCells).toHaveLength(2);
+    for (const cell of fixtureTableCells) expect(text).toContain(cell);
+    expect(codeToken).toBeDefined();
+    expect(text).toContain(codeToken as string);
+  });
+});
+
+describe("EPUB export of essay-fixture (task 4.4 acceptance)", () => {
+  // epubcheck starts a JVM (docker/versions.env's `EPUBCHECK_VERSION`), slower than vitest's
+  // default 5000ms test timeout under the full suite's parallel load.
+  it("passes epubcheck with 0 errors and its XHTML contains the 12 headings", () => {
+    const dir = tempDir();
+    const outPath = outputPathFor(FIXTURE_DOC, "epub");
+    const resourceDir = resourceDirFor(FIXTURE_DOC);
+    // `--metadata title=…`, beyond the fixed invocation, exactly as the HTML test above adds
+    // `--metadata lang=en`: epubcheck's RSC-005 requires `dc:title` in the OPF, which pandoc's epub
+    // writer only emits from an explicit title (the fixture itself has no H1/title to infer one
+    // from) — this package's own `buildPandocArgs` stays the fixed 9-token shape `export.rs` mirrors.
+    const args = [
+      ...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "epub" }),
+      "--metadata",
+      "title=essay-fixture",
+    ];
+    const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
+    const result = runPandoc(FIXTURES, args, source);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    expect(() => execFileSync("epubcheck", [epubPath], { encoding: "utf8", stdio: "pipe" })).not.toThrow();
+
+    // Pandoc's epub writer splits chapters at H1 (`--split-level=1`'s default); the fixture has no
+    // H1 of its own, so every section lands in the one chapter file.
+    const xhtml = normalizeWhitespace(execFileSync("unzip", ["-p", epubPath, "EPUB/text/ch001.xhtml"], { encoding: "utf8" }));
+    expect(fixtureHeadings).toHaveLength(sectionCount);
+    for (const heading of fixtureHeadings) expect(xhtml).toContain(heading);
+  }, 20000);
 });
 
 describe("a missing image (task 4.3 acceptance: warning, not failure)", () => {

@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Paragraph, Root, Text } from "mdast";
+import type { Heading, Paragraph, Root, Text } from "mdast";
 import { blocksOf } from "../../../packages/core/src/blocks.js";
 import { format } from "../../../packages/core/src/format.js";
 import { parse } from "../../../packages/core/src/parse.js";
 import { applyNewQuestion, applySetQuestion } from "../../../packages/core/src/outline.js";
+import { outputPathFor } from "../../../packages/export/src/index.js";
 import { applyAddVariant, applyUseVariant } from "../../../packages/core/src/rewrite.js";
 import { applyReorderSentences, emptySidecar, type DocumentState } from "../../../packages/core/src/sidecar.js";
 import { caretAtText, clickCentreOf, dragBetween, editableTextOf, pressModChord, reloadPage, typeText } from "./routes.js";
@@ -68,6 +70,14 @@ for (const text of [...TOPIC_QUESTIONS, ...BODIES.flat(), REWRITE_VARIANT]) {
 
 function headingIndices(root: Root): number[] {
   return root.children.flatMap((node, index) => (node.type === "heading" ? [index] : []));
+}
+
+/** A heading's own text, read off the tree rather than the question strings typed in Outline:
+ * `applySetQuestion` sets a heading's sidecar question (the hint widget), never its Markdown
+ * text, so heading 0 keeps its original "Untitled-1" title throughout this workflow. */
+function headingText(root: Root, at: number): string {
+  const heading = root.children[at] as Heading;
+  return heading.children.map((child) => (child as Text).value).join("");
 }
 
 function paragraph(text: string): Paragraph {
@@ -415,5 +425,41 @@ describe("the one workflow (task 3.6, PRD §3 steps 1-6)", () => {
     assert.equal(after.snapshots, before.snapshots, "toggling source and back changed the snapshot count");
     await waitForDisk(doc, GOLDEN, "the essay on disk changed after toggling source and back");
     assert.equal(readFileSync(doc, "utf8"), GOLDEN);
+  });
+
+  // Task 4.4: File → Export, through the real sidecar (the shipped `pandoc_args`/`buildPandocArgs`
+  // shape, --pdf-engine=typst), driven through the UI rather than a direct pandoc spawn (that is
+  // packages/export/test/integration.test.ts's own job, on essay-fixture.md's bigger corpus — 12
+  // headings, 2 tables, code blocks — none of which this workflow's 3-question essay carries).
+  it("step 7: Export — the final essay to PDF, validated with pdftotext", async function () {
+    this.timeout(60000);
+    await clickCentreOf('[data-testid="export-document"]');
+    await browser.waitUntil(
+      () => browser.execute(() => document.querySelector('[data-testid="export-dialog"]') !== null),
+      { timeout: 5000, interval: 50, timeoutMsg: "the export dialog never opened" },
+    );
+
+    await clickCentreOf('[data-testid="export-format-pdf"]');
+    await clickCentreOf('[data-testid="export-run"]');
+    await browser.waitUntil(
+      () => browser.execute(() => document.querySelector('[data-testid="export-dialog"]') === null),
+      { timeout: 20000, interval: 50, timeoutMsg: "the export dialog never closed after Export" },
+    );
+    assert.equal(
+      await browser.execute(() => document.querySelector('[data-testid="export-error"]')?.textContent ?? null),
+      null,
+      "the export reported an error",
+    );
+
+    const pdfPath = join(workspace, outputPathFor(FILE, "pdf"));
+    const text = execFileSync("pdftotext", [pdfPath, "-"], { encoding: "utf8" });
+    // Headings 1 and 2's own text is the typed question (`applyNewQuestion`); heading 0 keeps its
+    // original "Untitled-1" title — `applySetQuestion` sets only its sidecar question, never its
+    // Markdown text (`headingText`'s own doc comment).
+    const golden = parse(GOLDEN);
+    for (const at of headingIndices(golden)) {
+      const heading = headingText(golden, at);
+      assert.ok(text.includes(heading), `pdftotext output is missing the heading ${JSON.stringify(heading)}`);
+    }
   });
 });

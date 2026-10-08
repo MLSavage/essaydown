@@ -50,6 +50,13 @@ export async function exportDocument(
   if (flush === "conflict" || flush === "failed") return { status: "not-saved", flush };
   const contents = await io.readDoc(docPath);
   const outcome = await io.runExport({ path: docPath, outPath, format, contents });
-  await io.reveal(outcome.outPath);
+  // Best-effort OS integration (there is no cross-desktop-environment reveal on Linux, `export.rs`'s
+  // own comment): a reveal failure (no `xdg-open`, no file manager) is not an export failure — the
+  // file pandoc wrote is not undone by it, so it never turns a successful export into a thrown one.
+  try {
+    await io.reveal(outcome.outPath);
+  } catch {
+    // intentionally ignored
+  }
   return { status: "exported", outcome };
 }

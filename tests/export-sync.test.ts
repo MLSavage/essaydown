@@ -78,4 +78,15 @@ describe("exportDocument", () => {
     expect(calls).toContain("reveal:renamed-by-pandoc.html");
     expect(calls).not.toContain("reveal:essay.html");
   });
+
+  it("still reports the export as exported when reveal itself fails (task 4.4: no xdg-open in this container)", async () => {
+    const { io, calls } = fakeIO("clean", CLEAN_OUTCOME);
+    io.reveal = async (path) => {
+      calls.push(`reveal:${path}`);
+      throw new Error("No such file or directory (os error 2)");
+    };
+    const result = await exportDocument(io, "essay.md", "essay.docx", "docx");
+    expect(result).toEqual({ status: "exported", outcome: CLEAN_OUTCOME });
+    expect(calls).toEqual(["flush", "readDoc:essay.md", "runExport", "reveal:essay.docx"]);
+  });
 });
