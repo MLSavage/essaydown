@@ -109,12 +109,53 @@ jobs:
         shell: bash
         run: npm install -g "html-validate@${HTML_VALIDATE_VERSION}"
 
+      # tauri_build::try_build (apps/desktop/src-tauri/build.rs) requires the externalBin entry
+      # matching *this runner's own* target triple to exist on every cargo build, not only
+      # `tauri build`'s bundling step (task 4.2's clean-checkout repair) — `pnpm install`'s own
+      # postinstall hook already runs this pipeline, but it is repeated here explicitly so a
+      # disabled or skipped lifecycle script doesn't silently leave cargo test unbuildable. Moved
+      # ahead of Lint/Test (task 4.16) so the copy below can put pandoc/typst on PATH before
+      # anything that spawns them runs.
+      - name: Fetch and verify the real sidecar archives
+        shell: bash
+        run: pnpm fetch-sidecars
+
+      - name: Assemble the 6 distributables (lipo on macOS)
+        shell: bash
+        run: pnpm assemble-sidecars
+
+      # packages/export/test/integration.test.ts spawns `pandoc` by bare name (export.rs's own
+      # route), but nothing put it on this job's PATH (task 4.16; DECISIONS #063 a1 (1)): the
+      # pinned sidecar bytes the product ships are assembled into apps/desktop/src-tauri/binaries/
+      # under target-triple names only. Copies this runner's own pair (the host triple
+      # `tauri_build::try_build` uses, read the same way) onto PATH — no apt/brew/choco install of
+      # either, since the shipped, sha256-pinned bytes are what must be proven to work.
+      - name: Put the pinned sidecars on PATH (pandoc, typst)
+        shell: bash
+        run: |
+          set -e
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          ext=""
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            ext=".exe"
+          fi
+          mkdir -p "${RUNNER_TEMP}/sidecar-bin"
+          cp "apps/desktop/src-tauri/binaries/pandoc-${host}${ext}" "${RUNNER_TEMP}/sidecar-bin/pandoc${ext}"
+          cp "apps/desktop/src-tauri/binaries/typst-${host}${ext}" "${RUNNER_TEMP}/sidecar-bin/typst${ext}"
+          chmod 0755 "${RUNNER_TEMP}/sidecar-bin/pandoc${ext}" "${RUNNER_TEMP}/sidecar-bin/typst${ext}"
+          echo "${RUNNER_TEMP}/sidecar-bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/sidecar-bin/pandoc${ext}" --version | head -1
+          "${RUNNER_TEMP}/sidecar-bin/typst${ext}" --version
+
       - name: Print tool versions
         shell: bash
         run: |
           epubcheck --version
           npx html-validate --version
           pdfimages -v
+          command -v pandoc typst
+          pandoc --version | head -1
+          typst --version
 
       - name: Lint
         shell: bash
@@ -124,18 +165,50 @@ jobs:
         shell: bash
         run: pnpm test 2>&1 | tee test.log
 
-      # tauri_build::try_build (apps/desktop/src-tauri/build.rs) requires the externalBin entry
-      # matching *this runner's own* target triple to exist on every cargo build, not only
-      # `tauri build`'s bundling step (task 4.2's clean-checkout repair) — `pnpm install`'s own
-      # postinstall hook already runs this pipeline, but it is repeated here explicitly so a
-      # disabled or skipped lifecycle script doesn't silently leave cargo test unbuildable.
-      - name: Fetch and verify the real sidecar archives
+      # Proves the sidecar pair just put on PATH against the real fixture with this package's own
+      # argument shape (task 4.16; DECISIONS #063 a1 (4)/4.verify's `artifactNames`), read by
+      # pinned external readers only (CLAUDE.md), never a full office-suite reader.
+      - name: Export validation (essay-fixture, pinned sidecars)
         shell: bash
-        run: pnpm fetch-sidecars
+        run: |
+          set -e
+          dir="${RUNNER_TEMP}/export-validation"
+          mkdir -p "$dir"
+          exec 2> >(tee "$dir/commands.txt" >&2)
+          tee_pid=$!
+          set -x
+          cd fixtures/markdown
+          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.docx" --pdf-engine=typst -t docx < essay-fixture.md
+          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.pdf" --pdf-engine=typst -t pdf < essay-fixture.md
+          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.html" --pdf-engine=typst -t html --metadata lang=en < essay-fixture.md
+          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.epub" --pdf-engine=typst -t epub --metadata title=essay-fixture < essay-fixture.md
+          {
+            command -v pandoc typst epubcheck html-validate pdfimages
+            pandoc --version | head -1
+            typst --version
+            epubcheck --version
+            npx html-validate --version
+            pdfimages -v
+          } > "$dir/versions.txt" 2>&1
+          pdfinfo "$dir/essay-fixture.pdf" > "$dir/pdfinfo.txt"
+          pdfimages -list "$dir/essay-fixture.pdf" > "$dir/pdfimages-list.txt"
+          pdftotext "$dir/essay-fixture.pdf" - > "$dir/pdftotext.txt"
+          epubcheck "$dir/essay-fixture.epub" > "$dir/epubcheck.txt" 2>&1
+          npx html-validate --config "$GITHUB_WORKSPACE/.htmlvalidate.json" "$dir/essay-fixture.html" > "$dir/html-validate.txt" 2>&1
+          unzip -t "$dir/essay-fixture.docx" > "$dir/unzip-t.txt"
+          for f in essay-fixture.docx essay-fixture.pdf essay-fixture.html essay-fixture.epub; do
+            openssl dgst -sha256 "$dir/$f"
+          done > "$dir/sha256.txt"
+          exec 2>&-
+          wait "$tee_pid" 2>/dev/null || true
 
-      - name: Assemble the 6 distributables (lipo on macOS)
-        shell: bash
-        run: pnpm assemble-sidecars
+      - name: Upload export-validation-${{ matrix.os }}
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: export-validation-${{ matrix.os }}
+          path: ${{ runner.temp }}/export-validation
+          if-no-files-found: ignore
 
       - name: Cargo test
         shell: bash
@@ -506,12 +579,15 @@ jobs:
         shell: bash
         run: |
           app=$(find target/release/bundle/macos -maxdepth 1 -iname "*.app")
-          "$app/Contents/MacOS/pandoc" --version | tee pandoc-version.log
+          ls -l "$app/Contents/MacOS/" | tee pandoc-version.log
+          "$app/Contents/MacOS/pandoc" --version | tee -a pandoc-version.log
 
       - name: Run pandoc --version from inside the built app (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: ./target/release/pandoc.exe --version | tee pandoc-version.log
+        run: |
+          ls -l ./target/release/*.exe | tee pandoc-version.log
+          ./target/release/pandoc.exe --version | tee -a pandoc-version.log
 
       - name: Upload tauri-build-${{ matrix.os }}
         if: always()
@@ -563,5 +639,14 @@ jobs:
         with:
           name: tauri-build
           pattern: tauri-build-*
+          separate-directories: true
+          delete-merged: true
+
+      - name: export-validation
+        if: always()
+        uses: actions/upload-artifact/merge@v4
+        with:
+          name: export-validation
+          pattern: export-validation-*
           separate-directories: true
           delete-merged: true
