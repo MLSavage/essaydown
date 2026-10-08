@@ -1,33 +1,43 @@
-Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 079: `git show handoff/079:docs/handoffs/079-phase-4-4.2h-gate-failed-plan-gate.md`. It is committed on `handoff/079`, stacked on `handoff/078` → `handoff/077` (none in `phase/4` yet; cut from a temporary worktree because Phase 4 is mid-phase), and supersedes 078.
+Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 081: `git show handoff/081:docs/handoffs/081-phase-4-4.2.g1h-gate-failed-plan-gate.md`. It is committed on `handoff/081`, stacked on `handoff/080`, and supersedes 080. Neither is in `phase/4`; the planning commit cherry-picks `phase/4..handoff/081` (2 commits) first.
 
 **State.**
-- Phase 4 is stopped on `PLAN-GATE plan.4.2h.r0`: `GATE-FAILED 4.2h a1` (CI run `37661302525`, all 9 jobs red, evidence `.evidence/ci/4.2h/a1/`). 4.2 passed on its retry (`c58d56a`). `main` = `8aba511`.
-- Diagnosis (handoff 079, "The 4.2h failure"): macOS has no host-triple sidecar (only `*-universal-apple-darwin`); the lipo unit tests run the real `lipo`; Windows `postinstall` writes nothing (likely the run-as-main check) and 10 sidecar tests fail there; ubuntu `url-trail.test.ts:176` (4.7) times out at the default 5 s with no `30_000`; ubuntu `close.spec.ts:52` failed once; `macos-debug-dmg`'s `bundle_dmg.sh` failure predates 4.2.
-- `phase/4` was 2 commits ahead of origin at rotation.
-- The runner is stopped and no watcher is running.
+- Phase 4 stopped at `GATE-FAILED 4.2.g1h a1` / `PLAN-GATE plan.4.2.g1h.r0`. The runner is idle, and `doctor` is clean.
+- 4.11 was replaced by 4.13 (DECISIONS #061). 4.13, 4.12 and 4.2.g1 each passed on attempt 1.
+- In run 37735094293 every macOS and Windows job is green, so the sidecar repair holds. Two ubuntu jobs failed:
+  - the runner conformance test 26: `Upload macos-debug-dmg` lacks `if: always()` (`ci.yml:407`, a gap since 2.13 that 4.2's new job exposed);
+  - `autosave.spec.ts:258`: a pending typed `Q` was lost on a file switch, the second ubuntu lost-edit after close.spec :73.
+- `phase/4` = `77f0c65`, 3 commits ahead of `origin/phase/4` (`efd6e9c`). `main` = `8aba511`. No watcher is running.
 
 Your job this session, in order:
 
-1. Run `ralph/ralph.sh status` (expected: `Phase 4, idle; … plan requests: plan.4.2h.r0:pending; blocked: 4.2h:blocked`) and `ralph/ralph.sh doctor` (clean). Give Michael the one-line state, and hand him `git push origin phase/4` if `git rev-list --count origin/phase/4..phase/4` is non-zero.
-2. PLAN-GATE is a Fable trigger. Write Fable the brief in handoff 079 Next Steps 2 (signal, evidence, one question on the repair's split and scope, answer format). Put anything that becomes Michael's (the pre-existing `bundle_dmg.sh` failure, if proposed for scope) to him before the planning commit.
-3. Answer through the plan protocol (handoff 079 Next Steps 3):
-   - `ralph/ralph.sh plan plan.4.2h.r0`, work in `.wt/plan.4.2h.r0`, first cherry-picking `phase/4..handoff/079` (3 commits);
-   - append the fix task(s) at `4.11`+ and the gate pair `4.2.g1` / `4.2.g1h` in PRD §8, rewire `4.3` from `4.2h` to `4.2.g1h`;
-   - set `EXPECTED_COUNT` (380 now), run `generate-tasks` and `validate-tasks`, read the generated deps of `4.3` with `node -e`;
-   - write the DECISIONS entry (also recording, as the principal's report, Michael's option-(A) choice and its sha256 condition), then commit `wip(plan.4.2h.r0)` with the promise only in the message;
-   - run `ralph/ralph.sh run --phase 4 --dry-run` (expect the plan request), then restart: `tmux send-keys -t essaydown:runner 'ralph/ralph.sh run --phase 4 2>&1 | tee -a .evidence/runner.log' Enter`.
-4. Re-arm the watcher from handoff 079:
+1. Run `ralph/ralph.sh status` (expected: `plan requests: plan.4.2.g1h.r0:pending; blocked: 4.2.g1h:blocked`) and `ralph/ralph.sh doctor` (clean). Give Michael the one-line state and `git push origin phase/4`.
+2. PLAN-GATE is a Fable trigger. Write the brief in handoff 081 Next Steps 2:
+   - the signal;
+   - the evidence (job ids 113172728113 and 113172727958, `.evidence/ci/4.2.g1h/a1/`, the backlog lines at `V1.1-BACKLOG.md:195` and `:203`);
+   - one question, the repair's scope: (i) the `if: always()` line with or without a conformance-test tightening; (ii) autosave :258 as test-only first, as a product task, or filed; (iii) whether it fires close.spec :73's trigger;
+   - the answer format: decision, reasons, confidence, full task texts.
+   Before the brief, run the conformance test's step regex per job to see whether any other upload step holds only by the same chunk accident.
+3. Get Michael's OK for any product-task route on the lost edit (#041 D1). Then answer through the plan protocol:
+   - `ralph/ralph.sh plan plan.4.2.g1h.r0` in `.wt/plan.4.2.g1h.r0`;
+   - cherry-pick `phase/4..handoff/081` first;
+   - fix tasks at `4.14`+, then `4.2.g2`/`4.2.g2h`, with `4.3` rewired to `4.2.g2h`;
+   - `EXPECTED_COUNT` from 385;
+   - `node ralph/generate-tasks.mjs` and `node ralph/validate-tasks.mjs`, then read the deps with `node -e`;
+   - DECISIONS #062;
+   - commit `wip(plan.4.2.g1h.r0)` with the promise only in the message;
+   - `--dry-run` (it must name the plan request), then restart: `tmux send-keys -t essaydown:runner 'ralph/ralph.sh run --phase 4 2>&1 | tee -a .evidence/runner.log' Enter`.
+4. Re-arm the watcher from handoff 081:
    - keep `start=275135`;
-   - use `NR<=k`, where `k` is the RAW grep count (no dedup) at arm time (18 at rotation);
+   - use `NR<=k`, where `k` is the RAW grep count (no dedup) at arm time; recount it;
    - make it a persistent Monitor (30-minute cap);
    - on every expiry, re-arm it, run `status`, and run a catch-up grep;
    - never add a free-text term to its filter.
 5. Handle each stop signal.
-   - `HUMAN_GATE 4.2.g1h`: run `scripts/gate.sh 4.2.g1h` (the gate id) in the background and read its output file (`GATE-FAILED`/`PLAN-GATE` appear only there, not in runner.log). While it runs, read failed jobs with `gh api "repos/{owner}/{repo}/actions/jobs/<id>/logs"`.
+   - `HUMAN_GATE 4.2.g2h`: run `scripts/gate.sh 4.2.g2h` (the gate id) in the background and read its output file (`GATE-FAILED`/`PLAN-GATE` appear only there). Read failed jobs with `gh api "repos/{owner}/{repo}/actions/jobs/<id>/logs"`.
    - Then come 4.3, 4.4 and `HUMAN_GATE 4.verifyh`.
-   - The Phase 4 review set id is `4.5` (from `ralph/tasks.json`). Its reconciliation, `PRINCIPAL 4.5.r0d`, is run by a fresh session, which first cherry-picks `handoff/077`, `handoff/078`, `handoff/079` and any later stacked handoff not yet in `phase/4`.
+   - The Phase 4 review set id is `4.5` (from `ralph/tasks.json`). Its reconciliation, `PRINCIPAL 4.5.r0d`, is run by a fresh session, which first cherry-picks any stacked handoff not yet in `phase/4`.
 6. Rotate (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
-   - While Phase 4 is mid-phase, a handoff goes on `handoff/NNN` from a temporary worktree, stacked on the newest `handoff/NNN` not yet in `phase/4` (`handoff/079` now). The relaunch line is `git show handoff/NNN:docs/handoffs/next-prompt.md | pbcopy && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
+   - While Phase 4 is mid-phase, a handoff goes on `handoff/NNN` from a temporary worktree, stacked on the newest `handoff/NNN` whose content is not yet in `phase/4` (`handoff/081` now, until the plan commit cherry-picks it; compare content, because a cherry-picked ref is never an ancestor). The relaunch line is `git show handoff/NNN:docs/handoffs/next-prompt.md | pbcopy && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
    - At an idle boundary it is `pbcopy < docs/handoffs/next-prompt.md && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
    - Hand Michael `git push origin phase/4` when commits accumulate.
 
