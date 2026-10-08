@@ -8,5 +8,9 @@
   "types": "src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "fast-xml-parser": "5.11.1"
   }
 }

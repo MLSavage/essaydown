@@ -26,6 +26,7 @@
     "@wdio/spec-reporter": "PRD §4 Tests row",
     "@wdio/tauri-service": "PRD §4 Tests row",
     "eslint": "PRD §4 Frontend row",
+    "fast-xml-parser": "PRD §4 Tests row",
     "eslint-config-prettier": "PRD §4 Frontend row",
     "eslint-plugin-react-hooks": "PRD §4 Frontend row",
     "globals": "PRD §4 Frontend row",

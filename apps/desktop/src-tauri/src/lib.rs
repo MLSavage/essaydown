@@ -1,5 +1,6 @@
 mod coach_key;
 mod commands;
+mod export;
 mod menu;
 mod settings;
 mod shell_scope;
@@ -60,6 +61,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::rename_file,
             commands::delete_to_trash,
             commands::reveal_in_folder,
+            commands::export,
             commands::watch_folder,
             commands::save_image,
             commands::get_settings,

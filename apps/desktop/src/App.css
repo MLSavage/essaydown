@@ -331,6 +331,34 @@ button:disabled {
   margin-top: 12px;
 }
 
+.export-progress {
+  margin-top: 12px;
+  max-height: 160px;
+  overflow-y: auto;
+  background-color: #f2f2f2;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 0.85em;
+  white-space: pre-wrap;
+}
+
+.export-warning {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  background-color: #fff3cd;
+  border: 1px solid #d8b86a;
+  color: #6a4f1f;
+  padding: 8px 12px;
+  border-radius: 6px;
+  z-index: 40;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
 .workspace-error {
   position: fixed;
   bottom: 12px;

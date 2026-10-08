@@ -191,6 +191,12 @@ export default defineConfig({
           functions: 27,
           lines: 23,
         },
+        "apps/desktop/src/workspace/ExportDialog.tsx": {
+          statements: 0,
+          branches: 0,
+          functions: 0,
+          lines: 0,
+        },
         "apps/desktop/src/workspace/FileTree.tsx": {
           statements: 0,
           branches: 0,
@@ -206,6 +212,12 @@ export default defineConfig({
         "apps/desktop/src/workspace/document-sync.ts": {
           statements: 97,
           branches: 90,
+          functions: 100,
+          lines: 100,
+        },
+        "apps/desktop/src/workspace/export-sync.ts": {
+          statements: 100,
+          branches: 100,
           functions: 100,
           lines: 100,
         },

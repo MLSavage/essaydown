@@ -18,6 +18,8 @@ import { decideClose } from "./workspace/close-guard";
 import ContextMenu, { type ContextMenuTarget } from "./workspace/ContextMenu";
 import DocumentPane, { loadDocument, type DocumentPaneHandle, type LoadedDocument } from "./workspace/DocumentPane";
 import type { FlushResult } from "./workspace/document-sync";
+import ExportDialog from "./workspace/ExportDialog";
+import type { ExportIO, ExportOutcome } from "./workspace/export-sync";
 import FileTree from "./workspace/FileTree";
 import { basenameOf, dirnameOf, joinRelative, stemOf } from "./workspace/paths";
 import { readLastWorkspace, writeLastWorkspace } from "./workspace/storage";
@@ -75,6 +77,9 @@ function App() {
   // Beside `error`, never over it: a failed save's message stays while the switch waits.
   const [waiting, setWaiting] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  // The missing-image warning (lesson [4.0]): shown beside the export, never thrown as an error.
+  const [exportWarning, setExportWarning] = useState<string | null>(null);
   // PRD §6.3: a mode is a view of the one document store, so it lives here and never in the store.
   const [mode, setModeState] = useState<Mode>(DEFAULT_MODE);
   // Produce's own Esc (§6.3): the mode active just before Produce, so Esc has somewhere to go
@@ -354,6 +359,19 @@ function App() {
     }
   }, []);
 
+  // task 4.3: File → Export. `flush` reuses the open pane's own checked outcome (DECISIONS
+  // #review-2-r0 U1), exactly as `commitRename`'s open-pane branch does above.
+  const exportIO: ExportIO = useMemo(
+    () => ({
+      flush: async () => (await pane.current?.flush()) ?? "clean",
+      readDoc: (path) => invoke<string>("read_doc", { path }),
+      runExport: ({ path, outPath, format, contents }) =>
+        invoke<ExportOutcome>("export", { path, outPath, format, contents }),
+      reveal: (path) => invoke("reveal_in_folder", { path }),
+    }),
+    [],
+  );
+
   const nodes = buildTree(entries);
   const cloudOnlyByPath = new Map(entries.map((e) => [e.path, e.cloudOnly]));
 
@@ -379,6 +397,14 @@ function App() {
             }}
           >
             New File
+          </button>
+          <button
+            type="button"
+            data-testid="export-document"
+            disabled={openPath === null}
+            onClick={() => setExportOpen(true)}
+          >
+            Export…
           </button>
         </div>
         {root === null ? (
@@ -460,6 +486,17 @@ function App() {
       )}
       {settingsOpen && (
         <SettingsDialog io={settingsIO} onClose={() => setSettingsOpen(false)} onTypewriterScrollChange={setTypewriterScroll} />
+      )}
+      {exportOpen && openPath !== null && (
+        <ExportDialog io={exportIO} docPath={openPath} onClose={() => setExportOpen(false)} onWarning={setExportWarning} />
+      )}
+      {exportWarning !== null && (
+        <div className="export-warning" data-testid="export-warning" role="status">
+          {exportWarning}
+          <button type="button" data-testid="export-warning-dismiss" onClick={() => setExportWarning(null)}>
+            Dismiss
+          </button>
+        </div>
       )}
     </div>
   );

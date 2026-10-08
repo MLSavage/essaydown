@@ -10,6 +10,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_fs::FsExt;
 
 use crate::coach_key::{has_coach_key_with, BackendStatus, CoachKeyState, HasCoachKeyResult, ENV_VAR};
+use crate::export::{self, ExportError, ExportOutcome};
 use crate::settings::{read_settings_at, write_settings_at, SettingsError};
 use crate::workspace::{
     self, delete_to_trash_at, read_doc_at, read_sidecar_at, save_image_at, write_doc_at,
@@ -196,6 +197,28 @@ pub fn reveal_in_folder(
 ) -> Result<(), WorkspaceError> {
     let resolved = workspace::resolve_for_reveal(&current_root(&state)?, &path)?;
     reveal(&resolved)
+}
+
+/// `export` (PRD §6.4): `path` is the open document (must already exist; its own directory becomes
+/// pandoc's `--resource-path`), `out_path` is the workspace-relative output file the frontend
+/// computed (`packages/export`'s `outputPathFor`), both resolved through the same `WorkspaceRoot`
+/// contract as every other path-taking command. `contents` is the frontend's already-settled
+/// Markdown (CLAUDE.md: export settles the pending source burst before it reads, same as save).
+#[tauri::command]
+pub async fn export<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: tauri::State<'_, WorkspaceState>,
+    path: String,
+    out_path: String,
+    format: String,
+    contents: String,
+) -> Result<ExportOutcome, ExportError> {
+    let root = current_root(&state)?;
+    workspace::resolve_workspace_path(&root, &path, false)?;
+    workspace::resolve_workspace_path(&root, &out_path, false)?;
+    let resource_dir = export::resource_dir_of(&path);
+    let args = export::pandoc_args(&resource_dir, &out_path, &format);
+    export::run_pandoc(&app, &root, &out_path, &args, &contents).await
 }
 
 /// Reveals `path` in the OS file manager: `open -R` selects the file on macOS, `explorer /select,`
