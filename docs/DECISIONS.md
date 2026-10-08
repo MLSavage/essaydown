@@ -1351,3 +1351,48 @@ verdict: PASS
 - **Backlog.** Four lines `[plan.4.2h.r0, …]`: close.spec :73 (first instance), macos-debug-dmg `bundle_dmg.sh` (first instance; Michael on recurrence), the macOS universal target (trigger: 6.1), and Windows tar.xz via the host tar.
 - **For the Phase 4 review set.** `.evidence/ci/4.2h/` holds a1, rejected. `4.2h` is superseded by `4.2.g1h`.
 - **Reversal.** Before integration: `ralph/ralph.sh plan-abandon plan.4.2h.r0 --reason "planning change for 4.2h withdrawn"` (the gate stays `blocked`). After integration: a new planning commit. a1 has remote side effects and is kept as a record (§2).
+
+## #061-4.11-stuck-replaced-by-4.13 (2026-10-08, principal; Fable consulted on STUCK after three attempts (PRINCIPAL.md "Model and escalation"); Michael's OK for the route, with two conditions; manual procedure by #052's route, runner idle mid-phase, planning commit on the host checkout on `phase/4`, #017)
+
+- **What happened.** 4.11 (the 4.2h sidecar repair from #060) was `STUCK` after 3 attempts. Every deliverable except acceptance (5) was committed and green in code commit `6147620`: lint, 80 test files / 7883 tests, cargo 87, and a named test per guard. Acceptance (5) read "`pnpm tauri build` succeeds in the container and the Linux app contains the Linux binaries".
+  - `tauri.conf.json` has `"targets": "all"`, so the build also makes an rpm. The rpm bundler's default payload compression (Gzip level 6, per the installed @tauri-apps/cli 2.11.4 schema) over the ~225 MB of real sidecars (pandoc 175334896 B, typst 48655936 B) ran past CLAUDE.md's `timeout 540` bound:
+    - twice inside the full build (a1);
+    - `--bundles rpm` alone, `real 9m0.034s`, rc 124 (a1 and a2).
+  - With `compression: none` through a CLI `--config` override, the rpm built in 29 s (a3).
+  - Each attempt refused to count a variant command as the bare one, and none edited `tauri.conf.json`. Stopping without deciding was correct.
+  - The principal copied the sentence verbatim from 4.2's acceptance at #060, so the defect is the principal's text. Evidence: `.evidence/tasks/4.11/{1,2,3}.log` and the three `[4.11]` lessons lines.
+- **Correction of 4.2's journal claim (record only; 4.2 stays passed, its line is not edited; precedent #028, #031).**
+  - 4.2's attempt-2 journal line (2026-10-07T12:22:34Z) says the container `tauri build` made deb, rpm and AppImage with pandoc and typst inside. The run it describes was bounded: `.evidence/tasks/4.2/2.log.integration-failed`, `timeout 540 pnpm tauri build`, EXIT 0.
+  - But it packed the aarch64-Linux dev entries as 192-byte text stand-ins. The deb was 6407450 B, and `file` read `usr/bin/pandoc` as UTF-8 text.
+  - 4.2's final attempt (`.evidence/tasks/4.2/1.log`) made the dev entries real sha256-pinned binaries and never re-ran `tauri build`. So 4.2's clause held only for the stand-in tree.
+  - The first container Linux bundles with real binaries inside are 4.11 a1's deb and AppImage.
+  - Rule: an acceptance sentence copied from a passed task is checked against that task's transcript, for the conditions it was observed under, not against its journal line.
+- **Fable's answer (written brief; decision C, high confidence).** (A)'s bounded per-bundle legs, with two corrections:
+  - The rpm is not a PRD §4 packaging target (Linux is `.AppImage` + `.deb`). It exists only because of `targets: "all"`, so its record is a backlog line about that config, not a deferred product obligation.
+  - No `--config` rpm leg. It proves a configuration nothing ships, the container has no `rpm2cpio` (a3: `command not found`), and naming an override invites the variant argument that stopped 4.11 three times.
+  - The container legs are kept because no CI job bundles Linux before 6.1: ci.yml's `tauri-build` matrix is macOS and Windows only. They are the only check that 4.13's four new slice copies stay out of a Linux bundle.
+  - (B), changing `tauri.conf.json`, is product config inside a gate repair (#021). The principal verified the PRD §4 row, the ci.yml matrix, `rpm2cpio`, 4.2's stand-ins and the schema default.
+- **Measured leg times (Michael's condition; read by the principal from `.evidence/tasks/4.11/1.log`).**
+  - `--bundles appimage`, standalone: 03:11:23.4 → 03:13:12.7, **109 s**, rc 0. The warm compile took 20.15 s. AppDir `usr/bin/` holds desktop, pandoc and typst.
+  - `--bundles deb`: **never run standalone.** In the warm full build that started 02:52:42 (compile 20.65 s), the `.deb` (68704828 B) has mtime 02:53, so compile plus deb took **at most ~77 s**. This is an upper bound read from file times, not a measured leg.
+  - 4.13's acceptance makes its journal quote each leg's own `rc=` and compile line.
+- **Michael's answers (2026-10-08).** Route 1 (Fable's), after the principal confirmed two conditions:
+  - (a) `6147620` carries the full diff of `abandoned/4.11`: `git diff <merge-base> abandoned/4.11 -- . ':!docs'` is byte-identical to `git diff 6147620^ 6147620`. The branch's other commits are journal stubs, completions and lessons.
+  - (b) It carries no mutation residue. The principal read the whole source diff, and every hunk maps to a clause of 4.11's description. The test diff has no `.only`, `.skip`, probe output or `process.env.PATH`. The three fixtures under `tests/fixtures/sidecars/` are single-member archives of 9–12 bytes.
+  - And the measured times above, quoted here.
+- **The procedure.**
+  1. `ralph/ralph.sh abandon 4.11 --reason "acceptance (5) unmeetable within the 540 s bound; replaced by 4.13 (DECISIONS #061)"`. `.wt/4.11` was clean. `task/4.11` became `abandoned/4.11`, tip `9cc240b04d2fd973bab0dfd983723d013d4889bc`.
+  2. This planning commit, on `phase/4` from the host checkout while the runner is idle (#017; #052's reasoning for the phase branch):
+     - PRD §8 gains `4.13` (opus, depends on `4.2h`). It is 4.11's text with:
+       - a provenance head, whose first step after the stub is `git cherry-pick 6147620` then `scripts/check`;
+       - a no-`--config` clause and a long-command sentence;
+       - acceptance (5) rewritten as (5a) deb and (5b) AppImage, each bounded, listed and checked byte-for-byte against the aarch64 dev entries, and (5c) naming what is not run;
+       - a widened honest statement.
+     - 4.12 now depends on `4.13`. 4.2.g1's description reads "after 4.13 and 4.12" (text only; 4.2.g1 is pending). 4.11's row is byte-identical.
+     - `tasks.json` was regenerated, and `EXPECTED_COUNT` went 384 → 385. `validate-tasks: OK 385`.
+     - The three `[4.11]` lessons lines are carried verbatim, and the backlog line `[plan.4.11 (#061), rpm bundle under targets "all"]` has trigger 6.1.
+     - 4.11's `- [4.11]` journal lines stay on `abandoned/4.11`.
+  3. `ralph/ralph.sh sync-state`, `doctor`, then `ralph/ralph.sh run --phase 4 --dry-run`, which must name `4.13`. Only then the restart (#051).
+- **Reversal.**
+  - This commit: before the runner starts 4.13, `git revert`, then `ralph/ralph.sh sync-state` (the pending 4.13 record is dropped, and 4.12's old dependency is accepted, since 4.12 is pending). After 4.13 has started: none.
+  - The abandon has no runner reversal. The manual route is `git branch -m abandoned/4.11 task/4.11`, `git worktree add .wt/4.11 task/4.11`, and a `ctx.set` under `withLock` back to `blocked` with 3 attempts (#052's shape), recorded if it is ever run.
