@@ -1,32 +1,29 @@
-Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 085: `git show handoff/085:docs/handoffs/085-phase-4-4.verify.g1h-gate-failed-plan-gate.md`. It is committed on `handoff/085`, stacked on `handoff/084` (based on `phase/4` `3ace704`), and supersedes 084. Neither 084 nor 085 is in `phase/4`; `phase/4..handoff/085` is the one range to cherry-pick.
+Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 086: `git show handoff/086:docs/handoffs/086-phase-4-4.verify.g2h-gate-failed-plan-gate.md`. It is committed on `handoff/086`, based on `phase/4` `4d402c4`, and supersedes 085. Handoffs 084–085 are already in `phase/4`; `phase/4..handoff/086` is the one range to cherry-pick.
 
 **State.**
-- 4.17 was abandoned (`abandoned/4.17`, tip `598bc0c`). Planning commit `803776f` added 4.18 (DECISIONS #064, Michael's OK). 4.18 passed (attempt 2, `d1981fa`). 4.verify.g1 passed (attempt 1, `202cb68`). `phase/4` = `202cb68`; `origin/phase/4` = `8aad1a2` (five behind, unless Michael has pushed). `main` = `8aba511`.
-- **`GATE-FAILED 4.verify.g1h a1` → `PLAN-GATE plan.4.verify.g1h.r0`** (ci.yml run 37806459912 at `202cb68`, evidence `.evidence/ci/4.verify.g1h/a1/`). Four failures, detailed in handoff 085: (1) ubuntu `test`, EPUB epubcheck `Language tag "C"`; (2) windows `test`, html-validate/epubcheck ENOENT plus a PDF leg timing out at 5000 ms; (3) ubuntu `e2e-shell`, step 7 `Converting circular structure to JSON` from the spec's own instrument; (4) macOS `e2e-shell` cancelled after 15 minutes, reason unread.
+- Plan request `plan.4.verify.g1h.r0` integrated as `f47c2ee` (DECISIONS #065; Michael: test + CI only). 4.19, 4.20, 4.21 and 4.verify.g2 each passed on attempt 1. `phase/4` = `origin/phase/4` = `4d402c4`. `main` = `8aba511`.
+- **`GATE-FAILED 4.verify.g2h a1` → `PLAN-GATE plan.4.verify.g2h.r0`** (ci.yml run 37885381286 at `4d402c4`, evidence `.evidence/ci/4.verify.g2h/a1/`). Everything is green except `e2e-shell (macos-latest)`, job 113674101442, where `autosave.spec.ts` failed 5 of 9: the first typed `X` never reached the disk, and the rest cascade. That spec was 9/9 on macOS at 4.verifyh a1 and 3.verify.r3.g2h a1, and no frontend or spec file changed since. One-workflow is 7/7 on all three OSes.
 - The runner is idle, and no watcher is running.
 
 Your job this session, in order:
 
-1. Run `ralph/ralph.sh status` (expect `plan requests: plan.4.verify.g1h.r0:pending; blocked: 4.verify.g1h:blocked`) and `ralph/ralph.sh doctor` (clean). Give Michael the one-line state and `git push origin phase/4` if `git ls-remote origin phase/4` is behind.
-2. Read the four failures' evidence: `gh api "repos/{owner}/{repo}/actions/jobs/<id>/logs"` for jobs 113411908468, 113411908477 and 113411908606, and `gh run view 37806459912 --json jobs` for 113411908679's steps. Failure 3's real step-7 outcome is hidden behind the instrument.
-3. **Fable (PLAN-GATE is a trigger).** Write the brief: the repair graph `.g2` scoped to what failed (#021), with the answer as decision, reasons, confidence, PRD §8 rows and commands.
-4. **Michael's OK** for any product change (#041 D1). The EPUB `dc:language` from `LANG` is a candidate; a test-only `lang=en` is not a product change.
-5. `ralph/ralph.sh plan plan.4.verify.g1h.r0`. In `.wt/plan.4.verify.g1h.r0`:
-   - cherry-pick `phase/4..handoff/085` first;
-   - then the planning commit: PRD §8 rows, `EXPECTED_COUNT`, generate, validate, and a dep read with 4.5's producer → `4.verify.g2`;
-   - its `wip(plan.…)` message carries the plan protocol's promise.
-   Then `--dry-run`, the restart, and the watcher re-armed.
-6. Re-arm the watcher from handoff 085:
+1. Run `ralph/ralph.sh status` (expect `plan requests: plan.4.verify.g2h.r0:pending; blocked: 4.verify.g2h:blocked`) and `ralph/ralph.sh doctor` (clean). Give Michael the one-line state.
+2. Read the macOS autosave evidence: `gh api "repos/{owner}/{repo}/actions/jobs/113674101442/logs"` into a scratch file, `e2e/shell/test/autosave.spec.ts` around :130–175, and the green macOS autosave run in `.evidence/ci/4.verifyh/a1/e2e-shell/`. Name the cause from evidence.
+3. **Fable (PLAN-GATE is a trigger).** Write the brief. The one question: a same-SHA rerun (only for a named transient cause, RUNNER-SPEC §2, #023, #029) or a `.g3` repair scoped to what failed (#021). The answer format: decision, reasons, confidence, PRD §8 rows if any, and commands.
+4. Then do one of these:
+   - `ralph/ralph.sh rerun 4.verify.g2h` with a DECISIONS note committed on `handoff/086` from a temporary worktree, then `scripts/gate.sh 4.verify.g2h` in the background;
+   - or `ralph/ralph.sh plan plan.4.verify.g2h.r0`. In `.wt/plan.4.verify.g2h.r0`, cherry-pick `phase/4..handoff/086` first, then make the planning commit (PRD §8 rows, `EXPECTED_COUNT`, generate, validate, a dep read with 4.5 → `4.verify.g3`); its `wip(plan.…)` message carries the plan protocol's promise. Then `doctor`, `--dry-run`, the restart, and the watcher re-armed.
+5. Re-arm the watcher from handoff 086:
    - keep `start=275135`;
-   - use `NR<=k`, where `k` is the RAW grep count at arm time (47 at writing); recount it;
+   - use `NR<=k`, where `k` is the RAW grep count at arm time (52 at writing); recount it;
    - make it a persistent Monitor (30-minute cap);
    - on every expiry and after every retry, re-arm it, run `status`, and run a catch-up grep;
    - never add a free-text term to its filter.
-7. Handle each later stop signal.
-   - The repair gate `4.verify.g2h`: run `scripts/gate.sh 4.verify.g2h` in the background and read its output file (`GATE-FAILED`/`PLAN-GATE` appear only there).
-   - The Phase 4 review set id is `4.5` (from `ralph/tasks.json`). Its reconciliation, `PRINCIPAL 4.5.r0d`, is run by a fresh session, which first cherry-picks any stacked handoff not yet in `phase/4` (`handoff/084`–`085` now, unless the plan request already carried them).
-8. Rotate (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
-   - While Phase 4 is mid-phase, a handoff goes on `handoff/NNN` from a temporary worktree, stacked on the newest `handoff/NNN` whose content is not yet in `phase/4` (`handoff/085` now; compare content, because a cherry-picked ref is never an ancestor). The relaunch line is `git show handoff/NNN:docs/handoffs/next-prompt.md | pbcopy && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
+6. Handle each later stop signal.
+   - A repair gate: run `scripts/gate.sh <gate>` in the background and read its output file (`GATE-FAILED`/`PLAN-GATE` appear only there).
+   - The Phase 4 review set id is `4.5` (from `ralph/tasks.json`). Its reconciliation, `PRINCIPAL 4.5.r0d`, is run by a fresh session, which first cherry-picks any stacked handoff not yet in `phase/4` (`handoff/086` now, unless a plan request already carried it).
+7. Rotate (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
+   - While Phase 4 is mid-phase, a handoff goes on `handoff/NNN` from a temporary worktree, stacked on the newest `handoff/NNN` whose content is not yet in `phase/4` (`handoff/086` now; compare content, because a cherry-picked ref is never an ancestor). The relaunch line is `git show handoff/NNN:docs/handoffs/next-prompt.md | pbcopy && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
    - At an idle boundary it is `pbcopy < docs/handoffs/next-prompt.md && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
    - Hand Michael `git push origin phase/4` when commits accumulate.
 

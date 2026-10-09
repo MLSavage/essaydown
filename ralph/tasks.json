@@ -6178,52 +6178,124 @@
   ]
  },
  {
+  "id": "4.22",
+  "model": "sonnet",
+  "description": "Phase 4 gate repair 1 of 1 after the 4.verify.g2h GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a); DECISIONS #066; ci.yml run 37885381286 at 4d402c4, ref ci/4.verify.g2/a1; evidence /logs/ci/4.verify.g2h/a1/ — read workflow.log and e2e-shell/e2e-shell-macos-latest/e2e-shell.log before changing anything). `e2e-shell (macos-latest)` (the embedded provider; required since DECISIONS #047): 14 of 15 specs green; `e2e/shell/test/autosave.spec.ts` 4 passing / 5 failing, every failure from the first case, `an edit is on disk as canonical Markdown 600 ms later, with its sidecar` (:146–171): `:153` read `'Hello\\n'` where `'HelloX\\n'` was expected after the `browser.pause(600)` at `:152`; case 2 threw ENOENT on `a.essaydown.json` at `:174` before it typed anything; cases 3–5 read `'HelloX\\n…'` — so the `X` was typed, reached the document and reached the disk, later than the pause. Cause, read in the tree: the save is the 500 ms debounce (`apps/desktop/src/workspace/document-sync.ts:103` `saveDelayMs`, armed from the pane's store effect, `DocumentPane.tsx:238`) plus the `write_doc` IPC (`DocumentPane.tsx:197`), so the pause leaves the product 100 ms on a shared macOS runner. Fourth instance of this signature on macOS (2.verifyh a1, 2.verify.g2h a1, 3.verify.r3h a1, 4.verify.g2h a1) in the 22 macOS gate attempts that carry the case; none on ubuntu or windows; `git log 8aad1a2..4d402c4 -- e2e/shell/test/autosave.spec.ts apps/desktop/src` is empty. The trigger of `[plan.3.verify.r3h.r0, autosave :91 at 600 ms on macOS, third instance]` fired and Michael decided (DECISIONS #066): PRD 2.5 requires of the product \"debounce 500 ms\"; its acceptance's \"wait 600 ms\" is the e2e's wait, a test budget and not a user-facing guarantee. The 500 ms debounce is owned by `tests/document-sync.test.ts:120` (`saves the serialised document once, saveDelayMs after the last edit`, injected timers); the shell e2e proves the exact bytes under the spec's own file-state bound and records the runner's latency, never asserting a wall-clock magnitude (CLAUDE.md; DECISIONS #039; robustness.spec.ts:291–299 is the suite's precedent). Fix, in e2e/shell/test/autosave.spec.ts only: (a) one helper, e.g. `editOnDisk(path: string, expected: string, label: string): Promise<void>`, that takes `Date.now()` before it polls, polls `readFileSync(path, \"utf8\") === expected` through the file's `waitFor` (interval 25) under the file-state bound `3000` already used at `:166` and `:226`, with a timeout message naming `label`, prints exactly one line `[autosave] <label>: on disk after <n> ms` (the `[robustness]` line's shape, robustness.spec.ts:382 — a recorded reading, never asserted and never copied into any bound), then asserts the bytes byte-exact with `assert.equal`; its doc comment states once why the case asserts no 600 ms (the unit test owns the 500 ms debounce with injected timers; the e2e owns the bytes), citing DECISIONS #066. (b) Case 1 alone takes it: `:152`'s `browser.pause(600)` and `:153`'s `assert.equal` become `await editOnDisk(doc, \"HelloX\\n\", \"X\")`; its title becomes `an edit is on disk as canonical Markdown, with its sidecar (the 500 ms debounce is proven with injected timers; DECISIONS #066)`; the sidecar poll at `:155–168` stays as it is. The four sibling `browser.pause(600)` sites (`:181`, `:191`, `:253`, `:297`) are not touched (a gate repair scopes to what failed, DECISIONS #021): cases 2 and 5 read the sidecar after the pause and rely on it covering `write_doc → read_sidecar → write_sidecar`, so a site that takes the helper later also polls until the save's own sidecar write has landed (its raw bytes differ from the bytes the test wrote, because the edit changed the sentences) before its sidecar assertions — never a read that can pass before the write. (c) One line appended to docs/V1.1-BACKLOG.md: `[4.22, autosave :153 at 600 ms on macOS, fourth instance — closes [plan.3.verify.r3h.r0, autosave :91 at 600 ms on macOS, third instance]]` — the four sibling sites listed by line with their construct and the sidecar oracle above; trigger, concrete: any CI gate attempt, on any OS, whose e2e-shell log shows a failing assertion at one of those four `pause(600)` sites → that site (and only it) takes `editOnDisk` plus the sidecar poll in the next `.g<n>` repair; reading: the `[autosave] X: on disk after <n> ms` lines of each accepted gate's three OS logs are read at the Phase 4 reconciliation (4.5.r0d), and a macOS reading above 600 ms on a green run is the evidence a product change to `saveDelayMs` (the backlog's option (ii)) would need, Michael's call under #041 D1. Verification in the container (DECISIONS #059), the spec on both legs, each as one foreground call bounded by `timeout 540` with the tool timeout 600000, output redirected to a file and grepped, never piped into `tail` beside a backgrounded Xvfb: external, `timeout 540 bash -c 'Xvfb :99 -ac & sleep 1; DISPLAY=:99 pnpm --filter @essaydown/e2e-shell test --spec test/autosave.spec.ts' > /tmp/e2e-external.log 2>&1; grep -nE 'passing|failing|\\[autosave\\]' /tmp/e2e-external.log`, and embedded, the same with `ESSAYDOWN_E2E_DRIVER=embedded` before `pnpm` and `/tmp/e2e-embedded.log`; the journal quotes both legs' `passing`/`failing` lines (9 passing, 0 failing) and both `[autosave]` lines; `scripts/check` green. Scope: e2e/shell/test/autosave.spec.ts, docs/V1.1-BACKLOG.md (one appended line), docs/lessons.md (if written), the journal. Nothing under apps/, packages/, scripts/, ralph/, .github/ or e2e/shell/test/routes.ts; `tests/document-sync.test.ts` unchanged; no `.skip()`; no `process.platform`; no number from this run's log in any bound or pause; no manifest or lockfile change; zero new dependencies (PRD §4). Files of passed tasks are edited as files, not records (DECISIONS #016). `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.22` before implementing; each attempt appends its own `- [4.22] ` journal line (lesson [1.29]). After 5 tool calls on one problem: clean break.",
+  "acceptance": "(1) `grep -c 'browser.pause(600)' e2e/shell/test/autosave.spec.ts` is exactly 4 (base 5, quoted from `git show phase/4:e2e/shell/test/autosave.spec.ts | grep -c 'browser.pause(600)'`); `grep -c 'editOnDisk(' e2e/shell/test/autosave.spec.ts` is at least 2 (the definition and one call); `grep -c 'an edit is on disk as canonical Markdown, with its sidecar' e2e/shell/test/autosave.spec.ts` is 1 and `grep -c '600 ms later' e2e/shell/test/autosave.spec.ts` is 0. (2) The journal quotes, from redirected output, the external leg's and the embedded leg's `passing`/`failing` lines for test/autosave.spec.ts (9 passing, no failing) and each leg's `[autosave] X: on disk after <n> ms` line. (3) `grep -n 'process.platform' e2e/shell/test/autosave.spec.ts` prints nothing; no `.skip(`. (4) The backlog line is present: `grep -c 'autosave :153 at 600 ms on macOS, fourth instance' docs/V1.1-BACKLOG.md` is 1. (5) `scripts/check` green. (6) `git diff --name-only \"$(git merge-base HEAD phase/4)\" HEAD` lists only e2e/shell/test/autosave.spec.ts, docs/V1.1-BACKLOG.md, docs/lessons.md (if written) and docs/progress/journal-main.md. (7) No manifest or lockfile change; zero new dependencies (PRD §4). (8) Each attempt appends its own `- [4.22] ` journal line. Honest statement: the macOS runner is proven only by 4.verify.g3h; the container proves both legs green and that the case's bound is the file's own 3000 ms, with the latency recorded, not asserted.",
+  "dependencies": [
+   "4.verify.g2h"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.verify.g3",
+  "model": "sonnet",
+  "description": "Phase 4 verification, repair 3 of 4.verify after the 4.verify.g2h GATE-FAILED at a1 (RUNNER-SPEC §2 rewrite rule (a), §3; DECISIONS #063, #064, #065, #066): freeze dependencies (no lockfile change allowed), run the full suite and the runner conformance suite in the container after 4.22, and confirm the phase head is ready for the three-OS CI run that the CI gate performs. No code, test, fixture or config edit. The backlog hard-stop audit carried by 4.verify is integrated at 8aad1a2 and is not repeated. Each attempt appends its own `- [4.verify.g3] ` journal line (lesson [1.29]).",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `bash ralph/test/run.sh` green, its `# tests`/`# pass`/`# fail` lines quoted in the journal from redirected output (one foreground call bounded by `timeout 540`; the conformance suite is CI-only and ubuntu-only, so the gate is never its first run after a repair); `actionlint .github/workflows/ci.yml` prints nothing; `git diff --stat` against 4.22's integrated commit shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "4.22"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.verify.g3/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "export-validation",
+    "tauri-build"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; the tauri-build log lists `typst` beside `pandoc` in the macOS .app's Contents/MacOS and `typst.exe` beside `pandoc.exe` on Windows (DECISIONS #063, Michael's condition); logs in /logs/ci/4.verify.g3h/accepted/.",
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.verify.g3h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "4.verify.g3",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.verify.g3/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "export-validation",
+    "tauri-build"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "description": "CI gate for 4.verify.g3: scripts/gate.sh 4.verify.g3h pushes integrated_sha of 4.verify.g3 to ci/4.verify.g3/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\",\"export-validation\",\"tauri-build\"] into /logs/ci/4.verify.g3/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + one-workflow steps 1–7 green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three; the tauri-build log lists `typst` beside `pandoc` in the macOS .app's Contents/MacOS and `typst.exe` beside `pandoc.exe` on Windows (DECISIONS #063, Michael's condition); logs in /logs/ci/4.verify.g3h/accepted/.",
+  "dependencies": [
+   "4.verify.g3"
+  ]
+ },
+ {
   "id": "4.5.r0a",
   "model": "claude-opus",
   "execution": "reviewer",
   "reviewer": "claude",
-  "description": "Review attempt r0, claude reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g2h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
+  "description": "Review attempt r0, claude reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
   "acceptance": "/logs/reviews/4/r0/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "4.verify.g2h"
+   "4.verify.g3h"
   ],
   "phase": "4",
   "targetBranch": "phase/4",
   "reviewSet": "4.5",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g2h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
  },
  {
   "id": "4.5.r0b",
   "model": "sol",
   "execution": "reviewer",
   "reviewer": "sol",
-  "description": "Review attempt r0, sol reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g2h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
+  "description": "Review attempt r0, sol reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
   "acceptance": "/logs/reviews/4/r0/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "4.verify.g2h"
+   "4.verify.g3h"
   ],
   "phase": "4",
   "targetBranch": "phase/4",
   "reviewSet": "4.5",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g2h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
  },
  {
   "id": "4.5.r0c",
   "model": "grok",
   "execution": "reviewer",
   "reviewer": "grok",
-  "description": "Review attempt r0, grok reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g2h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
+  "description": "Review attempt r0, grok reviewer, for review set 4.5 (phase 4). Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed).",
   "acceptance": "/logs/reviews/4/r0/grok/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
   "dependencies": [
-   "4.verify.g2h"
+   "4.verify.g3h"
   ],
   "phase": "4",
   "targetBranch": "phase/4",
   "reviewSet": "4.5",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g2h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
  },
  {
   "id": "4.5.r0d",
@@ -6240,7 +6312,7 @@
   "targetBranch": "phase/4",
   "reviewSet": "4.5",
   "reviewAttempt": "r0",
-  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g2h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
+  "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
  },
  {
   "id": "4.close",
