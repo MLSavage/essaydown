@@ -339,13 +339,15 @@ jobs:
       # Same Tauri Linux build deps as the `test` job, plus the two the shell e2e driver route
       # needs (docker/Dockerfile already carries both for the container): webkit2gtk-driver is
       # WebKitWebDriver itself, xauth is what `xvfb-run` needs to create its per-session cookie.
+      # poppler-utils is here too: one-workflow.spec.ts's step 7 (:462) spawns `pdftotext` to read
+      # the exported PDF's text, the same external reader the `test` job already installs.
       - name: Install Tauri Linux build dependencies + webkit2gtk-driver + xvfb (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev poppler-utils \
             webkit2gtk-driver xvfb xauth
 
       # Only Linux drives the app through tauri-driver (e2e/shell/provider.ts); macOS and Windows
@@ -354,6 +356,18 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: cargo install tauri-driver --version "${TAURI_DRIVER_VERSION}" --locked
+
+      # one-workflow.spec.ts's step 7 (:462) spawns `pdftotext` on the exported PDF; macOS and
+      # Windows runners need it installed explicitly, same as the `test` job's identical pair of
+      # steps above (:87-94).
+      - name: Install poppler-utils (macOS)
+        if: runner.os == 'macOS'
+        run: brew install poppler
+
+      - name: Install poppler-utils (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: choco install poppler --yes --no-progress
 
       - name: Build the frontend bundle
         shell: bash
