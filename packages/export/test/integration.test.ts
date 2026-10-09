@@ -99,6 +99,16 @@ function unzipExtract(docxPath: string, member: string): string {
   return execFileSync("unzip", ["-p", docxPath, member], { encoding: "utf8" });
 }
 
+/** Resolves `name` the way the platform's own shell resolves a bare command — `/bin/sh` here,
+ * `cmd.exe` with `PATHEXT` on Windows — so a `.cmd` shim (html-validate) and a shebang script
+ * (epubcheck) both resolve; `execFileSync` without `shell` is CreateProcess directly, which
+ * resolves neither (DECISIONS #065). No OS check of any kind: every argument passed through here
+ * is a mkdtemp path or this repo's own config path, none containing a space, since a
+ * shell-joined command line is otherwise unquoted. */
+function runValidator(name: string, args: string[]): string {
+  return execFileSync(name, args, { encoding: "utf8", stdio: "pipe", shell: true });
+}
+
 describe("DOCX export of essay-fixture (task 4.3 acceptance)", () => {
   it(`runs against the container's pinned pandoc (${pandocVersion === "" ? "version read in beforeAll" : pandocVersion})`, () => {
     expect(pandocVersion.startsWith("pandoc")).toBe(true);
@@ -151,9 +161,7 @@ describe("HTML export of essay-fixture (task 4.3 acceptance)", () => {
 
     const htmlPath = join(dir, outPath);
     const configPath = fileURLToPath(new URL("../../../.htmlvalidate.json", import.meta.url));
-    expect(() =>
-      execFileSync("html-validate", ["--config", configPath, htmlPath], { encoding: "utf8", stdio: "pipe" }),
-    ).not.toThrow();
+    expect(() => runValidator("html-validate", ["--config", configPath, htmlPath])).not.toThrow();
   });
 
   it("contains the 12 headings and both <table> elements (task 4.4 acceptance)", () => {
@@ -174,6 +182,10 @@ describe("HTML export of essay-fixture (task 4.3 acceptance)", () => {
 });
 
 describe("PDF export of essay-fixture (task 4.4 acceptance, DECISIONS #004 pipeline)", () => {
+  // One typst compile plus three poppler spawns, on a runner whose process creation this suite
+  // has measured as slow: 432ms (ubuntu) / 1965ms (macOS) / 7020ms (windows) for this same test
+  // in one CI run (/logs/ci/4.verify.g1h/a1/) — the EPUB leg's own 20000ms budget below, not a
+  // multiple of a container timing (DECISIONS #039).
   it("has >= 3 pages, 2 embedded images, and pdftotext contains the 12 headings, the code-block text and one cell from each of the 2 tables", () => {
     const dir = tempDir();
     const outPath = outputPathFor(FIXTURE_DOC, "pdf");
@@ -204,7 +216,7 @@ describe("PDF export of essay-fixture (task 4.4 acceptance, DECISIONS #004 pipel
     for (const cell of fixtureTableCells) expect(text).toContain(cell);
     expect(codeToken).toBeDefined();
     expect(text).toContain(codeToken as string);
-  });
+  }, 20000);
 });
 
 describe("EPUB export of essay-fixture (task 4.4 acceptance)", () => {
@@ -236,7 +248,7 @@ describe("EPUB export of essay-fixture (task 4.4 acceptance)", () => {
     expect(result.status).toBe(0);
 
     const epubPath = join(dir, outPath);
-    expect(() => execFileSync("epubcheck", [epubPath], { encoding: "utf8", stdio: "pipe" })).not.toThrow();
+    expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
 
     // Pandoc's epub writer splits chapters at H1 (`--split-level=1`'s default); the fixture has no
     // H1 of its own, so every section lands in the one chapter file.
