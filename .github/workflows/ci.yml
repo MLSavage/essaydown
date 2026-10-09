@@ -181,7 +181,7 @@ jobs:
           pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.docx" --pdf-engine=typst -t docx < essay-fixture.md
           pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.pdf" --pdf-engine=typst -t pdf < essay-fixture.md
           pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.html" --pdf-engine=typst -t html --metadata lang=en < essay-fixture.md
-          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.epub" --pdf-engine=typst -t epub --metadata title=essay-fixture < essay-fixture.md
+          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.epub" --pdf-engine=typst -t epub --metadata title=essay-fixture --metadata lang=en < essay-fixture.md
           {
             command -v pandoc typst epubcheck html-validate pdfimages
             pandoc --version | head -1

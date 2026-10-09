@@ -218,10 +218,17 @@ describe("EPUB export of essay-fixture (task 4.4 acceptance)", () => {
     // `--metadata lang=en`: epubcheck's RSC-005 requires `dc:title` in the OPF, which pandoc's epub
     // writer only emits from an explicit title (the fixture itself has no H1/title to infer one
     // from) — this package's own `buildPandocArgs` stays the fixed 9-token shape `export.rs` mirrors.
+    // `--metadata lang=en` is needed too: lacking it, pandoc 3.11's epub writer (EPUB.hs's
+    // `addLanguage`) derives `dc:language` from the process's `LANG` env var (`_` -> `-`, truncated
+    // at the first `.`; `en-US` if unset), and a `C`/`POSIX` locale (this container's, under a
+    // lang-less invocation) yields the bare tag `C`, which epubcheck's OPF-092 rejects
+    // (DECISIONS #065).
     const args = [
       ...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "epub" }),
       "--metadata",
       "title=essay-fixture",
+      "--metadata",
+      "lang=en",
     ];
     const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
     const result = runPandoc(FIXTURES, args, source);
