@@ -130,6 +130,23 @@ async function caretAtEndConfirmed(blockSelector: string): Promise<void> {
   );
 }
 
+/**
+ * Polls `path` until its bytes equal `expected` (the file-state bound `3000` the sidecar-version
+ * and Keep-mine polls below also use, interval 25), asserts the bytes byte-exact, and prints the
+ * measured latency as a reading, never asserted — the 500 ms debounce is proven with injected
+ * timers in `tests/document-sync.test.ts`; this spec owns the bytes on disk only (DECISIONS #066).
+ */
+async function editOnDisk(path: string, expected: string, label: string): Promise<void> {
+  const t0 = Date.now();
+  await waitFor(
+    async () => readFileSync(path, "utf8") === expected,
+    3000,
+    `${label}: the edit never reached disk as "${expected}"`,
+  );
+  console.log(`[autosave] ${label}: on disk after ${Date.now() - t0} ms`);
+  assert.equal(readFileSync(path, "utf8"), expected);
+}
+
 describe("autosave and external changes", () => {
   let workspace: string;
   let doc: string;
@@ -145,12 +162,11 @@ describe("autosave and external changes", () => {
     await openThroughRestore(workspace, "a.md");
   });
 
-  it("an edit is on disk as canonical Markdown 600 ms later, with its sidecar", async () => {
+  it("an edit is on disk as canonical Markdown, with its sidecar (the 500 ms debounce is proven with injected timers; DECISIONS #066)", async () => {
     assert.equal(await exists(NON_CANONICAL), false);
     await caretToEndOf(EDITOR, `${EDITOR} p`);
     await typeText(EDITOR, "X");
-    await browser.pause(600);
-    assert.equal(readFileSync(doc, "utf8"), "HelloX\n");
+    await editOnDisk(doc, "HelloX\n", "X");
     const sidecarPath = join(workspace, "a.essaydown.json");
     let sidecar: { version: number } | undefined;
     await waitFor(
