@@ -6315,13 +6315,202 @@
   "reviewSetDescription": "Review set for Phase 4. Phase checks: Claude and Sol re-run the export validators in their scratch copy; Grok verifies the captured commands, tool versions, hashes and outputs in /logs/ci/4.verify.g3h/accepted/ (structural DOCX validation stands in for an office-suite smoke test; none is installed)."
  },
  {
+  "id": "4.23",
+  "model": "sonnet",
+  "description": "Phase 4 review fix, the export command validates everything it forwards to pandoc (DECISIONS #review-4-r0; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list on 2026-10-10; S3 — Sol r0 finding 3, blocker (security); C5 and C6 — Claude r0 findings 5 and 6, folded in; files of passed tasks 4.2, 4.3 and 4.18, whose records are not edited — DECISIONS #016). Scope: apps/desktop/src-tauri/src/commands.rs, apps/desktop/src-tauri/src/export.rs, apps/desktop/src-tauri/src/shell_scope.rs, apps/desktop/src-tauri/capabilities/default.json, apps/desktop/src-tauri/Cargo.toml (the comment only), docs/V1.1-BACKLOG.md, docs/lessons.md, the journal. Defect (S3): `export` (commands.rs:208-233) passes its `format` argument straight into `-t` (export.rs:98-99); the only grammar check is the dialog's TypeScript (`packages/export/src/index.ts:10`). Pandoc runs with `current_dir(root)` (export.rs:171) and `write_doc` writes any extension inside the workspace (workspace.rs:225-228), so a script in the webview can write `x.lua` and call `export` with `format: \"x.lua\"`: pandoc loads it as a custom writer and runs it as the user (Sol's probe: .evidence/reviews/4/r0/sol/probe-writer.lua, lua-writer-executed.txt). 4.2's capability validators (`-t` = `[a-z][a-z0-9_]*`, default.json) forbid exactly this, but the Rust route never consults them (shell_scope.rs:6-10). (C5) `export` has no IPC-level test, and an `out_path` resolving to `path` or to `path`'s sidecar is accepted, so pandoc overwrites the source non-atomically. (C6) `shell:allow-spawn` grants the webview a pandoc/typst spawn the frontend never calls, with `cwd`/`env` unvalidated (tauri-plugin-shell's `spawn` command). Fix, by behaviour: (i) `export` rejects a `format` outside `^[a-z][a-z0-9_]*$` with a typed `ExportError` variant before any path resolution or spawn; (ii) it rejects an `out_path` that resolves to `path` or to `path`'s sidecar with a typed variant; (iii) the `shell:allow-spawn` entry is removed from capabilities/default.json, shell_scope.rs's tests flip to assert that `plugin:shell|spawn` of each sidecar is denied, and the Cargo.toml comment that calls the capability \"the only thing that can invoke either sidecar\" is corrected. Append to docs/V1.1-BACKLOG.md one line `[4.23, S3 + C5 + C6 fixed]` recording that 4.2's capability-scope clause is superseded by the Rust-side check (DECISIONS #review-4-r0); 4.2's row is not edited. Run the suite as `scripts/check`. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.23` before implementing; each attempt appends its own `- [4.23] ` journal line (lesson [1.29]). Zero new dependencies (PRD §4); no `.skip()`.",
+  "acceptance": "IPC-level cargo tests through `get_ipc_response` for `export`: `format` ∈ {`x.lua`, `../x.lua`, an absolute `.lua` path, `html;x`, `Html`, `\"\"`} each rejected with the format variant; `path` ∈ {`..`, an absolute path, a symlink out of the root, `\"\"`} and `out_path` outside the root each rejected with the workspace variant; `out_path` equal to `path` and to its sidecar each rejected with the new variant — every case asserts the enum variant, never a string; Sol's probe inverted — a Lua writer placed in the workspace and `export(format: \"x.lua\")` leaves no marker file; an accepted `docx` call reaches the spawn stage (any error it returns is a spawn or pandoc variant, never the format or workspace one); the shell_scope.rs deny tests green; the backlog line appended; the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "4.5.r0d"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.24",
+  "model": "sonnet",
+  "description": "Phase 4 review fix, the exported EPUB carries a title (DECISIONS #review-4-r0; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list on 2026-10-10; U1 = Claude r0 finding 1 = Sol r0 finding 1 = Grok r0 finding 1, the title half; Michael's option A beside his #065 answer; files of passed tasks 4.3, 4.4 and 4.19, whose records are not edited — DECISIONS #016). Scope: packages/export/src/index.ts, packages/export/test/integration.test.ts, apps/desktop/src-tauri/src/export.rs, apps/desktop/src-tauri/src/commands.rs, apps/desktop/src/workspace/export-sync.ts, apps/desktop/src/App.tsx (the `runExport` IPC call only), tests/export-sync.test.ts, .github/workflows/ci.yml (the export-validation step's `--metadata title=` token only), docs/V1.1-BACKLOG.md, docs/lessons.md, the journal. Defect: the product's 9-token `buildPandocArgs`/`pandoc_args` (index.ts:32-47, export.rs:89-101) sends no title, so for any document without a front-matter `title` — every file the app creates (`new_file` writes `# Untitled-N` only; pandoc never promotes an H1) — pandoc writes an EPUB with no `dc:title` and an empty nav anchor (epubcheck RSC-005 ×2), exits 0 with empty stderr, and the dialog reports success. The gate passes only because integration.test.ts:238-244 and ci.yml:196 add `--metadata title=essay-fixture` (Claude's and Sol's reproductions: docs/reviews/phase-4-r0-{claude,sol}.md finding 1; Sol's .evidence/reviews/4/r0/sol/validators.log). Pandoc 3.11 reads a front-matter `title` under `-f gfm` (`+yaml_metadata_block`), and `-M title=…` overrides it (principal's probe in the pinned image). Fix, by behaviour: the export carries a title argument only when the document has no front-matter `title` key — then `--metadata title=<the file stem>` (the stem rule `outputPathFor` uses) — so a document's own title always wins; the frontend decides from the document's leading YAML block and passes the optional title through the `export` IPC; Rust rejects an empty title with a typed `ExportError` variant and both builders stay byte-mirrored. The `lang` token is not product (DECISIONS #065, Michael's answer): the tests keep it as one named exception constant, `[\"--metadata\",\"lang=en\"]`, whose comment cites #065. Append to docs/V1.1-BACKLOG.md one line `[4.24, U1 title fixed]` noting that the HTML `lang` attribute stays under the existing `[plan.4.verify.g1h.r0, EPUB dc:language from the process locale]` trigger. Run the suite as `scripts/check`. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.24` before implementing; each attempt appends its own `- [4.24] ` journal line (lesson [1.29]). Zero new dependencies (PRD §4); no `.skip()`.",
+  "acceptance": "Every integration leg's pandoc argv is asserted `toEqual` to `[...buildPandocArgs(target), ...LANG_EXCEPTION]`, with no other test-only token; essay-fixture.md (no front matter) exported by that argv under `LANG=en_US.UTF-8` passes epubcheck with 0 errors and its content.opf holds `dc:title` `essay-fixture`; a document with front-matter `title: X` gives `dc:title` X and its argv holds no title token (presence and absence cases); a stem holding a space and a non-BMP letter round-trips into `dc:title`; ci.yml's export-validation step no longer passes `title=essay-fixture`; tests/export-sync.test.ts asserts the title the IPC receives in both cases; a cargo test asserts `pandoc_args` with and without a title and the empty-title rejection by variant; the backlog line appended; the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "4.23"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.25",
+  "model": "sonnet",
+  "description": "Phase 4 review fix, an HTML export keeps its images wherever it is written (DECISIONS #review-4-r0; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list on 2026-10-10; S4 — Sol r0 finding 4; Michael's answer: `--embed-resources` on the HTML preset, as its own task after 4.24 (single concern per fix task); files of passed tasks 4.3 and 4.4, whose records are not edited — DECISIONS #016). Scope: packages/export/src/index.ts, packages/export/test/integration.test.ts, apps/desktop/src-tauri/src/export.rs, .htmlvalidate.json, docs/V1.1-BACKLOG.md, docs/lessons.md, the journal. Defect: the export dialog's output path is free text (ExportDialog.tsx:117-121), and an HTML written to another directory keeps `src=\"assets/…\"` relative to the source document's directory, so its images are broken; pandoc exits 0 and prints nothing (Sol's probe: .evidence/reviews/4/r0/sol/html-relocation.log). Fix: the HTML preset (and only it) carries `--embed-resources` in both builders, byte-mirrored. Facts from the principal's probe in the pinned image (pandoc 3.11): the fixture's two images become `data:image/png;base64,…` URIs, exit 0; a missing image prints `[WARNING] Could not fetch resource assets/missing.png`, exit 0, src left relative — export.rs's existing `Could not fetch resource` check turns it into the outcome's warning, so HTML gains the missing-image toast the other formats have; pandoc's embed output adds `role=\"img\"` to each `<img>`, which fails html-validate's `no-redundant-role` (2 errors on the fixture) under .htmlvalidate.json's recommended preset. Turn that rule off for exported HTML, with a comment citing pandoc's embed output: read the installed html-validate (the version in docker/versions.env) and, if its configuration can scope a rule to the exported files rather than all HTML, scope it; otherwise off in .htmlvalidate.json, and say in the journal which and why. Append to docs/V1.1-BACKLOG.md one line `[4.25, S4 fixed]` noting the size cost (an embedded image adds about 4/3 of its bytes). Run the suite as `scripts/check`. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.25` before implementing; each attempt appends its own `- [4.25] ` journal line (lesson [1.29]). Zero new dependencies (PRD §4); no `.skip()`.",
+  "acceptance": "`buildPandocArgs` and `pandoc_args` carry `--embed-resources` for `html` and for no other preset (one assertion per preset, both builders); a relocated-output integration case — docs/essay.md with the fixture's images exported to an output directory whose name holds a space — finds every `<img src>` a `data:` URI whose decoded bytes equal the source image's; a document with a dangling image exported to HTML returns the warning (export.rs test and the TypeScript `isMissingResourceWarning` leg); the HTML integration leg passes html-validate with the rule change, and the journal quotes the rule's scope; the backlog line appended; the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "4.24"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.26",
+  "model": "opus",
+  "description": "Phase 4 review fix, a twin typed in the anchored sentence's own paragraph keeps the anchor on its item (DECISIONS #review-4-r0; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list on 2026-10-10; U2 = Sol r0 finding 2 = Claude r0 finding 3; closes clause (b) of the backlog line `[4.9, §6.2 occurrence shift fixed for the rendered view]`, whose trigger — a reproduction — fired; files of passed task 4.9, whose record is not edited — DECISIONS #016). Scope: packages/core/src/sidecar.ts (`carryEdit`, `nearestInBlock`, `TopLevelEdit`), packages/editor/src/store.ts (`carryThrough`/`replacedRuns`), packages/core/test/carry-edit.test.ts, packages/editor/test/anchor-typing.test.ts, docs/V1.1-BACKLOG.md, docs/lessons.md, the journal. Defect: `carryEdit` (sidecar.ts:778-787) maps the anchored item's block through the transaction (`mapBlock`) and then takes the same-key candidate nearest the item's old position (`nearestInBlock`, :800-813); inside an edited block, the candidate at the old index is a newly typed twin. Sol's probe through the real store (.evidence/reviews/4/r0/sol/anchor-probe.ts and .log): bind `Same line here. Same line here.`, anchor the second sentence, type `Same line here. ` at the paragraph start one character per transaction, save and reload → the rewrite resolves to `[0,1]` (the new twin); its sentence is `[0,2]`. Fix, by behaviour: `TopLevelEdit` carries the item-level mapping the editor already has (the transaction's mapping through the rendered↔source position map), and inside an edited block the carried anchor is the candidate whose source range holds the item's mapped start; nearest-by-index remains only when the mapped start was deleted — that fallback is the one named case, recorded where the map reports it. The source view's route (clause (a)) is 4.27's. Run the suite as `scripts/check`. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.26` before implementing; each attempt appends its own `- [4.26] ` journal line (lesson [1.29]). Zero new dependencies (PRD §4); no `.skip()`.",
+  "acceptance": "Sol's reproduction verbatim and Claude's variant (the twin typed at position 1) through the real store, saved and reloaded, each resolve the rewrite to the original sentence, both red at the branch base (the journal quotes the red run); a corpus leg over every fixture in fixtures/markdown/index.json: for each anchorable sentence, its own text plus a space typed at the start and at the end of its block, and the block's first character deleted (the destructive member), each through a typing-shaped transaction, asserting the anchor resolves to the original item; the identity leg (a no-op transaction) re-serialises the sidecar byte-identically; 4.9's guards and the §6.2 external-swap guard unchanged and green; the backlog line `[4.26, U2 fixed]` appended closing clause (b); the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "4.25"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.27",
+  "model": "opus",
+  "description": "Phase 4 review fix, the source view's commit carries the sidecar (DECISIONS #review-4-r0; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list on 2026-10-10; C4 — Claude r0 finding 4, blocking under D1 by the same consequence as U2 (a rewrite silently attached to another sentence); closes clause (a) of the backlog line `[4.9, §6.2 occurrence shift fixed for the rendered view]`; files of passed task 4.9, whose record is not edited — DECISIONS #016). Scope: packages/editor/src/toggle.ts (`bindCodeMirror`, `commitPending`), packages/core/src/sidecar.ts only to call 4.26's rule, packages/editor/test/toggle.test.ts or a new packages/editor/test/anchor-source-typing.test.ts, docs/V1.1-BACKLOG.md, docs/lessons.md, the journal. Defect: `commitPending` (toggle.ts:1292-1303) commits `parse(text)` with `document.sidecar` unchanged, so nothing is carried. Claude's reproduction (docs/reviews/phase-4-r0-claude.md finding 4): with twin paragraphs and the rewrite on the second, type a third twin paragraph above both in the source view, save and reload → the rewrite resolves to `[1,0]` where its paragraph is `[3,0]`. Fix, by behaviour: the binding builds a `TopLevelEdit` from CodeMirror's own change set, composed over the pending burst, and calls `carryEdit` (4.26's rule) in the commit; no other reader's behaviour changes (CLAUDE.md's settle rule stands). A spec this task adds or changes runs on both container legs — external (tauri-driver) and `ESSAYDOWN_E2E_DRIVER=embedded` — each as one foreground Bash call bounded by `timeout 540` (tool timeout 600000), output redirected to a file that is then grepped, never `run_in_background`, a wakeup or a pipe into `tail` (DECISIONS #049, #059); the journal quotes both legs' summaries. Run the suite as `scripts/check`. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.27` before implementing; each attempt appends its own `- [4.27] ` journal line (lesson [1.29]). Zero new dependencies (PRD §4); no `.skip()`.",
+  "acceptance": "Claude's reproduction (twin paragraph typed above both in the source view → `[3,0]` after save and reload) and a same-block twin typed in the source view each keep the rewrite on the original item, both red at the branch base (the journal quotes the red run); a corpus leg seeded from the source view (for each anchored sentence of every fixture in fixtures/markdown/index.json, its twin typed at document start and at its block's start, and one deletion) with the identity leg byte-identical; source-toggle.spec.ts unchanged and green on both container legs (summaries quoted); the backlog line `[4.27, C4 fixed]` appended closing clause (a); the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "4.26"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.28",
+  "model": "sonnet",
+  "description": "Phase 4 review fix, export's reveal and its read of the store are tested against their real neighbours (DECISIONS #review-4-r0; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list on 2026-10-10; S5 — Sol r0 finding 5 (should-fix Required) and C7 — Claude r0 finding 7, admitted beyond D1 by Michael's list approval; files of passed task 4.3, whose record is not edited — DECISIONS #016). Scope: apps/desktop/src-tauri/src/export.rs, apps/desktop/src/workspace/export-sync.ts, tests/export-sync.test.ts, tests/document-sync.test.ts (one case), docs/lessons.md, the journal. Defect (S5): `ExportOutcome` serialises `out_path` (export.rs:28-31) while export-sync.ts:57 reads `outcome.outPath`, so reveal is called with `undefined`, its rejection is swallowed, and the status is still `exported` — 4.3's \"reveal_in_folder on success\" has never held (Sol's .evidence/reviews/4/r0/sol/reveal-probe.log); the fakes in tests/export-sync.test.ts use camelCase, hiding it. (C7) every export-sync case stubs `flush`, so no test exports inside the source coalescing window (CLAUDE.md's reader rule). Fix: one wire spelling — `#[serde(rename_all = \"camelCase\")]` on `ExportOutcome` — asserted by a cargo test on the serialised keys; export-sync's tests feed that serialised shape. Run the suite as `scripts/check`. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.28` before implementing; each attempt appends its own `- [4.28] ` journal line (lesson [1.29]). Zero new dependencies (PRD §4); no `.skip()`.",
+  "acceptance": "A cargo test asserts `ExportOutcome`'s serialised JSON keys exactly (`outPath`, `warning`); tests/export-sync.test.ts feeds the Rust-serialised shape and asserts `reveal` receives the output path (red at the branch base, quoted in the journal); a document-sync-level test types into the source view, calls `exportDocument` inside the coalescing window and asserts `runExport`'s `contents` include the typed character; the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "4.27"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.29",
+  "model": "sonnet",
+  "description": "Phase 4 review fix, the app's own export route is driven for all four presets on a document with images (DECISIONS #review-4-r0; taken under Michael's stop rule DECISIONS #041 D1 and his approval of the r0 list on 2026-10-10; C2 = G2 — Claude r0 finding 2 (should-fix Required) and Grok r0 finding 2 — and C8 — Claude r0 finding 8 — admitted beyond D1 by Michael's list approval; settles DECISIONS #064's question to this review: the export e2e carries images, in its own spec rather than one-workflow, so no golden changes). Test-only plus CI install. Scope: a new e2e/shell/test/export.spec.ts, its fixture copy under e2e/shell (essay-fixture.md and its assets, copied, never edited in fixtures/), .github/workflows/ci.yml (the e2e-shell job installs epubcheck and html-validate from docker/versions.env, as the test job does), docs/lessons.md, the journal. Gap: one-workflow step 7 (one-workflow.spec.ts:430-471) exports only PDF of an image-less document; DOCX, HTML and EPUB never go through the app's route (Rust `export` → sidecar with the PATH prepend, cwd = the workspace root), the class 4.17 broke, and the missing-image toast (App.tsx:493-500) has no test. Spec: in a workspace holding the fixture copy, export DOCX, HTML, PDF and EPUB through the dialog and validate each app-written file with an external reader — `unzip -t` and 2 `word/media/` members; html-validate (with 4.25's config) and every `<img>` a `data:` URI; `pdfimages -list` 2 rows and `pdftotext` holding every heading title read from fixtures/markdown/index.json; epubcheck 0 errors — and export a second document holding a dangling image, asserting `[data-testid=\"export-warning\"]` appears with the dialog closed. External-reader spawns that fail name the command (the `[plan.4.verify.g1h.r0, spawn failure inside a wdio spec is opaque]` class). Counts come from the fixture's index, never from one run (CLAUDE.md). A spec this task adds or changes runs on both container legs — external (tauri-driver) and `ESSAYDOWN_E2E_DRIVER=embedded` — each as one foreground Bash call bounded by `timeout 540` (tool timeout 600000), output redirected to a file that is then grepped, never `run_in_background`, a wakeup or a pipe into `tail` (DECISIONS #049, #059); the journal quotes both legs' summaries. Run the suite as `scripts/check`. `pnpm install --frozen-lockfile` first; `node ralph/journal.mjs stub 4.29` before implementing; each attempt appends its own `- [4.29] ` journal line (lesson [1.29]). Zero new dependencies (PRD §4); no `.skip()`.",
+  "acceptance": "e2e/shell/test/export.spec.ts exists with one case per preset and the missing-image case, green on both container legs (summaries quoted in the journal); each case validates the file the app wrote (path asserted under the workspace) with the named external reader; `actionlint .github/workflows/ci.yml` prints nothing; no product file changed; the journal names the test that discharges each guard, enumerated from the diff; `git diff --stat` against the branch base touches only the scope files; no manifest or lockfile change; zero new dependencies (PRD §4); `scripts/check` green.",
+  "dependencies": [
+   "4.28"
+  ],
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.verify.r1",
+  "model": "sonnet",
+  "description": "Phase 4 verification for review attempt r1 (RUNNER-SPEC §3, §5.5): freeze dependencies (no lockfile change allowed), run the full suite and the runner conformance suite in the container after 4.23–4.29, and confirm the phase head is ready for the three-OS CI run the CI gate performs. Promote-lessons step: none promoted at r0 (DECISIONS #review-4-r0); no code, test, fixture or config edit.",
+  "acceptance": "pnpm lint, pnpm test, cargo test green in the container; `bash ralph/test/run.sh` green, its `# tests`/`# pass`/`# fail` lines quoted in the journal from redirected output (one foreground call bounded by `timeout 540`); `actionlint .github/workflows/ci.yml` prints nothing; `git diff --stat` against 4.29's integrated commit shows no dependency-manifest or lockfile change.",
+  "dependencies": [
+   "4.29"
+  ],
+  "needsCI": true,
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "export-validation",
+    "tauri-build"
+   ],
+   "cleanupRef": true
+  },
+  "ciAcceptance": "Full suite + every spec file under e2e/shell/test/ (one-workflow steps 1–7 and export.spec.ts included; the count read from the directory) green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three on the product's argv plus #065's one `lang` exception; the tauri-build log lists `typst` beside `pandoc` in the macOS .app's Contents/MacOS and `typst.exe` beside `pandoc.exe` on Windows (DECISIONS #063); logs in /logs/ci/4.verify.r1h/accepted/.",
+  "phase": "4",
+  "execution": "loop",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.verify.r1h",
+  "model": "sonnet",
+  "execution": "human",
+  "blockedOnHuman": true,
+  "gateKind": "ci",
+  "outcomes": {
+   "ACCEPT": "continue",
+   "GATE-FAILED": "plan-gate"
+  },
+  "recordPolicy": "evidence-only",
+  "gateFor": "4.verify.r1",
+  "ci": {
+   "refType": "ci",
+   "refTemplate": "ci/4.verify.r1/a{n}",
+   "workflow": "ci.yml",
+   "trigger": "push",
+   "artifactNames": [
+    "test-logs",
+    "e2e-shell",
+    "export-validation",
+    "tauri-build"
+   ],
+   "cleanupRef": true
+  },
+  "phase": "4",
+  "targetBranch": "phase/4",
+  "description": "CI gate for 4.verify.r1: scripts/gate.sh 4.verify.r1h pushes integrated_sha of 4.verify.r1 to ci/4.verify.r1/a{n}, writes run.json, waits for ci.yml, fetches [\"test-logs\",\"e2e-shell\",\"export-validation\",\"tauri-build\"] into /logs/ci/4.verify.r1/a<n>/, asserts ciAcceptance, writes accepted.json on ACCEPT (RUNNER-SPEC §2, §3).",
+  "acceptance": "Full suite + every spec file under e2e/shell/test/ (one-workflow steps 1–7 and export.spec.ts included; the count read from the directory) green on ubuntu and macOS (windows recorded, DECISIONS #047) at the implementation SHA; export validators (pdfimages, pdftotext, epubcheck, html-validate) green on all three on the product's argv plus #065's one `lang` exception; the tauri-build log lists `typst` beside `pandoc` in the macOS .app's Contents/MacOS and `typst.exe` beside `pandoc.exe` on Windows (DECISIONS #063); logs in /logs/ci/4.verify.r1h/accepted/.",
+  "dependencies": [
+   "4.verify.r1"
+  ]
+ },
+ {
+  "id": "4.5.r1a",
+  "model": "claude-opus",
+  "execution": "reviewer",
+  "reviewer": "claude",
+  "reviewSet": "4.5",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, claude reviewer, for review set 4.5 (phase 4). Review set for Phase 4, attempt r1 (after the r0 FAIL, DECISIONS #review-4-r0; the three r0 reports were independent — DECISIONS #025's condition, the #044 warning on r0c read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/4.verify.r1h/accepted/, the spec-file count read from the directory; the accepted logs stand for the cold build), that the r0 blockers are fixed and the dispositions hold — (1) S3 + C5 + C6 by 4.23: `export` rejects a non-grammar `format` and an `out_path` equal to the source or its sidecar by typed variant, and `shell:allow-spawn` is gone; (2) U1 by 4.24: the product's argv gives a titled, epubcheck-clean EPUB for a title-less document and keeps a front-matter title, and the tests' argv equals the product's plus #065's one `lang` exception; (3) S4 by 4.25: an HTML export written to another directory keeps its images; (4) U2 by 4.26 and C4 by 4.27: a twin typed in the anchored sentence's own paragraph, in the rendered view and in the source view, keeps the rewrite on its item after save and reload; (5) S5 and C7 by 4.28, and C2 = G2 and C8 by 4.29, present with their tests; (6) the r0 dispositions in docs/V1.1-BACKLOG.md present with their triggers — a disposition is questioned only if its premise is false. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; no new sweep, probe generator or browser drive beyond re-running your r0 export-validator invocation on the product's argv (finding 1) and your r0 reproductions of findings 3 and 4, plus your finding 10's third member (`https://a.b/x_[t](u)`) once — if parse∘format changes its tree it is a blocker in this report with the bytes, if not say so in one line (your own r0 directory /logs/reviews/4/r0/claude/ may be read), whose non-reproduction is the confirmation. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
+  "acceptance": "/logs/reviews/4/r1/claude/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "4.verify.r1h"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.5.r1b",
+  "model": "sol",
+  "execution": "reviewer",
+  "reviewer": "sol",
+  "reviewSet": "4.5",
+  "reviewAttempt": "r1",
+  "description": "Review attempt r1, sol reviewer, for review set 4.5 (phase 4). Review set for Phase 4, attempt r1 (after the r0 FAIL, DECISIONS #review-4-r0; the three r0 reports were independent — DECISIONS #025's condition, the #044 warning on r0c read as a mention). Scope, under Michael's stop rule (DECISIONS #041 D1): confirm, from the tree and the accepted gate evidence (/logs/ci/4.verify.r1h/accepted/, the spec-file count read from the directory; the accepted logs stand for the cold build), that the r0 blockers are fixed and the dispositions hold — (1) S3 + C5 + C6 by 4.23: `export` rejects a non-grammar `format` and an `out_path` equal to the source or its sidecar by typed variant, and `shell:allow-spawn` is gone; (2) U1 by 4.24: the product's argv gives a titled, epubcheck-clean EPUB for a title-less document and keeps a front-matter title, and the tests' argv equals the product's plus #065's one `lang` exception; (3) S4 by 4.25: an HTML export written to another directory keeps its images; (4) U2 by 4.26 and C4 by 4.27: a twin typed in the anchored sentence's own paragraph, in the rendered view and in the source view, keeps the rewrite on its item after save and reload; (5) S5 and C7 by 4.28, and C2 = G2 and C8 by 4.29, present with their tests; (6) the r0 dispositions in docs/V1.1-BACKLOG.md present with their triggers — a disposition is questioned only if its premise is false. Report blockers only — wrong bytes or lost text reaching the user silently, a crash, or a security issue; a should-fix or nit is not reported, and a recorded backlog item is not a finding unless its premise is false. The existing suite may be run; no new sweep, probe generator or browser drive beyond re-running your r0 probes for findings 1–5 (validate_exports.py on the product's argv, anchor-probe, the Lua-writer probe through the `export` command, html-relocation, reveal-probe) (your own r0 directory /logs/reviews/4/r0/sol/ may be read), whose non-reproduction is the confirmation. The report fills docs/reviews/TEMPLATE.md. Read DECISIONS #025 as an input and name, in your inputs line, every file you read under /logs/reviews/; read no sibling directory of this attempt.",
+  "acceptance": "/logs/reviews/4/r1/sol/report.md and status.json exist and pass the docs/reviews/TEMPLATE.md check (canonical review-set acceptance, PRD §8 conventions).",
+  "dependencies": [
+   "4.verify.r1h"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4"
+ },
+ {
+  "id": "4.5.r1d",
+  "model": "opus",
+  "execution": "interactive-principal",
+  "reviewSet": "4.5",
+  "reviewAttempt": "r1",
+  "description": "Reconciliation of review attempt r1 for review set 4.5 (phase 4): copy the two reports to docs/reviews/phase-4-r1-{claude,sol}.md (Grok reviews r0 only, DECISIONS #043), write DECISIONS.md#review-4-r1 with verdict PASS|FAIL, class-level lessons, regenerated docs/progress.md; on FAIL append fix tasks, 4.verify.r2 and 4.5.r2a/b/d in the same planning commit (RUNNER-SPEC §5.4). A blocker reported in r1 goes to Michael before any planning commit (DECISIONS #041 D1): the reconciliation gives him the finding with its counts and its route and writes no planning commit until he answers; the task stays principal-pending.",
+  "acceptance": "Canonical review-set acceptance (§8 conventions).",
+  "dependencies": [
+   "4.5.r1a",
+   "4.5.r1b"
+  ],
+  "phase": "4",
+  "targetBranch": "phase/4"
+ },
+ {
   "id": "4.close",
   "model": "opus",
   "execution": "runner",
   "description": "Phase close (runner, transactional and idempotent, RUNNER-SPEC §8): preconditions — phase/4 head == reconciliation_sha of the newest attempt with verdict PASS; only docs/DECISIONS/tasks.json/EXPECTED_COUNT changed since implementation_sha; main == phases.json base_main_sha; run the full suite on the proposed commit in a detached worktree; write the close intent; one ref transaction moving main and creating phase/6; then finalise .evidence/closes and the next phase base record.",
   "acceptance": "main == reconciliation_sha of the newest Phase 4 review attempt (verdict PASS); suite green on that commit; branch phase/6 exists at main with its base recorded in phases.json; .evidence/closes written after the ref transaction; a re-run of the close is a no-op.",
   "dependencies": [
-   "4.5.r0d"
+   "4.5.r1d"
   ],
   "targetBranch": "main",
   "sourceBranches": [
