@@ -147,6 +147,15 @@ pub(crate) fn reject_overwriting_source(out_path: &Path, doc_path: &Path) -> Res
 /// path typst cannot resolve, breaking every image-bearing export. `pandoc_path_env` is what makes
 /// this literal immune to `PATH` shadowing instead.
 ///
+/// When `format` is exactly `"html"`, one more token, `--embed-resources`, is pushed before any
+/// title tokens (DECISIONS #review-4-r0 S4; mirrors `packages/export`'s `buildPandocArgs`): the
+/// HTML writer otherwise leaves a document's relative image references exactly as written, which
+/// a browser resolves against the *output file's own directory* — so an HTML export written
+/// somewhere other than the source document's own directory (any path the export dialog's free-
+/// text field accepts) keeps broken images, silently (pandoc exits 0, prints nothing). With
+/// `--embed-resources`, pandoc inlines every resolvable image as a `data:` URI instead, which needs
+/// no directory at all. No other preset carries this token.
+///
 /// `title`, when `Some`, appends two more tokens, `--metadata title=<title>`, mirroring
 /// `buildPandocArgs`'s own optional `title` field (DECISIONS #review-4-r0 U1): the caller passes
 /// `None` exactly when the document's own front-matter already carries a `title` key, so that
@@ -164,6 +173,9 @@ pub(crate) fn pandoc_args(resource_dir: &str, out_path: &str, format: &str, titl
         "-t".to_string(),
         format.to_string(),
     ];
+    if format == "html" {
+        args.push("--embed-resources".to_string());
+    }
     if let Some(title) = title {
         args.push("--metadata".to_string());
         args.push(format!("title={title}"));
@@ -336,6 +348,86 @@ mod tests {
                 "title=essay-fixture",
             ]
         );
+    }
+
+    /// Guard (DECISIONS #review-4-r0 S4): `--embed-resources` is carried for `html` and for no
+    /// other preset this app's export dialog offers by default or forwards as "Other" — one
+    /// assertion per preset, enumerated from the diff.
+    #[test]
+    fn pandoc_args_carries_embed_resources_for_html_and_no_other_preset() {
+        assert!(pandoc_args(".", "essay.html", "html", None).contains(&"--embed-resources".to_string()));
+        assert!(!pandoc_args(".", "essay.docx", "docx", None).contains(&"--embed-resources".to_string()));
+        assert!(!pandoc_args(".", "essay.pdf", "pdf", None).contains(&"--embed-resources".to_string()));
+        assert!(!pandoc_args(".", "essay.epub", "epub", None).contains(&"--embed-resources".to_string()));
+        assert!(!pandoc_args(".", "essay.odt", "odt", None).contains(&"--embed-resources".to_string()));
+    }
+
+    #[test]
+    fn pandoc_args_html_embed_resources_precedes_the_title_tokens() {
+        let args = pandoc_args(".", "essay.html", "html", Some("essay-fixture"));
+        assert_eq!(
+            args,
+            vec![
+                "-f",
+                "gfm",
+                "--standalone",
+                "--resource-path=.",
+                "-o",
+                "essay.html",
+                "--pdf-engine=typst",
+                "-t",
+                "html",
+                "--embed-resources",
+                "--metadata",
+                "title=essay-fixture",
+            ]
+        );
+    }
+
+    /// `--embed-resources`'s own HTML leg (task 4.25): pandoc still exits 0 and classifies a
+    /// dangling image the same warning `is_missing_resource_warning` reads for every other format
+    /// — confirmed empirically (`--embed-resources` adds `role="img"` to every `<img>` including
+    /// the one it could not inline, but neither changes the exit code nor the stderr text).
+    /// `run_pandoc` is reached directly here (no IPC layer; `commands.rs` is out of this task's
+    /// scope) through the crate's own real `configure`/`context`, so the sidecar this container's
+    /// `pnpm assemble-sidecars` step placed beside the test binary is the one that actually runs
+    /// (lesson [4.23]); `typst` need not resolve at all (`--pdf-engine` is inert for a non-PDF
+    /// writer, confirmed empirically), so `pandoc_path_env`'s `exe_dir` here is a placeholder.
+    #[test]
+    fn run_pandoc_of_an_html_document_with_a_dangling_image_returns_the_warning_not_an_error() {
+        let app = crate::configure(tauri::test::mock_builder())
+            .build(crate::context())
+            .expect("failed to build test app");
+        let dir = std::env::temp_dir().join(format!(
+            "essaydown-export-rs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+
+        let path_env = pandoc_path_env(Path::new("/work/target/debug"), std::env::var_os("PATH").as_deref()).unwrap();
+        let args = pandoc_args(".", "out.html", "html", None);
+        let outcome = tauri::async_runtime::block_on(run_pandoc(
+            app.handle(),
+            &dir,
+            "out.html",
+            &args,
+            "![alt](missing.png)\n",
+            &path_env,
+        ))
+        .expect("a missing image must warn, not fail the export");
+
+        assert!(
+            outcome.warning.as_deref().unwrap_or("").contains("Could not fetch resource"),
+            "expected a missing-resource warning, got: {:?}",
+            outcome.warning
+        );
+        assert!(dir.join("out.html").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

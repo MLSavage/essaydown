@@ -29,12 +29,19 @@ export interface PandocExportTarget {
 
 /**
  * The fixed 9-token pandoc invocation (task 4.3's description; DECISIONS #004's primary pipeline):
- * `-f gfm --standalone --resource-path=<dir> -o <out> --pdf-engine=typst -t <format>`, with two more
- * tokens, `--metadata title=<title>`, appended when `target.title` is given (DECISIONS #review-4-r0
- * U1) — every export otherwise carries no title at all, so a document with no front-matter `title`
- * produced an EPUB with no `dc:title` and an empty nav anchor (epubcheck RSC-005). The source
- * document is never a positional argument — production code feeds it over stdin (no input file to
- * resolve a workspace path for), so this array has no such entry.
+ * `-f gfm --standalone --resource-path=<dir> -o <out> --pdf-engine=typst -t <format>`, plus one more
+ * token, `--embed-resources`, when `target.format` is exactly `"html"` (DECISIONS #review-4-r0 S4):
+ * the HTML writer otherwise leaves a document's relative image references (`src="assets/…"`)
+ * exactly as written, which resolve against the *output file's own directory* in a browser — so an
+ * HTML export written somewhere other than the source document's own directory (any export dialog
+ * path the user picks) keeps broken images, silently (pandoc exits 0, prints nothing). With
+ * `--embed-resources`, pandoc inlines every resolvable image as a `data:` URI instead, which needs
+ * no directory at all. No other preset carries this token. Two more tokens, `--metadata
+ * title=<title>`, are appended when `target.title` is given (DECISIONS #review-4-r0 U1) — every
+ * export otherwise carries no title at all, so a document with no front-matter `title` produced an
+ * EPUB with no `dc:title` and an empty nav anchor (epubcheck RSC-005). The source document is never
+ * a positional argument — production code feeds it over stdin (no input file to resolve a workspace
+ * path for), so this array has no such entry.
  */
 export function buildPandocArgs(target: PandocExportTarget): string[] {
   if (!isValidPandocFormat(target.format)) {
@@ -51,6 +58,7 @@ export function buildPandocArgs(target: PandocExportTarget): string[] {
     "-t",
     target.format,
   ];
+  if (target.format === "html") args.push("--embed-resources");
   return target.title === undefined ? args : [...args, "--metadata", `title=${target.title}`];
 }
 

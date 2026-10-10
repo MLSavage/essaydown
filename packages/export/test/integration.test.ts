@@ -11,7 +11,8 @@
  * comment names this file).
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -159,7 +160,23 @@ describe("DOCX export of essay-fixture (task 4.3 acceptance)", () => {
   });
 });
 
+describe("buildPandocArgs carries --embed-resources for html and no other preset (task 4.25)", () => {
+  it.each(["docx", "html", "pdf", "epub", "odt"])("format %s", (format) => {
+    const args = buildPandocArgs({ resourceDir: ".", outPath: `essay.${format}`, format });
+    expect(args.includes("--embed-resources")).toBe(format === "html");
+  });
+});
+
 describe("HTML export of essay-fixture (task 4.3 acceptance)", () => {
+  // `--embed-resources` (task 4.25, DECISIONS #review-4-r0 S4) makes pandoc add `role="img"` to
+  // every `<img>` it writes, including one it could not inline — which html-validate 11.13.0's
+  // `no-redundant-role` then flags (2 errors on this fixture's 2 images). That version's own
+  // config schema (read in the installed package: `root`/`aria`/`extends`/`elements`/`plugins`/
+  // `transform`/`rules`, `additionalProperties: false`, no `overrides` key) has no way to scope a
+  // rule to a file pattern, so there is no narrower target than this shared `.htmlvalidate.json`
+  // — which in turn has no reader but this exported-HTML check (`grep`'s own evidence: this file,
+  // `ralph/tasks.json` and `.github/workflows/ci.yml`'s invocation of it), so turning the rule off
+  // here is already scoped to exported HTML, not to "all HTML" generally.
   it("passes html-validate with the committed config", () => {
     const dir = tempDir();
     const outPath = outputPathFor(FIXTURE_DOC, "html");
@@ -173,6 +190,37 @@ describe("HTML export of essay-fixture (task 4.3 acceptance)", () => {
     const htmlPath = join(dir, outPath);
     const configPath = fileURLToPath(new URL("../../../.htmlvalidate.json", import.meta.url));
     expect(() => runValidator("html-validate", ["--config", configPath, htmlPath])).not.toThrow();
+  });
+
+  it("a relocated export (output directory holds a space) embeds both images as byte-exact data URIs", () => {
+    const dir = tempDir();
+    const outDir = join(dir, "export output");
+    mkdirSync(outDir, { recursive: true });
+    const outPath = join(outDir, outputPathFor(FIXTURE_DOC, "html"));
+    const resourceDir = resourceDirFor(FIXTURE_DOC);
+    // Mirrors `export.rs`'s `run_pandoc`: cwd stays at the document's own directory (`root` in
+    // production) while `-o` names a wholly different directory the export dialog's free-text
+    // field chose — exactly the relocation `buildPandocArgs`'s own doc comment names.
+    const args = [...buildPandocArgs({ resourceDir, outPath, format: "html" }), ...LANG_EXCEPTION];
+    const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
+    const result = runPandoc(FIXTURES, args, source);
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const html = readFileSync(outPath, "utf8");
+    const srcs = [...html.matchAll(/<img[^>]*\ssrc="([^"]+)"/g)].map((m) => m[1] as string);
+    expect(srcs).toHaveLength(2);
+    for (const src of srcs) expect(src.startsWith("data:")).toBe(true);
+
+    const decodedHashes = new Set(
+      srcs.map((src) => createHash("sha256").update(Buffer.from(src.split(",", 2)[1] as string, "base64")).digest("hex")),
+    );
+    const sourceHashes = new Set(
+      ["assets/essay/golden-age-advert.png", "assets/essay/pen-materials.png"].map((relative) =>
+        createHash("sha256").update(readFileSync(`${FIXTURES}/${relative}`)).digest("hex"),
+      ),
+    );
+    expect(decodedHashes).toEqual(sourceHashes);
   });
 
   it("contains the 12 headings and both <table> elements (task 4.4 acceptance)", () => {
@@ -346,6 +394,23 @@ describe("a missing image (task 4.3 acceptance: warning, not failure)", () => {
     const docxPath = join(outDir, outPath);
     const members = unzipList(docxPath);
     expect(members.filter((name) => name.startsWith("word/media/"))).toHaveLength(0);
+  });
+
+  it("an HTML export with --embed-resources exits 0 with the same classifiable warning", () => {
+    const emptyDir = tempDir();
+    const outDir = tempDir();
+    const outPath = outputPathFor(FIXTURE_DOC, "html");
+    const args = [
+      ...buildPandocArgs({ resourceDir: emptyDir, outPath: join(outDir, outPath), format: "html" }),
+      ...LANG_EXCEPTION,
+    ];
+    const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
+    const result = runPandoc(emptyDir, args, source);
+
+    expect(result.status).toBe(0);
+    expect(isMissingResourceWarning(result.stderr)).toBe(true);
+    expect(result.stderr).toContain("golden-age-advert.png");
+    expect(result.stderr).toContain("pen-materials.png");
   });
 
   it("isMissingResourceWarning is false for the fixture's own clean export", () => {
