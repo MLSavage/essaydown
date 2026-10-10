@@ -25,6 +25,7 @@ pub(crate) struct ExportProgress {
 /// resolve every image (lesson [4.0]) — a warning the frontend shows beside the export, never a
 /// thrown error.
 #[derive(Clone, serde::Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ExportOutcome {
     pub out_path: String,
     pub warning: Option<String>,
@@ -537,6 +538,17 @@ mod tests {
         ));
         assert!(!is_missing_resource_warning(""));
         assert!(!is_missing_resource_warning("[WARNING] Duplicate link reference"));
+    }
+
+    #[test]
+    fn export_outcome_serializes_with_camel_case_keys() {
+        // The IPC wire shape export-sync.ts reads (task 4.28, S5): `outcome.outPath`, never
+        // `out_path` — serde's default per-field spelling, which left `reveal` called with
+        // `undefined` on every export.
+        let value = serde_json::to_value(ExportOutcome { out_path: "essay.docx".to_string(), warning: None }).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, std::collections::BTreeSet::from(["outPath", "warning"]));
+        assert_eq!(value["outPath"], serde_json::Value::String("essay.docx".to_string()));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "../apps/desktop/node_modules/@tauri-apps/api/core.js";
 import type { Root } from "mdast";
 import { rewriteAssetUrls } from "../packages/core/src/assets.js";
 import { format } from "../packages/core/src/format.js";
@@ -7,6 +8,7 @@ import { candidatesOf, emptySidecar, parseSidecar, type Sidecar } from "../packa
 import { bindCodeMirror, type BoundSourceView, type DocumentStore, type SourceBinding } from "../packages/editor/src/index.js";
 import { decideClose } from "../apps/desktop/src/workspace/close-guard.js";
 import { createPaneSync, loadDocument, storeFor, type PaneSync } from "../apps/desktop/src/workspace/DocumentPane.js";
+import { exportDocument, type ExportArgs, type ExportIO } from "../apps/desktop/src/workspace/export-sync.js";
 import { sidecarPathFor } from "../apps/desktop/src/workspace/paths.js";
 import {
   createDocumentSync,
@@ -1057,6 +1059,27 @@ describe("the watcher settles a pending source burst (S1, through the pane)", ()
     expect(textOf(pane)).toBe("Alpha.\n\nExternal.\n");
     expect(pane.buffer()).toBe("Alpha.\n\nExternal.\n");
     expect(pane.sync.sync.dirty).toBe(false);
+  });
+
+  it("guard 5 (export, C7): exporting inside the window reads the typed burst, not the stale disk text", async () => {
+    const pane = await openPane("Alpha.\n");
+    pane.type("Alpha.LOCAL\n");
+    // Still inside the window: only export's own flush (through the pane's `flush`, which settles
+    // the store before `sync.flush`) can have committed the burst.
+    expect(quietMs).toBeLessThan(coalesceWindowMs);
+    const runArgs: ExportArgs[] = [];
+    const io: ExportIO = {
+      flush: () => pane.sync.flush(),
+      readDoc: (path) => invoke<string>("read_doc", { path }),
+      runExport: async (args) => {
+        runArgs.push(args);
+        return { outPath: args.outPath, warning: null };
+      },
+      reveal: async () => {},
+    };
+    const result = await exportDocument(io, DOC, "essay.docx", "docx");
+    expect(result.status).toBe("exported");
+    expect(runArgs[0]?.contents).toContain("LOCAL");
   });
 });
 

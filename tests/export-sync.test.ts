@@ -107,4 +107,14 @@ describe("exportDocument", () => {
     await exportDocument(io, "essay.md", "essay.docx", "docx");
     expect(runArgs[0]?.title).toBeUndefined();
   });
+
+  it("reveals the output path when the outcome arrives in export.rs's own wire spelling (DECISIONS #review-4-r0 S5)", async () => {
+    // `ExportOutcome`'s `#[serde(rename_all = "camelCase")]` (export.rs): a literal JSON string,
+    // not a TS object literal, so a wire-spelling regression fails here too, not only in export.rs's
+    // own cargo test (`export_outcome_serializes_with_camel_case_keys`).
+    const wire = JSON.parse('{"outPath":"essay.docx","warning":null}') as ExportOutcome;
+    const { io, calls } = fakeIO("clean", wire);
+    await exportDocument(io, "essay.md", "essay.docx", "docx");
+    expect(calls).toContain("reveal:essay.docx");
+  });
 });

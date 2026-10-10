@@ -765,7 +765,7 @@ mod tests {
             // reach pandoc and succeed — the strongest proof it passed every check above.
             Ok(body) => {
                 let outcome = body.deserialize::<serde_json::Value>().unwrap();
-                assert_eq!(outcome["out_path"], serde_json::Value::String("out.docx".to_string()));
+                assert_eq!(outcome["outPath"], serde_json::Value::String("out.docx".to_string()));
                 assert!(root.join("out.docx").exists(), "a successful export must have actually written the file");
             }
             Err(err) => {
