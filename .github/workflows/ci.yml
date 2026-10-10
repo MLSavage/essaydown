@@ -354,6 +354,11 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev poppler-utils \
             webkit2gtk-driver xvfb xauth
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       # Only Linux drives the app through tauri-driver (e2e/shell/provider.ts); macOS and Windows
       # both run the embedded provider now and need no external driver install.
       - name: Install tauri-driver ${{ env.TAURI_DRIVER_VERSION }} (Linux)
@@ -372,6 +377,32 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: choco install poppler --yes --no-progress
+
+      # export.spec.ts (task 4.29) validates the HTML and EPUB presets with these two readers, the
+      # same way the `test` job's own "Export validation" step does (ci.yml:96-117); both are
+      # pinned from docker/versions.env.
+      - name: Install epubcheck ${{ env.EPUBCHECK_VERSION }}
+        shell: bash
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/epubcheck.zip" \
+            "https://github.com/w3c/epubcheck/releases/download/v${EPUBCHECK_VERSION}/epubcheck-${EPUBCHECK_VERSION}.zip"
+          unzip -q "${RUNNER_TEMP}/epubcheck.zip" -d "${RUNNER_TEMP}"
+          mkdir -p "${RUNNER_TEMP}/bin"
+          printf '#!/bin/sh\nexec java -jar "%s/epubcheck-%s/epubcheck.jar" "$@"\n' \
+            "${RUNNER_TEMP}" "${EPUBCHECK_VERSION}" > "${RUNNER_TEMP}/bin/epubcheck"
+          chmod 0755 "${RUNNER_TEMP}/bin/epubcheck"
+          # cmd.exe (PATHEXT) resolves a bare `epubcheck` to a `.cmd`, never to the extensionless sh
+          # wrapper above; bash keeps using that wrapper (DECISIONS #065, integration.test.ts's own
+          # `runValidator`), so this is Windows-only, beside it, never replacing it.
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            printf '@echo off\r\njava -jar "%s\\epubcheck-%s\\epubcheck.jar" %%*\r\n' \
+              "${RUNNER_TEMP}" "${EPUBCHECK_VERSION}" > "${RUNNER_TEMP}/bin/epubcheck.cmd"
+          fi
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+
+      - name: Install html-validate ${{ env.HTML_VALIDATE_VERSION }}
+        shell: bash
+        run: npm install -g "html-validate@${HTML_VALIDATE_VERSION}"
 
       - name: Build the frontend bundle
         shell: bash
