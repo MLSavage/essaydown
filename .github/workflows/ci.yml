@@ -432,6 +432,10 @@ jobs:
       - name: WebdriverIO (e2e/shell, Linux)
         if: runner.os == 'Linux'
         shell: bash
+        # The runner's C.UTF-8 locale gives pandoc's EPUB writer dc:language "C" (DECISIONS #065,
+        # #068); the container pins LANG=en_US.UTF-8 (docker/Dockerfile:22), so this step matches it.
+        env:
+          LANG: en_US.UTF-8
         run: xvfb-run -a pnpm --filter @essaydown/e2e-shell test 2>&1 | tee e2e-shell.log
 
       - name: WebdriverIO (e2e/shell, macOS, Windows)
