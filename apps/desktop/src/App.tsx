@@ -365,8 +365,8 @@ function App() {
     () => ({
       flush: async () => (await pane.current?.flush()) ?? "clean",
       readDoc: (path) => invoke<string>("read_doc", { path }),
-      runExport: ({ path, outPath, format, contents }) =>
-        invoke<ExportOutcome>("export", { path, outPath, format, contents }),
+      runExport: ({ path, outPath, format, contents, title }) =>
+        invoke<ExportOutcome>("export", { path, outPath, format, contents, title }),
       reveal: (path) => invoke("reveal_in_folder", { path }),
     }),
     [],

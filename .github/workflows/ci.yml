@@ -190,10 +190,14 @@ jobs:
           tee_pid=$!
           set -x
           cd fixtures/markdown
+          # essay-fixture.md has no front-matter title, so the product's own rule (DECISIONS
+          # #review-4-r0 U1: the file stem, read from the document's own name, never hand-typed)
+          # applies here too.
+          stem="$(basename essay-fixture.md .md)"
           pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.docx" --pdf-engine=typst -t docx < essay-fixture.md
           pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.pdf" --pdf-engine=typst -t pdf < essay-fixture.md
           pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.html" --pdf-engine=typst -t html --metadata lang=en < essay-fixture.md
-          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.epub" --pdf-engine=typst -t epub --metadata title=essay-fixture --metadata lang=en < essay-fixture.md
+          pandoc -f gfm --standalone --resource-path=. -o "$dir/essay-fixture.epub" --pdf-engine=typst -t epub --metadata title="$stem" --metadata lang=en < essay-fixture.md
           {
             command -v pandoc typst epubcheck html-validate pdfimages
             pandoc --version | head -1

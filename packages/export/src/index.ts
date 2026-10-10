@@ -21,11 +21,18 @@ export interface PandocExportTarget {
   readonly outPath: string;
   /** Pandoc `-t` writer name, e.g. "docx" or "html". */
   readonly format: string;
+  /** The title to feed pandoc as `--metadata title=<title>`, when the document has no front-matter
+   * `title` of its own — absent (never `""`) when it does, so that title always wins (DECISIONS
+   * #review-4-r0 U1; `-M title=` overrides a yaml `title`, confirmed in the pinned pandoc 3.11). */
+  readonly title?: string;
 }
 
 /**
  * The fixed 9-token pandoc invocation (task 4.3's description; DECISIONS #004's primary pipeline):
- * `-f gfm --standalone --resource-path=<dir> -o <out> --pdf-engine=typst -t <format>`. The source
+ * `-f gfm --standalone --resource-path=<dir> -o <out> --pdf-engine=typst -t <format>`, with two more
+ * tokens, `--metadata title=<title>`, appended when `target.title` is given (DECISIONS #review-4-r0
+ * U1) — every export otherwise carries no title at all, so a document with no front-matter `title`
+ * produced an EPUB with no `dc:title` and an empty nav anchor (epubcheck RSC-005). The source
  * document is never a positional argument — production code feeds it over stdin (no input file to
  * resolve a workspace path for), so this array has no such entry.
  */
@@ -33,7 +40,7 @@ export function buildPandocArgs(target: PandocExportTarget): string[] {
   if (!isValidPandocFormat(target.format)) {
     throw new RangeError(`not a valid pandoc format: ${target.format}`);
   }
-  return [
+  const args = [
     "-f",
     "gfm",
     "--standalone",
@@ -44,6 +51,7 @@ export function buildPandocArgs(target: PandocExportTarget): string[] {
     "-t",
     target.format,
   ];
+  return target.title === undefined ? args : [...args, "--metadata", `title=${target.title}`];
 }
 
 /** One pandoc writer name per format this app's export dialog offers by default; any other format

@@ -23,6 +23,12 @@ import { buildPandocArgs, isMissingResourceWarning, outputPathFor, resourceDirFo
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
 const FIXTURE_DOC = "essay-fixture.md";
 
+/** `lang` is not product (DECISIONS #065, Michael's answer): the HTML and EPUB legs below need it
+ * only so this suite's own assertions do not depend on the container's `LANG` (pandoc 3.11's epub
+ * writer derives `dc:language` from it when no `--metadata lang` is given, lesson [4.0]'s sibling
+ * finding), so it is kept as one named test-only exception rather than sprinkled per leg. */
+const LANG_EXCEPTION = ["--metadata", "lang=en"] as const;
+
 interface IndexEntry {
   sectionCount: number;
 }
@@ -80,8 +86,13 @@ afterEach(() => {
  * exit (its return value is stdout alone), which is exactly the case this suite's warning —
  * pandoc exits 0 even on a missing image (lesson [4.0]) — needs to read; `spawnSync` reports both
  * regardless of status. */
-function runPandoc(cwd: string, args: string[], source: string): { status: number; stderr: string } {
-  const result = spawnSync("pandoc", args, { cwd, input: source, encoding: "utf8" });
+function runPandoc(
+  cwd: string,
+  args: string[],
+  source: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { status: number; stderr: string } {
+  const result = spawnSync("pandoc", args, { cwd, input: source, encoding: "utf8", env });
   if (result.error !== undefined) throw result.error;
   return { status: result.status ?? 1, stderr: result.stderr };
 }
@@ -153,7 +164,7 @@ describe("HTML export of essay-fixture (task 4.3 acceptance)", () => {
     const dir = tempDir();
     const outPath = outputPathFor(FIXTURE_DOC, "html");
     const resourceDir = resourceDirFor(FIXTURE_DOC);
-    const args = [...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "html" }), "--metadata", "lang=en"];
+    const args = [...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "html" }), ...LANG_EXCEPTION];
     const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
     const result = runPandoc(FIXTURES, args, source);
     expect(result.stderr).toBe("");
@@ -168,7 +179,7 @@ describe("HTML export of essay-fixture (task 4.3 acceptance)", () => {
     const dir = tempDir();
     const outPath = outputPathFor(FIXTURE_DOC, "html");
     const resourceDir = resourceDirFor(FIXTURE_DOC);
-    const args = [...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "html" }), "--metadata", "lang=en"];
+    const args = [...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "html" }), ...LANG_EXCEPTION];
     const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
     const result = runPandoc(FIXTURES, args, source);
     expect(result.stderr).toBe("");
@@ -222,39 +233,96 @@ describe("PDF export of essay-fixture (task 4.4 acceptance, DECISIONS #004 pipel
 describe("EPUB export of essay-fixture (task 4.4 acceptance)", () => {
   // epubcheck starts a JVM (docker/versions.env's `EPUBCHECK_VERSION`), slower than vitest's
   // default 5000ms test timeout under the full suite's parallel load.
-  it("passes epubcheck with 0 errors and its XHTML contains the 12 headings", () => {
+  it("passes epubcheck with 0 errors, holds dc:title essay-fixture, and its XHTML contains the 12 headings", () => {
     const dir = tempDir();
     const outPath = outputPathFor(FIXTURE_DOC, "epub");
     const resourceDir = resourceDirFor(FIXTURE_DOC);
-    // `--metadata title=…`, beyond the fixed invocation, exactly as the HTML test above adds
-    // `--metadata lang=en`: epubcheck's RSC-005 requires `dc:title` in the OPF, which pandoc's epub
-    // writer only emits from an explicit title (the fixture itself has no H1/title to infer one
-    // from) — this package's own `buildPandocArgs` stays the fixed 9-token shape `export.rs` mirrors.
-    // `--metadata lang=en` is needed too: lacking it, pandoc 3.11's epub writer (EPUB.hs's
-    // `addLanguage`) derives `dc:language` from the process's `LANG` env var (`_` -> `-`, truncated
-    // at the first `.`; `en-US` if unset), and a `C`/`POSIX` locale (this container's, under a
-    // lang-less invocation) yields the bare tag `C`, which epubcheck's OPF-092 rejects
-    // (DECISIONS #065).
+    // The fixture itself has no front-matter `title` (DECISIONS #review-4-r0 U1), so `buildPandocArgs`
+    // is given the document's own file stem as `title` — exactly what `export-sync.ts`'s
+    // `exportDocument` computes from `readFrontMatter` finding no `title` key — and it appends the
+    // `--metadata title=…` tokens itself; `LANG_EXCEPTION` is the only other, test-only, addition.
+    // epubcheck's RSC-005 requires `dc:title` in the OPF, which pandoc's epub writer only emits from
+    // an explicit title (the fixture has no H1 to infer one from either).
     const args = [
-      ...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "epub" }),
-      "--metadata",
-      "title=essay-fixture",
-      "--metadata",
-      "lang=en",
+      ...buildPandocArgs({ resourceDir, outPath: join(dir, outPath), format: "epub", title: "essay-fixture" }),
+      ...LANG_EXCEPTION,
     ];
     const source = readFileSync(`${FIXTURES}/${FIXTURE_DOC}`, "utf8");
-    const result = runPandoc(FIXTURES, args, source);
+    // Run under a fixed, non-POSIX `LANG` (lesson [4.0]'s sibling finding: pandoc's epub writer
+    // derives `dc:language` from the process's own `LANG` when no `--metadata lang` is given) so
+    // this assertion never depends on the container's own locale, only on `args` itself.
+    const result = runPandoc(FIXTURES, args, source, { ...process.env, LANG: "en_US.UTF-8" });
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
 
     const epubPath = join(dir, outPath);
     expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
 
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain("<dc:title");
+    expect(opf).toContain("essay-fixture");
+
     // Pandoc's epub writer splits chapters at H1 (`--split-level=1`'s default); the fixture has no
     // H1 of its own, so every section lands in the one chapter file.
     const xhtml = normalizeWhitespace(execFileSync("unzip", ["-p", epubPath, "EPUB/text/ch001.xhtml"], { encoding: "utf8" }));
     expect(fixtureHeadings).toHaveLength(sectionCount);
     for (const heading of fixtureHeadings) expect(xhtml).toContain(heading);
+  }, 20000);
+});
+
+describe("front-matter title vs. the file-stem fallback (DECISIONS #review-4-r0 U1)", () => {
+  it("a document with its own front-matter title gets no title token and keeps that title in dc:title (presence case)", () => {
+    const dir = tempDir();
+    const outPath = "has-title.epub";
+    const target = { resourceDir: ".", outPath: join(dir, outPath), format: "epub" };
+    const args = [...buildPandocArgs(target), ...LANG_EXCEPTION];
+    expect(args.some((token) => token.startsWith("title="))).toBe(false);
+
+    const source = "---\ntitle: My Own Title\n---\n\n# Heading\n\nBody text.\n";
+    const result = runPandoc(dir, args, source, { ...process.env, LANG: "en_US.UTF-8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain("My Own Title");
+  }, 20000);
+
+  it("a document with no front-matter title gets the stem as its title token and dc:title (absence case)", () => {
+    const dir = tempDir();
+    const outPath = "no-title.epub";
+    const target = { resourceDir: ".", outPath: join(dir, outPath), format: "epub", title: "no-title" };
+    const args = [...buildPandocArgs(target), ...LANG_EXCEPTION];
+    expect(args).toContain("title=no-title");
+
+    const source = "# Heading\n\nBody text.\n";
+    const result = runPandoc(dir, args, source, { ...process.env, LANG: "en_US.UTF-8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain("no-title");
+  });
+
+  it("a stem holding a space and a non-BMP letter round-trips into dc:title", () => {
+    const dir = tempDir();
+    const outPath = "astral-title.epub";
+    const title = "essay plan 𝒳";
+    const args = [
+      ...buildPandocArgs({ resourceDir: ".", outPath: join(dir, outPath), format: "epub", title }),
+      ...LANG_EXCEPTION,
+    ];
+    const source = "# Heading\n\nBody text.\n";
+    const result = runPandoc(dir, args, source, { ...process.env, LANG: "en_US.UTF-8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain(title);
   }, 20000);
 });
 

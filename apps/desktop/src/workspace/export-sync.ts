@@ -9,7 +9,15 @@
  * outcome `flush` itself returns there (DECISIONS #review-2-r0 U1): `"conflict"` and `"failed"`
  * never reach `readDoc`/`runExport`/`reveal`, and are reported as `"not-saved"` instead of resolving
  * alike with a real export.
+ *
+ * `title` (DECISIONS #review-4-r0 U1) is decided here, from the just-settled bytes `readDoc`
+ * returns, never from a stale copy: the document's own front-matter `title` always wins when
+ * present (pandoc's `-M title=` would otherwise override it), so a title is sent only when
+ * `readFrontMatter` finds none — the file's own stem, the same rule `outputPathFor` uses.
  */
+
+import { parse, readFrontMatter } from "@essaydown/core";
+import { stemOf } from "./paths";
 
 export type ExportFlushResult = "clean" | "saved" | "conflict" | "failed";
 
@@ -23,6 +31,9 @@ export interface ExportArgs {
   readonly outPath: string;
   readonly format: string;
   readonly contents: string;
+  /** Absent exactly when the document's own front matter already has a `title` (DECISIONS
+   * #review-4-r0 U1); present as the document's own file stem otherwise. */
+  readonly title?: string;
 }
 
 export interface ExportIO {
@@ -49,7 +60,9 @@ export async function exportDocument(
   const flush = await io.flush();
   if (flush === "conflict" || flush === "failed") return { status: "not-saved", flush };
   const contents = await io.readDoc(docPath);
-  const outcome = await io.runExport({ path: docPath, outPath, format, contents });
+  const hasOwnTitle = readFrontMatter(parse(contents)).title !== null;
+  const title = hasOwnTitle ? undefined : stemOf(docPath);
+  const outcome = await io.runExport({ path: docPath, outPath, format, contents, title });
   // Best-effort OS integration (there is no cross-desktop-environment reveal on Linux, `export.rs`'s
   // own comment): a reveal failure (no `xdg-open`, no file manager) is not an export failure — the
   // file pandoc wrote is not undone by it, so it never turns a successful export into a thrown one.

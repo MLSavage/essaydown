@@ -39,7 +39,11 @@ describe("exportDocument", () => {
     const result = await exportDocument(io, "essay.md", "essay.docx", "docx");
     expect(result).toEqual({ status: "exported", outcome: CLEAN_OUTCOME });
     expect(calls).toEqual(["flush", "readDoc:essay.md", "runExport", "reveal:essay.docx"]);
-    expect(runArgs).toEqual([{ path: "essay.md", outPath: "essay.docx", format: "docx", contents: "contents of essay.md" }]);
+    // The fake's default bytes ("contents of essay.md") carry no front matter, so the title falls
+    // back to the document's own stem (DECISIONS #review-4-r0 U1).
+    expect(runArgs).toEqual([
+      { path: "essay.md", outPath: "essay.docx", format: "docx", contents: "contents of essay.md", title: "essay" },
+    ]);
   });
 
   it("flushes, reads the settled bytes, exports and reveals when the pane just saved", async () => {
@@ -88,5 +92,19 @@ describe("exportDocument", () => {
     const result = await exportDocument(io, "essay.md", "essay.docx", "docx");
     expect(result).toEqual({ status: "exported", outcome: CLEAN_OUTCOME });
     expect(calls).toEqual(["flush", "readDoc:essay.md", "runExport", "reveal:essay.docx"]);
+  });
+
+  it("sends the document's own stem as the title when the settled bytes have no front-matter title (DECISIONS #review-4-r0 U1)", async () => {
+    const { io, runArgs } = fakeIO("clean", CLEAN_OUTCOME);
+    io.readDoc = async () => "# Heading\n\nNo front matter here.\n";
+    await exportDocument(io, "notes/essay.md", "notes/essay.docx", "docx");
+    expect(runArgs[0]?.title).toBe("essay");
+  });
+
+  it("sends no title when the settled bytes already carry a front-matter title", async () => {
+    const { io, runArgs } = fakeIO("clean", CLEAN_OUTCOME);
+    io.readDoc = async () => "---\ntitle: My Own Title\n---\n\n# Heading\n\nBody.\n";
+    await exportDocument(io, "essay.md", "essay.docx", "docx");
+    expect(runArgs[0]?.title).toBeUndefined();
   });
 });

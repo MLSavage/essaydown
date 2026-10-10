@@ -208,8 +208,10 @@ pub fn reveal_in_folder(
 /// to reach `pandoc -t <format>` with no check this route itself enforced (the frontend's own
 /// grammar check and `capabilities/default.json`'s `-t` validator — task 4.2's — are a TypeScript
 /// check and a scope that never governs this Rust-side spawn, `shell_scope.rs`'s module comment).
-/// `out_path` is then rejected if it would overwrite `path` or its sidecar (DECISIONS
-/// #review-4-r0 C5).
+/// `title` is the frontend's own file-stem fallback, sent only when `contents`' front matter has no
+/// `title` key of its own (DECISIONS #review-4-r0 U1) — an explicitly empty string is rejected the
+/// same way, before any path resolution. `out_path` is then rejected if it would overwrite `path`
+/// or its sidecar (DECISIONS #review-4-r0 C5).
 #[tauri::command]
 pub async fn export<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -218,8 +220,12 @@ pub async fn export<R: tauri::Runtime>(
     out_path: String,
     format: String,
     contents: String,
+    title: Option<String>,
 ) -> Result<ExportOutcome, ExportError> {
     export::validate_format(&format)?;
+    if let Some(title) = &title {
+        export::validate_title(title)?;
+    }
     let root = current_root(&state)?;
     let resolved_path = workspace::resolve_workspace_path(&root, &path, false)?;
     let resolved_out_path = workspace::resolve_workspace_path(&root, &out_path, false)?;
@@ -236,7 +242,7 @@ pub async fn export<R: tauri::Runtime>(
         .to_path_buf();
     let path_env = export::pandoc_path_env(&exe_dir, std::env::var_os("PATH").as_deref())
         .map_err(|e| ExportError::Spawn(e.to_string()))?;
-    let args = export::pandoc_args(&resource_dir, &out_path, &format);
+    let args = export::pandoc_args(&resource_dir, &out_path, &format, title.as_deref());
     export::run_pandoc(&app, &root, &out_path, &args, &contents, &path_env).await
 }
 
@@ -612,6 +618,48 @@ mod tests {
         open_test_workspace_with(&webview, &[("a.md", "hello")]);
         let err = expect_export_error(&webview, "a.md", "out.docx", "");
         assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat(String::new())).unwrap());
+    }
+
+    /// Guard (DECISIONS #review-4-r0 U1): an explicitly empty `title` is rejected before any path
+    /// resolution or spawn, the same ordering `validate_format` already has — a caller bug (the
+    /// frontend sends `None`, never `Some("")`, for "this document already has its own title")
+    /// must not reach pandoc as a literal `--metadata title=`.
+    #[test]
+    fn export_rejects_an_empty_title() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = tauri::test::get_ipc_response(
+            &webview,
+            invoke_request(
+                "export",
+                serde_json::json!({ "path": "a.md", "outPath": "out.docx", "format": "docx", "contents": "hello", "title": "" }),
+            ),
+        )
+        .expect_err("an empty title must be rejected");
+        assert_eq!(err, serde_json::to_value(ExportError::EmptyTitle).unwrap());
+    }
+
+    /// Guard: `title` is genuinely optional over real IPC — a request with no `title` field at all
+    /// (the shape every `expect_export_error` call above already sends) still reaches the
+    /// spawn/pandoc stage rather than failing to deserialize.
+    #[test]
+    fn export_with_no_title_field_still_reaches_the_spawn_or_pandoc_stage() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            invoke_request(
+                "export",
+                serde_json::json!({ "path": "a.md", "outPath": "out.docx", "format": "docx", "contents": "hello" }),
+            ),
+        );
+        if let Err(err) = response {
+            let text = err.as_str().expect("ExportError serializes as a string").to_string();
+            assert!(
+                text.starts_with("Spawn:") || text.starts_with("Pandoc:"),
+                "expected a Spawn or Pandoc error, got: {text}"
+            );
+        }
     }
 
     /// Guard: `path`/`out_path` still go through `resolve_workspace_path` exactly as every other

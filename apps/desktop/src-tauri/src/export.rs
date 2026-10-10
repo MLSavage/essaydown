@@ -31,12 +31,13 @@ pub(crate) struct ExportOutcome {
 }
 
 /// `export`'s failure modes beyond the `WorkspaceRoot` contract: an unresolvable `format`, an
-/// `out_path` that would overwrite the source, pandoc could not even be started, or it exited
-/// non-zero.
+/// explicitly empty `title`, an `out_path` that would overwrite the source, pandoc could not even
+/// be started, or it exited non-zero.
 #[derive(Debug)]
 pub(crate) enum ExportError {
     Workspace(WorkspaceError),
     InvalidFormat(String),
+    EmptyTitle,
     OutputOverwritesSource,
     Spawn(String),
     Pandoc { code: Option<i32>, stderr: String },
@@ -55,6 +56,7 @@ impl serde::Serialize for ExportError {
         let s = match self {
             ExportError::Workspace(e) => format!("Workspace:{e:?}"),
             ExportError::InvalidFormat(format) => format!("InvalidFormat:{format}"),
+            ExportError::EmptyTitle => "EmptyTitle".to_string(),
             ExportError::OutputOverwritesSource => "OutputOverwritesSource".to_string(),
             ExportError::Spawn(message) => format!("Spawn:{message}"),
             ExportError::Pandoc { code, stderr } => format!("Pandoc:{code:?}:{stderr}"),
@@ -103,6 +105,19 @@ pub(crate) fn validate_format(format: &str) -> Result<(), ExportError> {
     }
 }
 
+/// Rejects an explicitly empty `title` (DECISIONS #review-4-r0 U1): the frontend sends `None`, not
+/// `Some("")`, for "this document already has its own front-matter title" — an empty string here
+/// is a caller bug, not a request for pandoc's own title-less default, so it is refused loudly
+/// rather than silently producing `--metadata title=` (pandoc reads that as the empty string, not
+/// as "omit the flag").
+pub(crate) fn validate_title(title: &str) -> Result<(), ExportError> {
+    if title.is_empty() {
+        Err(ExportError::EmptyTitle)
+    } else {
+        Ok(())
+    }
+}
+
 /// Rejects an `out_path` (already resolved through `resolve_workspace_path`, so both arguments are
 /// canonical) that names the document itself or its `<stem>.essaydown.json` sidecar
 /// (`workspace::sidecar_relative_for`'s own rule — recomputed here directly from the resolved path,
@@ -131,8 +146,14 @@ pub(crate) fn reject_overwriting_source(out_path: &Path, doc_path: &Path) -> Res
 /// but the exact string `typst` extracts images to the system temp directory and writes a `.typ`
 /// path typst cannot resolve, breaking every image-bearing export. `pandoc_path_env` is what makes
 /// this literal immune to `PATH` shadowing instead.
-pub(crate) fn pandoc_args(resource_dir: &str, out_path: &str, format: &str) -> Vec<String> {
-    vec![
+///
+/// `title`, when `Some`, appends two more tokens, `--metadata title=<title>`, mirroring
+/// `buildPandocArgs`'s own optional `title` field (DECISIONS #review-4-r0 U1): the caller passes
+/// `None` exactly when the document's own front-matter already carries a `title` key, so that
+/// document's own title always wins (pandoc's `-M` overrides a yaml `title`, confirmed in the
+/// pinned image) and this function never has to read the document's bytes itself to decide.
+pub(crate) fn pandoc_args(resource_dir: &str, out_path: &str, format: &str, title: Option<&str>) -> Vec<String> {
+    let mut args = vec![
         "-f".to_string(),
         "gfm".to_string(),
         "--standalone".to_string(),
@@ -142,7 +163,12 @@ pub(crate) fn pandoc_args(resource_dir: &str, out_path: &str, format: &str) -> V
         "--pdf-engine=typst".to_string(),
         "-t".to_string(),
         format.to_string(),
-    ]
+    ];
+    if let Some(title) = title {
+        args.push("--metadata".to_string());
+        args.push(format!("title={title}"));
+    }
+    args
 }
 
 /// The `typst` sidecar's absolute path, beside whichever binary is actually running — mirroring
@@ -269,7 +295,7 @@ mod tests {
 
     #[test]
     fn pandoc_args_has_no_positional_input_argument() {
-        let args = pandoc_args(".", "essay.docx", "docx");
+        let args = pandoc_args(".", "essay.docx", "docx", None);
         assert_eq!(
             args,
             vec![
@@ -284,6 +310,42 @@ mod tests {
                 "docx",
             ]
         );
+    }
+
+    #[test]
+    fn pandoc_args_with_no_title_is_the_fixed_9_token_shape() {
+        assert_eq!(pandoc_args(".", "essay.docx", "docx", None).len(), 9);
+    }
+
+    #[test]
+    fn pandoc_args_with_a_title_appends_the_metadata_tokens() {
+        let args = pandoc_args(".", "essay.epub", "epub", Some("essay-fixture"));
+        assert_eq!(
+            args,
+            vec![
+                "-f",
+                "gfm",
+                "--standalone",
+                "--resource-path=.",
+                "-o",
+                "essay.epub",
+                "--pdf-engine=typst",
+                "-t",
+                "epub",
+                "--metadata",
+                "title=essay-fixture",
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_title_accepts_a_non_empty_string() {
+        assert!(validate_title("essay-fixture").is_ok());
+    }
+
+    #[test]
+    fn validate_title_rejects_an_empty_string() {
+        assert!(matches!(validate_title(""), Err(ExportError::EmptyTitle)));
     }
 
     #[test]
@@ -403,6 +465,8 @@ mod tests {
         assert_eq!(workspace, serde_json::Value::String("Workspace:NoWorkspace".to_string()));
         let invalid_format = serde_json::to_value(ExportError::InvalidFormat("x.lua".to_string())).unwrap();
         assert_eq!(invalid_format, serde_json::Value::String("InvalidFormat:x.lua".to_string()));
+        let empty_title = serde_json::to_value(ExportError::EmptyTitle).unwrap();
+        assert_eq!(empty_title, serde_json::Value::String("EmptyTitle".to_string()));
         let overwrites_source = serde_json::to_value(ExportError::OutputOverwritesSource).unwrap();
         assert_eq!(overwrites_source, serde_json::Value::String("OutputOverwritesSource".to_string()));
         let spawn = serde_json::to_value(ExportError::Spawn("boom".to_string())).unwrap();
