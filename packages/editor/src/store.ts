@@ -22,7 +22,7 @@ import { keymap as proseMirrorKeymap } from "prosemirror-keymap";
 import type { Node as PMNode } from "prosemirror-model";
 import { Selection, type Command, type EditorState, type Plugin, type Transaction } from "prosemirror-state";
 import { createStore, type StoreApi } from "zustand/vanilla";
-import { mdastToPM, pmToMdastWithSources } from "./schema.js";
+import { LINE_ENDING, keptCharacters, mdastToPM, pmToMdastWithSources, schema } from "./schema.js";
 
 /**
  * The Zustand document store of PRD §4 and §6.5: one `{root, sidecar}` snapshot stack (task
@@ -298,6 +298,14 @@ function replaceKeepingCaret(state: EditorState, doc: EditorState["doc"]): Trans
  * where its own text went, a split at its start sends it to the half its text kept, a join at its
  * start to the block it merged into. It goes nowhere when that position's next token was deleted,
  * or when the block it lands in is one the conversion drops.
+ *
+ * **mapOffset** (task 4.26; DECISIONS #review-4-r0 U2): the same mapping one character at a time.
+ * A plain-text offset of an old paragraph becomes a live position through the paragraph's own
+ * kept-character map ({@link keptCharacters}: the characters the editor holds, never widths read
+ * from the converted tree), goes through the transaction's mapping kept after anything inserted
+ * there, and comes back through the kept-character map of the paragraph it landed in. It goes
+ * nowhere when that character was deleted, or when it lands outside a top-level paragraph the
+ * conversion keeps — and `carryEdit` falls back to `mapBlock` there.
  */
 export function carryThrough(
   transaction: Transaction,
@@ -329,7 +337,77 @@ export function carryThrough(
       const at = sources.indexOf(transaction.doc.resolve(inner.pos).index(0));
       return at === -1 ? null : at + offset;
     },
+    mapOffset: (index, plain) => {
+      const old = beforeSources()[index - offset];
+      if (old === undefined) return null;
+      const block = transaction.before.child(old);
+      if (block.type !== schema.nodes.paragraph) return null;
+      let from = 0;
+      for (let i = 0; i < old; i += 1) from += transaction.before.child(i).nodeSize;
+      const was = keptCharacters(childrenOf(block), LINE_ENDING);
+      const live = was.liveOf(keptOffset(was.nodes, plain));
+      const inner = transaction.mapping.mapResult(from + 1 + live, 1);
+      if (inner.deleted) return null;
+      const $pos = transaction.doc.resolve(inner.pos);
+      if ($pos.depth !== 1 || $pos.parent.type !== schema.nodes.paragraph) return null;
+      const at = sources.indexOf($pos.index(0));
+      if (at === -1) return null;
+      const kept = keptCharacters(childrenOf($pos.parent), LINE_ENDING);
+      return { index: at + offset, offset: plainOffset(kept.nodes, kept.offsetOf($pos.parentOffset)) };
+    },
   };
+}
+
+function childrenOf(node: PMNode): PMNode[] {
+  const out: PMNode[] = [];
+  node.forEach((child) => out.push(child));
+  return out;
+}
+
+/**
+ * How many plain-text units (core's `paragraphText`) a kept inline node holds: its text, an
+ * image's alt, an inline tag's value, one for a break. ProseMirror counts an atom as one.
+ */
+function plainWidth(node: PMNode): number {
+  if (node.isText) return (node.text as string).length;
+  if (node.type === schema.nodes.image) return ((node.attrs.alt as string | null) ?? "").length;
+  if (node.type === schema.nodes.raw_inline) return (node.attrs.value as string).length;
+  return node.nodeSize;
+}
+
+/**
+ * The kept offset before the character at plain-text offset `plain` in `nodes`; past the last
+ * character, the end. **Ownership, stated once:** the nodes partition the plain text into
+ * adjacent half-open slices, and an offset belongs to the node whose slice holds it — an offset
+ * inside an atom's text (an image's alt, an inline tag's value) to the atom's start, since the
+ * atom is one position wide, and a zero-width atom (an image with no alt) to nothing, so the
+ * offset at one is the start of whatever follows it.
+ */
+function keptOffset(nodes: readonly PMNode[], plain: number): number {
+  let kept = 0;
+  let seen = 0;
+  for (const node of nodes) {
+    const width = plainWidth(node);
+    if (plain < seen + width) return node.isText ? kept + plain - seen : kept;
+    kept += node.nodeSize;
+    seen += width;
+  }
+  return kept;
+}
+
+/**
+ * The plain-text offset of kept offset `at` in `nodes`, the inverse of {@link keptOffset}: a
+ * position before an atom (zero-width or not) is the offset its text starts at.
+ */
+function plainOffset(nodes: readonly PMNode[], at: number): number {
+  let kept = 0;
+  let seen = 0;
+  for (const node of nodes) {
+    if (at < kept + node.nodeSize) return node.isText ? seen + at - kept : seen;
+    kept += node.nodeSize;
+    seen += plainWidth(node);
+  }
+  return seen;
 }
 
 /**

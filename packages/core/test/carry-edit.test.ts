@@ -54,10 +54,13 @@ function rewrites(...anchors: Anchor[]): Sidecar {
 function edit(
   regions: readonly EditRegion[],
   mapBlock: (index: number) => number | null,
-): TopLevelEdit & { asked: number[]; regionsAsked: number } {
+  mapOffset: TopLevelEdit["mapOffset"] = () => null,
+): TopLevelEdit & { asked: number[]; regionsAsked: number; nearestFor: Anchor[]; offsetsAsked: number[][] } {
   const recorder = {
     asked: [] as number[],
+    offsetsAsked: [] as number[][],
     regionsAsked: 0,
+    nearestFor: [] as Anchor[],
     regions: () => {
       recorder.regionsAsked += 1;
       return regions;
@@ -65,6 +68,13 @@ function edit(
     mapBlock: (index: number) => {
       recorder.asked.push(index);
       return mapBlock(index);
+    },
+    mapOffset: (index: number, offset: number) => {
+      recorder.offsetsAsked.push([index, offset]);
+      return mapOffset(index, offset);
+    },
+    nearest: (anchor: Anchor) => {
+      recorder.nearestFor.push(anchor);
     },
   };
   return recorder;
@@ -317,5 +327,87 @@ describe("carryEdit (task 4.9; PRD §6.2, in-app operations update anchors live)
       FIXTURE_NAMES.filter((name) => candidatesOf(parse(fixture(name))).length > 0).length,
     );
     expect(checked).toBeGreaterThan(0);
+  });
+});
+
+describe("carryEdit follows a sentence by its first character (task 4.26; DECISIONS #review-4-r0 U2)", () => {
+  const BOTH = "Same line here. Same line here.\n";
+  /** {@link BOTH} with the twin typed at the paragraph's start: one run, the paragraph replaced. */
+  const THREE = "Same line here. Same line here. Same line here.\n";
+  const IN_PLACE: EditRegion[] = [{ before: [0], after: [0] }];
+  /** The second sentence's first character (offset 16), moved by the 16 characters typed before it. */
+  const typedBefore: TopLevelEdit["mapOffset"] = (index, offset) => ({ index, offset: offset + 16 });
+
+  it("the item rule: the sentence of its key holding the mapped start, not the twin at its old index", () => {
+    const before = parse(BOTH);
+    const sidecar = rewrites(sentence(before, "Same line here.", 1));
+    const typed = edit(IN_PLACE, (index) => index, typedBefore);
+    const out = carryEdit({ root: before, sidecar }, parse(THREE), typed);
+    expect(out.rewrites[0].anchor.pos).toEqual([0, 2]);
+    expect(out.rewrites[0].anchor.occurrence).toBe(2);
+    expect(typed.offsetsAsked).toEqual([[0, 16]]);
+    expect(typed.nearestFor).toEqual([]);
+  });
+
+  it("the named fallback: a start mapOffset cannot place (deleted) goes nearest-by-index and is reported", () => {
+    const before = parse(BOTH);
+    const anchor = sentence(before, "Same line here.", 1);
+    const deleted = edit(IN_PLACE, (index) => index);
+    const out = carryEdit({ root: before, sidecar: rewrites(anchor) }, parse(THREE), deleted);
+    expect(out.rewrites[0].anchor.pos).toEqual([0, 1]);
+    expect(deleted.nearestFor).toEqual([anchor]);
+  });
+
+  it("the fallback reports nothing when it finds no candidate either", () => {
+    const before = parse(BOTH);
+    const sidecar = rewrites(sentence(before, "Same line here.", 1));
+    const gone = edit(IN_PLACE, (index) => index);
+    expect(carryEdit({ root: before, sidecar }, parse("Other words.\n"), gone)).toBe(sidecar);
+    expect(gone.nearestFor).toEqual([]);
+  });
+
+  it("a mapped start held by a sentence of another key leaves the entry as it was", () => {
+    const before = parse(BOTH);
+    const sidecar = rewrites(sentence(before, "Same line here.", 1));
+    const typed = edit(IN_PLACE, (index) => index, (index) => ({ index, offset: 0 }));
+    expect(carryEdit({ root: before, sidecar }, parse("Other words. Same line here.\n"), typed)).toBe(sidecar);
+    expect(typed.nearestFor).toEqual([]);
+  });
+
+  it("a mapped start no sentence holds (past the text, or in a child with no sentences) leaves the entry", () => {
+    const before = parse(BOTH);
+    const sidecar = rewrites(sentence(before, "Same line here.", 1));
+    const past = edit(IN_PLACE, (index) => index, (index) => ({ index, offset: 999 }));
+    expect(carryEdit({ root: before, sidecar }, parse(THREE), past)).toBe(sidecar);
+    const heading = edit(
+      [{ before: [0], after: [0, 1] }],
+      (index) => index,
+      () => ({ index: 0, offset: 0 }),
+    );
+    expect(carryEdit({ root: before, sidecar }, parse(`# Same line here.\n\n${THREE}`), heading)).toBe(
+      sidecar,
+    );
+  });
+
+  it("a heading or paragraph entry is carried by its child alone: mapOffset is never asked", () => {
+    const before = parse(TWINS);
+    const sidecar = parseSidecar({
+      version: 1,
+      coach: [
+        {
+          anchor: anchorOf(
+            candidatesOf(before).find((one) => one.kind === "paragraph" && one.pos[0] === 2) as never,
+          ),
+          scope: "paragraph",
+          question: "q",
+          askedAt: AT,
+        },
+      ],
+    });
+    const typed = edit(TYPED_ABOVE, shiftFrom(0, 1), typedBefore);
+    const out = carryEdit({ root: before, sidecar }, parse(TYPED), typed);
+    expect(out.coach[0].anchor.pos).toEqual([3]);
+    expect(typed.offsetsAsked).toEqual([]);
+    expect(typed.nearestFor).toEqual([]);
   });
 });

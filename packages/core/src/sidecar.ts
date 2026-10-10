@@ -2,7 +2,7 @@ import type { Root, RootContent, Yaml } from "mdast";
 import { z } from "zod";
 import { blocksOf, moveBlock, moveSection, normalizedText } from "./blocks.js";
 import { CONTENT_ID_LENGTH, contentHash } from "./hash.js";
-import { reorderSentences, sentencesOf, type SegmentOptions } from "./sentences.js";
+import { reorderSentences, sentencesOf, type SegmentOptions, type Sentence } from "./sentences.js";
 
 // ---------------------------------------------------------------------------
 // Schema (PRD §6.2)
@@ -709,6 +709,19 @@ export interface TopLevelEdit {
   readonly regions: () => readonly EditRegion[];
   /** The index the old child `index` has after the edit, or null when the edit removed it. */
   readonly mapBlock: (index: number) => number | null;
+  /**
+   * Where the character at plain-text offset `offset` of old child `index` (a top-level
+   * paragraph, in `paragraphText`'s offsets — what a sentence's `start` counts) is after the
+   * edit: the child holding it and its offset there. Null when the edit deleted that character,
+   * or when it lands nowhere a sentence can be (a block the conversion drops, a non-paragraph).
+   */
+  readonly mapOffset: (index: number, offset: number) => { index: number; offset: number } | null;
+  /**
+   * Told of every dirty sentence entry {@link carryEdit} carried by the nearest-by-index fallback
+   * because `mapOffset` answered null for its start — the one case the item-level mapping does
+   * not decide (task 4.26).
+   */
+  readonly nearest?: (anchor: Anchor) => void;
 }
 
 /** An anchor's identity key: what `occurrence` is counted over (one kind, one hash). */
@@ -735,13 +748,19 @@ function candidatesAt(root: Root, indices: readonly number[], options: SegmentOp
  * run is **dirty**, and only dirty entries are carried.
  *
  * **Where a dirty entry goes.** From the item it names exactly in `state.root` (§6.2 steps 1–2), to
- * the candidate of its key in the child `mapBlock` names that is nearest the item's old position
- * (ties → lowest index) — in a child the edit left alone, the item itself at its old index. Its
- * anchor is rebuilt there, so the sidecar object is replaced only when a rank actually moved. A
- * dirty entry resolved only by steps 3–5, or whose own text the edit changed or removed (no
- * candidate of its key in the child it went to), is left as it was, for the next save's `refresh`
- * to resolve in §6.2 order: no live carry can follow an item whose bytes it no longer finds without
- * inventing an identity.
+ * the item the edit made of it. A sentence is followed by its first character (task 4.26;
+ * DECISIONS #review-4-r0 U2): its start goes through `mapOffset`, and the entry goes to the
+ * sentence of its key whose range holds the mapped start — so a twin typed inside the sentence's
+ * own paragraph, before it or after it, is never taken for it. Only when `mapOffset` answers null
+ * (the first character was deleted) does a sentence fall back, as a heading or paragraph always
+ * goes (one per child, so the child decides), to the candidate of its key in the child `mapBlock`
+ * names that is nearest the item's old position (ties → lowest index), and that fallback is
+ * reported to `edit.nearest`. Its anchor is rebuilt there, so the sidecar object is replaced only
+ * when a rank actually moved. A dirty entry resolved only by steps 3–5, or whose own text the edit
+ * changed or removed (the sentence holding its mapped start is of another key; no candidate of its
+ * key in the child it went to), is left as it was, for the next save's `refresh` to resolve in
+ * §6.2 order: no live carry can follow an item whose bytes it no longer finds without inventing an
+ * identity.
  *
  * Pure: neither argument is mutated; `state.sidecar` itself is returned when nothing moved, and
  * without asking `edit` anything when it has no entries.
@@ -778,9 +797,17 @@ export function carryEdit(
     if (!dirty.has(keyOf(anchor))) return anchor;
     const resolution = resolveAnchor(anchor, state.root, { ...options, candidates: before });
     if (resolution === null || resolution.step > 2) return anchor;
-    const block = edit.mapBlock(resolution.anchor.pos[0]);
-    if (block === null) return anchor;
-    const target = nearestInBlock(after, resolution.anchor, block);
+    let target: AnchorCandidate | null;
+    const mapped =
+      resolution.anchor.kind === "sentence" ? mappedStart(state.root, resolution.anchor, edit, options) : null;
+    if (mapped !== null) {
+      target = holding(after, root, resolution.anchor, mapped, options);
+    } else {
+      const block = edit.mapBlock(resolution.anchor.pos[0]);
+      if (block === null) return anchor;
+      target = nearestInBlock(after, resolution.anchor, block);
+      if (resolution.anchor.kind === "sentence" && target !== null) edit.nearest?.(resolution.anchor);
+    }
     if (target === null) return anchor;
     if (target.hash === anchor.hash && target.occurrence === anchor.occurrence) return anchor;
     moved = true;
@@ -794,6 +821,45 @@ export function carryEdit(
     coach: sidecar.coach.map((entry) => ({ ...entry, anchor: carry(entry.anchor) })),
   };
   return moved ? carried : sidecar;
+}
+
+/** The sentences of `root`'s top-level child `block`, or none when it is not a paragraph. */
+function sentencesAt(root: Root, block: number, options: SegmentOptions): Sentence[] {
+  const node = root.children[block] as RootContent | undefined;
+  return node?.type === "paragraph" ? sentencesOf(node, options) : [];
+}
+
+/** Where `edit` put the first character of the sentence `anchor` names exactly in `before`. */
+function mappedStart(
+  before: Root,
+  anchor: Anchor,
+  edit: TopLevelEdit,
+  options: SegmentOptions,
+): { index: number; offset: number } | null {
+  // `anchor` names a sentence of `before` exactly (§6.2 steps 1–2), so the paragraph has it.
+  const sentence = sentencesAt(before, anchor.pos[0], options)[anchor.pos[1]];
+  return edit.mapOffset(anchor.pos[0], sentence.start);
+}
+
+/**
+ * {@link carryEdit}'s item rule: the sentence of `root` whose range holds `mapped`, when it is of
+ * `anchor`'s hash; null when no sentence holds it or the one that does is another item's text.
+ */
+function holding(
+  candidates: readonly AnchorCandidate[],
+  root: Root,
+  anchor: Anchor,
+  mapped: { index: number; offset: number },
+  options: SegmentOptions,
+): AnchorCandidate | null {
+  const sentence = sentencesAt(root, mapped.index, options).find(
+    (one) => one.start <= mapped.offset && mapped.offset < one.end,
+  );
+  if (sentence === undefined) return null;
+  const found = candidates.find(
+    (one) => one.kind === "sentence" && one.pos[0] === mapped.index && one.pos[1] === sentence.index,
+  );
+  return found !== undefined && found.hash === anchor.hash ? found : null;
 }
 
 /** {@link carryEdit}'s rule: the candidate of `anchor`'s kind and hash in block `at` nearest `anchor.pos`. */

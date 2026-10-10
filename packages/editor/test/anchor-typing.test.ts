@@ -1,14 +1,16 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { Root } from "mdast";
+import type { Paragraph, Root } from "mdast";
 import {
   applyMoveBlock,
   attach,
   candidatesOf,
   format,
+  paragraphText,
   parse,
   parseSidecar,
+  sentencesOf,
   type Anchor,
   type AnchorCandidate,
   type Sidecar,
@@ -460,5 +462,273 @@ describe("replacedRuns and carryThrough's regions: what an edit replaced (task 4
     const inside = state.tr.insertText("x", 9);
     const insideSources = pmToMdastWithSources({ doc: inside.doc, frontMatter: null }).sources;
     expect(carryThrough(inside, 0, insideSources).regions()).toEqual([{ before: [1], after: [1] }]);
+  });
+});
+
+describe("a twin typed in the anchored sentence's own paragraph keeps the anchor on its item (task 4.26; DECISIONS #review-4-r0 U2)", () => {
+  const TWINS = "Same line here. Same line here.\n";
+
+  function onSecondSentence(): Opened {
+    const twins = sentenceAnchors(parse(TWINS), "Same line here.");
+    expect(twins.map((twin) => twin.pos)).toEqual([[0, 0], [0, 1]]);
+    return open(
+      TWINS,
+      parseSidecar({
+        version: 1,
+        rewrites: [
+          {
+            anchor: twins[1],
+            variants: [{ text: "belongs to original second sentence", createdAt: AT }],
+          },
+        ],
+      }),
+    );
+  }
+
+  function expectOnOriginal(context: Opened): void {
+    const { root, sidecar } = saveAndReload(context);
+    expect(format(root)).toBe("Same line here. Same line here. Same line here.\n");
+    expect(sentenceAnchors(root, "Same line here.").map((twin) => twin.pos)).toEqual([
+      [0, 0],
+      [0, 1],
+      [0, 2],
+    ]);
+    expect(sidecar.orphans).toEqual([]);
+    expect(sidecar.rewrites).toHaveLength(1);
+    expect(sidecar.rewrites[0].anchor.pos).toEqual([0, 2]);
+    expect(sidecar.rewrites[0].anchor.occurrence).toBe(2);
+    expect(sidecar.rewrites[0].variants[0].text).toBe("belongs to original second sentence");
+  }
+
+  it("Sol's reproduction: the twin typed at the paragraph start one character per transaction", () => {
+    const context = onSecondSentence();
+    let at = 1;
+    for (const character of "Same line here. ") {
+      context.binding.dispatch(context.view.state.tr.insertText(character, at, at));
+      at += character.length;
+    }
+    expectOnOriginal(context);
+  });
+
+  it("Claude's variant: the twin typed at position 1 in one transaction", () => {
+    const context = onSecondSentence();
+    context.binding.dispatch(context.view.state.tr.insertText("Same line here. ", 1));
+    expectOnOriginal(context);
+  });
+});
+
+describe("a twin typed in the anchored sentence's own paragraph: corpus (task 4.26)", () => {
+  type Leg = "start" | "end" | "first character deleted";
+  const LEGS: Leg[] = ["start", "end", "first character deleted"];
+
+  /** Every top-level sentence of every fixture, with what the legs need to find it again. */
+  const cases = FIXTURE_NAMES.flatMap((name) => {
+    const root = parse(fixture(name));
+    return candidatesOf(root)
+      .filter((one) => one.kind === "sentence")
+      .map((one) => {
+        const [block, index] = one.pos;
+        const sentence = sentencesOf(root.children[block] as Paragraph)[index];
+        return { name, at: `${block},${index}`, candidate: one, sentence };
+      });
+  });
+
+  it("the corpus has sentences to anchor", () => {
+    expect(cases.length).toBeGreaterThan(0);
+    expect(new Set(cases.map((one) => one.name)).size).toBeGreaterThan(1);
+  });
+
+  it.each(LEGS)("editor leg, the sentence's own text typed (or the first character deleted) in its block: %s", (leg) => {
+    let held = 0;
+    let deleted = 0;
+    let merged = 0;
+    for (const { name, at, candidate, sentence } of cases) {
+      const label = `${name} [${at}] ${leg}`;
+      const [block] = candidate.pos;
+      const context = open(
+        fixture(name),
+        parseSidecar({
+          version: 1,
+          rewrites: [{ anchor: anchorOf(candidate), variants: [{ text: label, createdAt: AT }] }],
+        }),
+      );
+      const { state } = context.view;
+      const before = context.store.getState().document;
+      const offset = before.root.children[0]?.type === "yaml" ? 1 : 0;
+      const pmIndex = pmToMdastWithSources({ doc: state.doc, frontMatter: null }).sources[block - offset];
+      let from = 0;
+      for (let i = 0; i < pmIndex; i += 1) from += state.doc.child(i).nodeSize;
+      const node = state.doc.child(pmIndex);
+      const transaction =
+        leg === "start"
+          ? state.tr.insertText(`${candidate.text} `, from + 1)
+          : leg === "end"
+            ? state.tr.insertText(` ${candidate.text}`, from + 1 + node.content.size)
+            : state.tr.delete(from + 1, from + 2);
+      context.binding.dispatch(transaction);
+
+      const { root, sidecar } = saveAndReload(context);
+      const was = paragraphText(before.root.children[block] as Paragraph);
+      // A deletion that empties the block drops it: nothing of the item is left there.
+      const paragraph = root.children.length === before.root.children.length ? root.children[block] : undefined;
+      const now = paragraph?.type === "paragraph" ? paragraphText(paragraph) : "";
+      const start = sentence.start + (leg === "end" ? 0 : now.length - was.length);
+      const item =
+        paragraph?.type === "paragraph"
+          ? sentencesOf(paragraph).find((one) => one.start === start && one.text === sentence.text)
+          : undefined;
+      if (item !== undefined) {
+        expect(sidecar.orphans, label).toEqual([]);
+        expect(sidecar.rewrites[0]?.anchor.pos, label).toEqual([block, item.index]);
+        held += 1;
+      } else if (leg === "first character deleted" && sentence.start === 0) {
+        // The deletion took the item's own first character: `mapOffset` answers null, the one
+        // case left to the nearest-by-index fallback (named in core's carry-edit guards).
+        deleted += 1;
+      } else {
+        // The typed twin and the item segment as one sentence, so no sentence of the item's text
+        // is left at its start: the live carry leaves the entry as it was, never moves it.
+        expect(context.store.getState().document.sidecar.rewrites[0].anchor, label).toEqual(
+          before.sidecar.rewrites[0].anchor,
+        );
+        merged += 1;
+      }
+    }
+    expect(held).toBeGreaterThan(0);
+    expect(held + deleted + merged).toBe(cases.length);
+    if (leg === "first character deleted") expect(deleted).toBeGreaterThan(0);
+    else expect(deleted).toBe(0);
+  }, 120_000);
+});
+
+describe("a twin typed in the anchored sentence's own paragraph: identity leg (task 4.26)", () => {
+  it.each(FIXTURE_NAMES)("a no-op transaction re-serialises the sidecar byte-identically: %s", (name) => {
+    const root = parse(fixture(name));
+    const sidecar = anchoredEverywhere(root);
+    const context = open(fixture(name), sidecar);
+    const opened = context.store.getState().document.sidecar;
+    const write = (current: Sidecar): string => {
+      const choice = chooseSidecarForWrite(null, null, current, context.store.getState().document.root);
+      if (choice.action !== "write") throw new Error("the save skipped its sidecar write");
+      return `${JSON.stringify(choice.sidecar, null, 2)}\n`;
+    };
+    const bytes = write(opened);
+
+    // Every top-level block replaced by its own content: the document changes by transaction, and
+    // by nothing else.
+    const { state } = context.view;
+    const transaction = state.tr.replace(0, state.doc.content.size, state.doc.slice(0, state.doc.content.size));
+    expect(transaction.docChanged).toBe(true);
+    context.binding.dispatch(transaction);
+
+    expect(format(context.store.getState().document.root)).toBe(format(root));
+    expect(context.store.getState().document.sidecar).toBe(opened);
+    expect(write(context.store.getState().document.sidecar)).toBe(bytes);
+  });
+});
+
+describe("carryThrough's mapOffset: one character through the rendered view (task 4.26)", () => {
+  function stateOf(markdown: string): EditorState {
+    return EditorState.create({ doc: mdastToPM(parse(markdown)).doc, plugins: editorPlugins() });
+  }
+  function mapOffsetOf(transaction: Transaction, offset = 0) {
+    const sources = pmToMdastWithSources({ doc: transaction.doc, frontMatter: null }).sources;
+    return carryThrough(transaction, offset, sources).mapOffset;
+  }
+  const paragraph = (text: string) => schema.node("paragraph", null, schema.text(text));
+
+  it("text typed before a character moves it, after it leaves it: first, middle, last and past the end", () => {
+    const state = stateOf("A one. B two.\n");
+    const before = mapOffsetOf(state.tr.insertText("New. ", 1));
+    const after = mapOffsetOf(state.tr.insertText(" New.", 1 + state.doc.child(0).content.size));
+    for (const offset of [0, 7, 12]) {
+      expect(before(0, offset), `${offset}`).toEqual({ index: 0, offset: offset + 5 });
+      expect(after(0, offset), `${offset}`).toEqual({ index: 0, offset });
+    }
+    // Past the last character is the block's end, kept after anything typed there.
+    expect(before(0, 13)).toEqual({ index: 0, offset: 18 });
+    expect(after(0, 13)).toEqual({ index: 0, offset: 18 });
+  });
+
+  it("an index past the document, or the front matter's, maps nowhere; the offset moves every index", () => {
+    const state = stateOf("A one.\n\nB two.\n");
+    const map = mapOffsetOf(state.tr.insertText("x", 2), 1);
+    expect(map(0, 0)).toBeNull();
+    expect(map(3, 0)).toBeNull();
+    expect(map(2, 1)).toEqual({ index: 2, offset: 1 });
+  });
+
+  it("a character of a block that is not a paragraph maps nowhere", () => {
+    const state = stateOf("# A head.\n\nB two.\n");
+    const map = mapOffsetOf(state.tr.insertText("x", 1));
+    expect(map(0, 0)).toBeNull();
+    expect(map(1, 0)).toEqual({ index: 1, offset: 0 });
+  });
+
+  it("a deleted character maps nowhere; the one after it takes its place", () => {
+    const state = stateOf("A one.\n");
+    const map = mapOffsetOf(state.tr.delete(1, 2));
+    expect(map(0, 0)).toBeNull();
+    expect(map(0, 1)).toEqual({ index: 0, offset: 0 });
+  });
+
+  it("a character that lands outside a top-level paragraph (wrapped in a quote) maps nowhere", () => {
+    const state = stateOf("A one.\n");
+    const range = state.doc.resolve(1).blockRange() as NonNullable<ReturnType<ReturnType<typeof state.doc.resolve>["blockRange"]>>;
+    const map = mapOffsetOf(state.tr.wrap(range, [{ type: schema.nodes.blockquote }]));
+    expect(map(0, 0)).toBeNull();
+  });
+
+  it("a character that lands in a block the conversion drops maps nowhere", () => {
+    // `a b` with both letters deleted leaves ` `, which the conversion drops; the space survived.
+    const state = EditorState.create({ doc: schema.node("doc", null, [paragraph("a b")]) });
+    const transaction = state.tr.delete(3, 4).delete(1, 2);
+    expect(pmToMdastWithSources({ doc: transaction.doc, frontMatter: null }).sources).toEqual([]);
+    expect(mapOffsetOf(transaction)(0, 1)).toBeNull();
+  });
+
+  it("offsets are the live document's characters: whitespace the conversion drops is not counted, typed whitespace is", () => {
+    const state = EditorState.create({ doc: schema.node("doc", null, [paragraph("  A one. B two.")]) });
+    expect(mapOffsetOf(state.tr.insertText("Z", 1))(0, 7)).toEqual({ index: 0, offset: 10 });
+    expect(mapOffsetOf(state.tr.insertText("Z", 3))(0, 7)).toEqual({ index: 0, offset: 8 });
+  });
+
+  it("an image's alt, an inline tag's value and a break are each their plain-text width; a zero-width image owns nothing", () => {
+    // Built by hand so every live position is known: image(ab) " One. " <i> "t" </i> " Two." break
+    // "Three. " image() "Four." — plain text `ab One. <i>t</i> Two. Three. Four.`.
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.node("image", { url: "x.png", alt: "ab" }),
+        schema.text(" One. "),
+        schema.node("raw_inline", { value: "<i>" }),
+        schema.text("t"),
+        schema.node("raw_inline", { value: "</i>" }),
+        schema.text(" Two."),
+        schema.node("hard_break"),
+        schema.text("Three. "),
+        schema.node("image", { url: "y.png", alt: "" }),
+        schema.text("Four."),
+      ]),
+    ]);
+    const state = EditorState.create({ doc });
+    const root = pmToMdastWithSources({ doc, frontMatter: null }).root;
+    expect(paragraphText(root.children[0] as Paragraph)).toBe("ab One. <i>t</i> Two. Three. Four.");
+    // [plain offset, live offset, character] of the character after each kind of atom: the
+    // image's alt, the inline tags, the break, the zero-width image.
+    const characters: [number, number, string][] = [
+      [3, 2, "O"],
+      [17, 11, "T"],
+      [22, 16, "T"],
+      [29, 24, "F"],
+    ];
+    for (const [plain, live, character] of characters) {
+      expect(state.doc.textBetween(1 + live, 2 + live), `${plain}`).toBe(character);
+      const typedBefore = mapOffsetOf(state.tr.insertText("Z", 1 + live));
+      const typedAfter = mapOffsetOf(state.tr.insertText("Z", 2 + live));
+      expect(typedBefore(0, plain), `${plain} before`).toEqual({ index: 0, offset: plain + 1 });
+      expect(typedAfter(0, plain), `${plain} after`).toEqual({ index: 0, offset: plain });
+    }
+    // An offset inside the alt is the image's start, which is where its plain text starts.
+    expect(mapOffsetOf(state.tr.insertText("Z", 1))(0, 1)).toEqual({ index: 0, offset: 1 });
   });
 });
