@@ -538,67 +538,102 @@ describe("a twin typed in the anchored sentence's own paragraph: corpus (task 4.
     expect(new Set(cases.map((one) => one.name)).size).toBeGreaterThan(1);
   });
 
-  it.each(LEGS)("editor leg, the sentence's own text typed (or the first character deleted) in its block: %s", (leg) => {
-    let held = 0;
-    let deleted = 0;
-    let merged = 0;
-    for (const { name, at, candidate, sentence } of cases) {
-      const label = `${name} [${at}] ${leg}`;
-      const [block] = candidate.pos;
-      const context = open(
-        fixture(name),
-        parseSidecar({
-          version: 1,
-          rewrites: [{ anchor: anchorOf(candidate), variants: [{ text: label, createdAt: AT }] }],
-        }),
-      );
-      const { state } = context.view;
-      const before = context.store.getState().document;
-      const offset = before.root.children[0]?.type === "yaml" ? 1 : 0;
-      const pmIndex = pmToMdastWithSources({ doc: state.doc, frontMatter: null }).sources[block - offset];
-      let from = 0;
-      for (let i = 0; i < pmIndex; i += 1) from += state.doc.child(i).nodeSize;
-      const node = state.doc.child(pmIndex);
-      const transaction =
-        leg === "start"
-          ? state.tr.insertText(`${candidate.text} `, from + 1)
-          : leg === "end"
-            ? state.tr.insertText(` ${candidate.text}`, from + 1 + node.content.size)
-            : state.tr.delete(from + 1, from + 2);
-      context.binding.dispatch(transaction);
-
-      const { root, sidecar } = saveAndReload(context);
-      const was = paragraphText(before.root.children[block] as Paragraph);
-      // A deletion that empties the block drops it: nothing of the item is left there.
-      const paragraph = root.children.length === before.root.children.length ? root.children[block] : undefined;
-      const now = paragraph?.type === "paragraph" ? paragraphText(paragraph) : "";
-      const start = sentence.start + (leg === "end" ? 0 : now.length - was.length);
-      const item =
-        paragraph?.type === "paragraph"
-          ? sentencesOf(paragraph).find((one) => one.start === start && one.text === sentence.text)
-          : undefined;
-      if (item !== undefined) {
-        expect(sidecar.orphans, label).toEqual([]);
-        expect(sidecar.rewrites[0]?.anchor.pos, label).toEqual([block, item.index]);
-        held += 1;
-      } else if (leg === "first character deleted" && sentence.start === 0) {
-        // The deletion took the item's own first character: `mapOffset` answers null, the one
-        // case left to the nearest-by-index fallback (named in core's carry-edit guards).
-        deleted += 1;
-      } else {
-        // The typed twin and the item segment as one sentence, so no sentence of the item's text
-        // is left at its start: the live carry leaves the entry as it was, never moves it.
-        expect(context.store.getState().document.sidecar.rewrites[0].anchor, label).toEqual(
-          before.sidecar.rewrites[0].anchor,
-        );
-        merged += 1;
-      }
+  /**
+   * DECISIONS #068: each case opens a fixture, binds a view and saves and reloads it, so one `it`
+   * running every case of a leg costs far more than the family's own budget on the larger
+   * fixtures — the cases are grouped once, at collection time, by fixture and anchored top-level
+   * block (the shape of position-map-inverse.test.ts's `planned`), so each block is a test of its
+   * own under `CASE_LEG_TIMEOUT_MS`, and a trailing `it` per leg keeps the corpus-wide assertions.
+   */
+  const planned = FIXTURE_NAMES.flatMap((name) => {
+    const byBlock = new Map<number, (typeof cases)[number][]>();
+    for (const item of cases) {
+      if (item.name !== name) continue;
+      const [block] = item.candidate.pos;
+      const list = byBlock.get(block);
+      if (list) list.push(item);
+      else byBlock.set(block, [item]);
     }
-    expect(held).toBeGreaterThan(0);
-    expect(held + deleted + merged).toBe(cases.length);
-    if (leg === "first character deleted") expect(deleted).toBeGreaterThan(0);
-    else expect(deleted).toBe(0);
-  }, 120_000);
+    return [...byBlock.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([block, items]) => ({ name, block, items }));
+  });
+
+  const CASE_LEG_TIMEOUT_MS = 30_000;
+
+  for (const leg of LEGS) {
+    describe(`editor leg, the sentence's own text typed (or the first character deleted) in its block: ${leg}`, () => {
+      let held = 0;
+      let deleted = 0;
+      let merged = 0;
+      let blocksRun = 0;
+
+      for (const { name, block, items } of planned) {
+        it(`${name}, block ${block}`, () => {
+          for (const { at, candidate, sentence } of items) {
+            const label = `${name} [${at}] ${leg}`;
+            const context = open(
+              fixture(name),
+              parseSidecar({
+                version: 1,
+                rewrites: [{ anchor: anchorOf(candidate), variants: [{ text: label, createdAt: AT }] }],
+              }),
+            );
+            const { state } = context.view;
+            const before = context.store.getState().document;
+            const offset = before.root.children[0]?.type === "yaml" ? 1 : 0;
+            const pmIndex = pmToMdastWithSources({ doc: state.doc, frontMatter: null }).sources[block - offset];
+            let from = 0;
+            for (let i = 0; i < pmIndex; i += 1) from += state.doc.child(i).nodeSize;
+            const node = state.doc.child(pmIndex);
+            const transaction =
+              leg === "start"
+                ? state.tr.insertText(`${candidate.text} `, from + 1)
+                : leg === "end"
+                  ? state.tr.insertText(` ${candidate.text}`, from + 1 + node.content.size)
+                  : state.tr.delete(from + 1, from + 2);
+            context.binding.dispatch(transaction);
+
+            const { root, sidecar } = saveAndReload(context);
+            const was = paragraphText(before.root.children[block] as Paragraph);
+            // A deletion that empties the block drops it: nothing of the item is left there.
+            const paragraph = root.children.length === before.root.children.length ? root.children[block] : undefined;
+            const now = paragraph?.type === "paragraph" ? paragraphText(paragraph) : "";
+            const start = sentence.start + (leg === "end" ? 0 : now.length - was.length);
+            const item =
+              paragraph?.type === "paragraph"
+                ? sentencesOf(paragraph).find((one) => one.start === start && one.text === sentence.text)
+                : undefined;
+            if (item !== undefined) {
+              expect(sidecar.orphans, label).toEqual([]);
+              expect(sidecar.rewrites[0]?.anchor.pos, label).toEqual([block, item.index]);
+              held += 1;
+            } else if (leg === "first character deleted" && sentence.start === 0) {
+              // The deletion took the item's own first character: `mapOffset` answers null, the
+              // one case left to the nearest-by-index fallback (named in core's carry-edit guards).
+              deleted += 1;
+            } else {
+              // The typed twin and the item segment as one sentence, so no sentence of the item's
+              // text is left at its start: the live carry leaves the entry as it was, never moves it.
+              expect(context.store.getState().document.sidecar.rewrites[0].anchor, label).toEqual(
+                before.sidecar.rewrites[0].anchor,
+              );
+              merged += 1;
+            }
+          }
+          blocksRun += 1;
+        }, CASE_LEG_TIMEOUT_MS);
+      }
+
+      it(`ran every planned block for ${leg}, held at least one case, and accounted for every case of the leg`, () => {
+        expect(blocksRun).toBe(planned.length);
+        expect(held).toBeGreaterThan(0);
+        expect(held + deleted + merged).toBe(cases.length);
+        if (leg === "first character deleted") expect(deleted).toBeGreaterThan(0);
+        else expect(deleted).toBe(0);
+      });
+    });
+  }
 });
 
 describe("a twin typed in the anchored sentence's own paragraph: identity leg (task 4.26)", () => {
