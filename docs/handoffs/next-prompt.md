@@ -1,36 +1,33 @@
-Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 091: `git show handoff/091:docs/handoffs/091-phase-4-verify-r1h-gate-failed.md`. It is committed on `handoff/091`, stacked on `handoff/090` → `handoff/089`, and supersedes 090. `phase/4..handoff/091` is the one range the next principal commit on the phase cherry-picks. It is docs only and carries DECISIONS #067.
+Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 092: `git show handoff/092:docs/handoffs/092-phase-4-review-r1-reconciliation-pending.md`. It is committed on `handoff/092`, cut from `phase/4` at `3332d60`, and supersedes 091; handoff 091 and DECISIONS #067/#068 are already in `phase/4`. `phase/4..handoff/092` is one docs-only commit, which the reconciliation cherry-picks.
 
 **State.**
-- `GATE-FAILED 4.verify.r1h a1` (run `38036514463`, SHA `d1f9fa6`). The runner printed `PLAN-GATE plan.4.verify.r1h.r0` (pending), and `4.verify.r1h` is blocked.
-  - Failure 1: two cases in 4.27's `anchor-source-typing.test.ts` corpus source leg timed out at 120 s on ubuntu and windows CI.
-  - Failure 2: 4.29's `export.spec.ts` EPUB case fails epubcheck `OPF-092` (language tag) on ubuntu.
-- The runner is idle (pane `essaydown:runner` at zsh).
-- `phase/4` = `d1f9fa6`; `origin/phase/4` is 7 behind. `main` = `8aba511`.
-- The remaining chain after the repair: the repair tasks → a new verifier and its gate → `4.5.r1a/b` → `4.5.r1d` → `4.close`.
+- `PRINCIPAL 4.5.r1d` is pending. The runner is idle (pane `essaydown:runner` at zsh), and `.wt/4.5.r1d` is on `task/4.5.r1d` at `3332d60`.
+- Gate `4.verify.r1.g1h` returned ACCEPT on a1, run `38046460346`. Repairs 4.30 and 4.31 passed (#068).
+- Review r1 at `3332d60`:
+  - Claude: FAIL, 1 blocker. At `export-sync.ts:63`, a front-matter title of `title:`, `title: ""` or `title: ~` yields an invalid EPUB that the app reports as exported.
+  - Sol: PASS, 0/0/0.
+- `phase/4` = `3332d60` = `origin/phase/4`. `main` = `8aba511`.
 
 Your job this session, in order:
 
 1. Run `ralph/ralph.sh status` and `ralph/ralph.sh doctor`. Give Michael the one-line state, plus `git push origin phase/4` if `git rev-list --count origin/phase/4..phase/4` is not 0.
-2. **Fable brief on GATE-FAILED 4.verify.r1h a1**, as handoff 091's Next Steps say. If it puts failure 2's product choice on Michael, ask him before planning.
-3. **The planning commit**: `ralph/ralph.sh plan plan.4.verify.r1h.r0`, in `.wt/plan.4.verify.r1h.r0`.
-   - First cherry-pick `phase/4..handoff/091`.
-   - Write the repair tasks, the next verifier and its gate, and the rewired `4.5.r1a/b/d` rows (no Grok, #043). The reviewer rows depend on the new producer.
-   - Update `EXPECTED_COUNT`.
-   - The promise goes only in the `wip(plan.…)` commit message.
-   - Then `sync-state`, plus a `--dry-run` that names the first repair task, then the restart (#051).
-4. **Arm the positional watcher** from handoff 091: `start=275135`, `n` = the RAW count recounted, a persistent Monitor (30-minute cap). On every expiry and after every retry, re-arm it, run `status`, and run a catch-up grep.
-5. **Handle each stop signal** as PRINCIPAL.md says:
+2. **The reconciliation `PRINCIPAL 4.5.r1d`** (review set `4.5`, from `ralph/tasks.json`), run by this fresh session in `.wt/4.5.r1d`:
+   - First `git cherry-pick handoff/092`.
+   - Write a Fable brief on the r1 reports (`.evidence/reviews/4/r1/{claude,sol}/`). Also decide the WARN on 4.5.r1b (sibling mention, #025/#044).
+   - The blocker goes to Michael before any fix chain (#041 D1). Ask him, with Fable's recommendation.
+   - Then commit DECISIONS `#review-4-r1`. If a fix is taken, also commit the fix rows → `4.verify.r2` (needsCI) → `4.5.r2a/b/d` (no Grok, #043; the reviewer rows depend on the new producer), with `4.close` rewired to `4.5.r2d`, plus `EXPECTED_COUNT`.
+   - The same commit appends its own `- [4.5.r1d] ` journal line. The promise goes only in the `wip(4.5.r1d)` commit message.
+3. Restart the runner: `tmux send-keys -t essaydown:runner 'ralph/ralph.sh run --phase 4 2>&1 | tee -a .evidence/runner.log' Enter`. Then arm the positional watcher from handoff 092: `start=275135`, `n` = the RAW count recounted, a persistent Monitor (30-minute cap). On every expiry and after every retry, re-arm it, run `status`, and run a catch-up grep.
+4. **Handle each stop signal** as PRINCIPAL.md says:
    - A capped attempt that the runner carries on: nothing.
    - `NO-JOURNAL`, or `STUCK` from a capped run: a lesson, then `retry` (#027, #038).
    - `STUCK` after three attempts: a Fable brief.
-   - The new verifier gate: `scripts/gate.sh <gate id>` backgrounded, with its output file read. Read the `[autosave]` readings per #066.
+   - A verifier gate: `scripts/gate.sh <gate id>` backgrounded, with its output file read. Read the `[autosave]` readings per #066.
    - `GATE-FAILED`: a Fable brief, then a repair via `ralph/ralph.sh plan`.
-6. **At `PRINCIPAL 4.5.r1d`: rotate.** A fresh session runs the reconciliation `PRINCIPAL 4.5.r1d` (review set `4.5`, from `ralph/tasks.json`):
-   - It first cherry-picks the newest handoff range into `.wt/4.5.r1d`, if the planning commit has not carried it.
-   - It runs a Fable brief on the r1 reports (Claude, Sol).
-   - A blocker found in r1 goes to Michael before any fix chain (#041 D1).
-7. **Rotate** (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
-   - Mid-phase, a handoff goes on `handoff/NNN` from a temporary worktree, stacked on the newest `handoff/NNN` whose content is not yet in `phase/4` (`handoff/091` now; compare content, because a cherry-picked ref is never an ancestor).
+   - The next `PRINCIPAL 4.5.r2d`: rotate, and a fresh session reconciles.
+   - `4.close`: idle boundary.
+5. **Rotate** (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
+   - Mid-phase, a handoff goes on `handoff/NNN` from a temporary worktree, stacked on the newest `handoff/NNN` whose content is not yet in `phase/4` (`handoff/092` now; compare content, because a cherry-picked ref is never an ancestor).
    - The relaunch line is `git show handoff/NNN:docs/handoffs/next-prompt.md | pbcopy && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
    - At an idle boundary (after `4.close`) it is `pbcopy < docs/handoffs/next-prompt.md && claude --model claude-opus-5-5 --remote-control essaydown-principal`.
 
