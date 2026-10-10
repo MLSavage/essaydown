@@ -1,13 +1,14 @@
-//! No production code: the `shell:allow-spawn` scope itself lives entirely in
-//! `capabilities/default.json` (task 4.2), validated by `tauri-plugin-shell`'s own scope engine.
-//! This module only hosts the cargo test that drives that scope through real IPC (the same
-//! `tauri::test::MockRuntime` + `get_ipc_response` pattern `commands::tests` uses), so a change to
-//! the capability file is exercised against the exact ACL `run()` ships, not a hand-rolled copy of
-//! the regex rules. This ACL governs only the webview-facing `plugin:shell|spawn` IPC command (no
-//! `@tauri-apps/plugin-shell` import exists under `apps/desktop/src`, so the frontend never calls
-//! it) — `export.rs`'s own Rust-side `ShellExt::sidecar`/`Command::spawn` route to `pandoc` never
-//! consults it at all (confirmed by reading the installed `tauri-plugin-shell` 2.3.6 crate), so
-//! 4.18's `PATH` prepend on the Rust-side pandoc `Command` needs no capability change here.
+//! No production code: `capabilities/default.json` (task 4.2) granted a `shell:allow-spawn` scope
+//! here, meant as "the only thing that can invoke either sidecar" (DECISIONS #review-4-r0 S3); it
+//! never was — `export.rs`'s own Rust-side `ShellExt::sidecar`/`Command::spawn` route to `pandoc`
+//! and `typst` never consulted it at all (confirmed by reading the installed `tauri-plugin-shell`
+//! 2.3.6 crate), and no `@tauri-apps/plugin-shell` import exists under `apps/desktop/src` for the
+//! frontend to reach the webview-facing `plugin:shell|spawn` IPC command the scope actually
+//! governed. Task 4.23 removed the permission entirely (`export`'s own `format`/`out_path` checks,
+//! `export.rs`, are what guard the Rust-side route now); this module hosts the cargo test proving
+//! `plugin:shell|spawn` of each sidecar is denied outright with no permission granting it (the same
+//! `tauri::test::MockRuntime` + `get_ipc_response` pattern `commands::tests` uses), so a capability
+//! file that ever re-grants the scope is caught here, not assumed.
 
 #[cfg(test)]
 mod tests {
@@ -90,109 +91,33 @@ mod tests {
         ]
     }
 
-    /// A scope rejection (a failed `Var` regex, a missing argument, or an unexpected shape) always
-    /// mentions "regex validation", "not found" or "unexpected format" (`scope::Error`'s own
-    /// `Validation`/`MissingVar`/`InvalidInput` messages); a *resolvable* call that the scope
-    /// accepted but this mock test environment cannot actually launch (no bundled sidecar
-    /// directory exists here) instead fails with "failed to create the path to the command"
-    /// (`scope::Error::Sidecar`) — a different failure, at a later stage, proving the args
-    /// themselves passed scope validation.
-    fn is_scope_rejection(message: &str) -> bool {
-        message.contains("regex validation")
-            || message.contains("was not found")
-            || message.contains("unexpected format")
-            || message.contains("not found")
+    /// A capability denial — no permission in `capabilities/default.json` grants `plugin:shell|
+    /// spawn` for either sidecar at all now, so every call is rejected on the ACL itself, before
+    /// any scope (`Var` regex, argument count/shape) is even consulted — always mentions "not
+    /// allowed" (`tauri::ipc::authority`'s own denial messages, e.g. "… not allowed. …" or "…
+    /// explicitly denied …").
+    fn is_capability_denied(message: &str) -> bool {
+        message.contains("not allowed") || message.contains("denied")
     }
 
+    /// Guard: `plugin:shell|spawn` of the pandoc sidecar is denied even for a well-formed, in-
+    /// vocabulary call (task 4.2's own 9-token shape) — the strongest case, since a legitimate-
+    /// looking request proves the denial is unconditional, not a rejected argument shape.
     #[test]
-    fn a_well_formed_docx_export_call_passes_scope_validation() {
+    fn pandoc_spawn_via_plugin_shell_is_denied_with_no_shell_allow_spawn_permission() {
         let args = valid_pandoc_args("docs", "out/essay.docx", "docx");
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let result = spawn_pandoc(&args);
-        if let Err(message) = result {
-            assert!(
-                !is_scope_rejection(&message),
-                "a well-formed call must not be rejected by the scope, got: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_well_formed_pdf_export_call_passes_scope_validation() {
-        let args = valid_pandoc_args(".", "out/essay.pdf", "pdf");
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let result = spawn_pandoc(&args);
-        if let Err(message) = result {
-            assert!(
-                !is_scope_rejection(&message),
-                "a well-formed call must not be rejected by the scope, got: {message}"
-            );
-        }
-    }
-
-    /// A `--lua-filter` smuggled into the `-t` format slot (the one value pandoc actually reads
-    /// from an attacker-reachable field) must fail the format validator — pandoc Lua filters run
-    /// arbitrary Lua, so this is the exact class of argument the scope exists to stop at the format
-    /// position, not just at `--resource-path`/`-o`.
-    #[test]
-    fn lua_filter_smuggled_as_the_format_value_is_rejected() {
-        let args = valid_pandoc_args("docs", "out/essay.html", "--lua-filter=evil.lua");
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let message = spawn_pandoc(&args).expect_err("a --lua-filter format value must be rejected");
-        assert!(is_scope_rejection(&message), "expected a scope rejection, got: {message}");
-    }
-
-    #[test]
-    fn an_absolute_resource_path_outside_the_workspace_is_rejected() {
-        let args = valid_pandoc_args("/etc", "out/essay.html", "html");
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let message =
-            spawn_pandoc(&args).expect_err("an absolute --resource-path must be rejected");
-        assert!(is_scope_rejection(&message), "expected a scope rejection, got: {message}");
+            spawn_pandoc(&args).expect_err("plugin:shell|spawn of the pandoc sidecar must be denied");
+        assert!(is_capability_denied(&message), "expected a capability denial, got: {message}");
     }
 
+    /// Guard: `plugin:shell|spawn` of the typst sidecar is denied too, even for its one configured
+    /// invocation (`--version`) under the capability 4.2 shipped.
     #[test]
-    fn a_traversal_resource_path_outside_the_workspace_is_rejected() {
-        let args = valid_pandoc_args("../../etc", "out/essay.html", "html");
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let message =
-            spawn_pandoc(&args).expect_err("a `..`-traversal --resource-path must be rejected");
-        assert!(is_scope_rejection(&message), "expected a scope rejection, got: {message}");
-    }
-
-    #[test]
-    fn an_absolute_output_path_outside_the_workspace_is_rejected() {
-        let args = valid_pandoc_args("docs", "/etc/passwd", "html");
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let message = spawn_pandoc(&args).expect_err("an absolute -o path must be rejected");
-        assert!(is_scope_rejection(&message), "expected a scope rejection, got: {message}");
-    }
-
-    #[test]
-    fn a_traversal_output_path_outside_the_workspace_is_rejected() {
-        let args = valid_pandoc_args("docs", "../../etc/passwd", "html");
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let message = spawn_pandoc(&args).expect_err("a `..`-traversal -o path must be rejected");
-        assert!(is_scope_rejection(&message), "expected a scope rejection, got: {message}");
-    }
-
-    /// `typst`'s only configured invocation is a bare `--version`, so this is also where the
-    /// "nothing else" clause of the scope is pinned: any other argument is rejected.
-    #[test]
-    fn typst_version_check_passes_scope_validation() {
-        let result = spawn_sidecar("binaries/typst", &["--version"]);
-        if let Err(message) = result {
-            assert!(
-                !is_scope_rejection(&message),
-                "typst --version must not be rejected by the scope, got: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn typst_called_with_anything_other_than_version_is_rejected() {
-        let message = spawn_sidecar("binaries/typst", &["compile", "doc.typ"])
-            .expect_err("typst must only ever be called with --version");
-        assert!(is_scope_rejection(&message), "expected a scope rejection, got: {message}");
+    fn typst_spawn_via_plugin_shell_is_denied_with_no_shell_allow_spawn_permission() {
+        let message = spawn_sidecar("binaries/typst", &["--version"])
+            .expect_err("plugin:shell|spawn of the typst sidecar must be denied");
+        assert!(is_capability_denied(&message), "expected a capability denial, got: {message}");
     }
 }

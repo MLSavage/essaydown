@@ -44,8 +44,12 @@ tauri-plugin-fs = "2"
 tauri-plugin-persisted-scope = { version = "2", features = ["protocol-asset"] }
 # The file tree sidebar's "Open Folder" native folder picker (PRD §4 Rust crates row).
 tauri-plugin-dialog = "2"
-# `export`'s pandoc/typst sidecars (PRD §4 Rust crates row, §6.4 `export`; task 4.2): the
-# `shell:allow-spawn` capability scope below is the only thing that can invoke either sidecar.
+# `export`'s pandoc/typst sidecars (PRD §4 Rust crates row, §6.4 `export`; task 4.2, corrected by
+# task 4.23): `export.rs`'s own Rust-side `ShellExt::sidecar`/`Command::spawn` route invokes both
+# sidecars directly and consults no capability scope at all; `export`'s own `format`/`out_path`
+# checks are what guard that route (DECISIONS #review-4-r0 S3), and `plugin:shell|spawn` — the
+# webview-facing IPC command the capabilities file actually gated — is denied outright, since no
+# `@tauri-apps/plugin-shell` import exists under `apps/desktop/src` for the frontend to call it.
 tauri-plugin-shell = "2"
 # `delete_to_trash`'s real `TrashBackend` impl (PRD §4, §6.4); tests inject a recording fake instead.
 trash = "5"

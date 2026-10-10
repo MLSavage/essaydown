@@ -204,6 +204,12 @@ pub fn reveal_in_folder(
 /// computed (`packages/export`'s `outputPathFor`), both resolved through the same `WorkspaceRoot`
 /// contract as every other path-taking command. `contents` is the frontend's already-settled
 /// Markdown (CLAUDE.md: export settles the pending source burst before it reads, same as save).
+/// `format` is validated before any path resolution or spawn (DECISIONS #review-4-r0 S3): it used
+/// to reach `pandoc -t <format>` with no check this route itself enforced (the frontend's own
+/// grammar check and `capabilities/default.json`'s `-t` validator — task 4.2's — are a TypeScript
+/// check and a scope that never governs this Rust-side spawn, `shell_scope.rs`'s module comment).
+/// `out_path` is then rejected if it would overwrite `path` or its sidecar (DECISIONS
+/// #review-4-r0 C5).
 #[tauri::command]
 pub async fn export<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -213,9 +219,11 @@ pub async fn export<R: tauri::Runtime>(
     format: String,
     contents: String,
 ) -> Result<ExportOutcome, ExportError> {
+    export::validate_format(&format)?;
     let root = current_root(&state)?;
-    workspace::resolve_workspace_path(&root, &path, false)?;
-    workspace::resolve_workspace_path(&root, &out_path, false)?;
+    let resolved_path = workspace::resolve_workspace_path(&root, &path, false)?;
+    let resolved_out_path = workspace::resolve_workspace_path(&root, &out_path, false)?;
+    export::reject_overwriting_source(&resolved_out_path, &resolved_path)?;
     let resource_dir = export::resource_dir_of(&path);
     // `--pdf-engine=typst` stays the literal bare name (task 4.18, DECISIONS #064; lessons [4.17]):
     // pandoc's typst builder keys its media-placement rule on that exact string, so the fix instead
@@ -259,6 +267,11 @@ fn reveal(path: &Path) -> Result<(), WorkspaceError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use crate::export::ExportError;
+    use crate::workspace::WorkspaceError;
+
     /// `lib.rs`'s `run()` is the one place both plugins are registered (`main.rs` only calls
     /// `desktop_lib::run()`); the persisted-scope plugin restores onto the fs plugin's own scope
     /// object at setup and therefore needs it already managed, so `tauri-plugin-fs::init()` must
@@ -495,5 +508,246 @@ mod tests {
         assert_eq!(read_back, Some(contents.to_string()));
 
         let _ = std::fs::remove_file(&settings_path);
+    }
+
+    /// A fresh workspace (one window) holding `files`, opened through real `open_folder` IPC —
+    /// the shared setup every `export` IPC test below starts from.
+    fn open_test_workspace_with(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        files: &[(&str, &str)],
+    ) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "essaydown-export-ipc-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        for (relative, contents) in files {
+            let full = root.join(relative);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full, contents).unwrap();
+        }
+        tauri::test::get_ipc_response(
+            webview,
+            invoke_request("open_folder", serde_json::json!({ "path": root.to_str().unwrap() })),
+        )
+        .expect("open_folder must be allowed by the app's capabilities");
+        root
+    }
+
+    /// Drives `export` over real IPC with the frontend's own argument casing (`App.tsx`'s
+    /// `invoke<ExportOutcome>("export", { path, outPath, format, contents })`), expecting it to be
+    /// rejected; the error is `get_ipc_response`'s own `serde_json::Value`, compared against
+    /// `serde_json::to_value` of the expected `ExportError` variant (never a hand-typed string), so
+    /// each assertion is of the enum variant the fix added, not of its incidental wire text.
+    fn expect_export_error(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        path: &str,
+        out_path: &str,
+        format: &str,
+    ) -> serde_json::Value {
+        tauri::test::get_ipc_response(
+            webview,
+            invoke_request(
+                "export",
+                serde_json::json!({ "path": path, "outPath": out_path, "format": format, "contents": "hello" }),
+            ),
+        )
+        .expect_err("this export call must be rejected")
+    }
+
+    /// Guard: `format` outside `^[a-z][a-z0-9_]*$` is rejected with `ExportError::InvalidFormat`,
+    /// enumerated over the character class each input adds (a dot extension, `..` traversal, an
+    /// absolute path, a smuggled flag separator, an uppercase letter, the empty string) — the exact
+    /// set DECISIONS #review-4-r0 S3 names, including Sol's `x.lua` custom-writer probe value.
+    #[test]
+    fn export_rejects_a_format_with_a_dot_extension() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "out.docx", "x.lua");
+        assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat("x.lua".to_string())).unwrap());
+    }
+
+    #[test]
+    fn export_rejects_a_format_with_path_traversal() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "out.docx", "../x.lua");
+        assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat("../x.lua".to_string())).unwrap());
+    }
+
+    #[test]
+    fn export_rejects_a_format_given_as_an_absolute_path() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "out.docx", "/tmp/x.lua");
+        assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat("/tmp/x.lua".to_string())).unwrap());
+    }
+
+    #[test]
+    fn export_rejects_a_format_with_a_semicolon() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "out.docx", "html;x");
+        assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat("html;x".to_string())).unwrap());
+    }
+
+    #[test]
+    fn export_rejects_a_format_with_an_uppercase_letter() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "out.docx", "Html");
+        assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat("Html".to_string())).unwrap());
+    }
+
+    #[test]
+    fn export_rejects_an_empty_format() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "out.docx", "");
+        assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat(String::new())).unwrap());
+    }
+
+    /// Guard: `path`/`out_path` still go through `resolve_workspace_path` exactly as every other
+    /// command's do, now reached through `export`'s own IPC route rather than only unit-tested —
+    /// enumerated over the `WorkspaceRoot` contract's own classes (`..` traversal, an absolute
+    /// path, a symlink escaping the root, the empty path, and a traversing `out_path`).
+    #[test]
+    fn export_rejects_a_path_that_traverses_above_the_workspace() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "..", "out.docx", "docx");
+        assert_eq!(
+            err,
+            serde_json::to_value(ExportError::Workspace(WorkspaceError::PathOutsideWorkspace)).unwrap()
+        );
+    }
+
+    #[test]
+    fn export_rejects_an_absolute_path() {
+        let (_app, webview) = test_app();
+        let root = open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let absolute = root.join("a.md");
+        let err = expect_export_error(&webview, absolute.to_str().unwrap(), "out.docx", "docx");
+        assert_eq!(err, serde_json::to_value(ExportError::Workspace(WorkspaceError::InvalidPath)).unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn export_rejects_a_path_through_a_symlink_out_of_the_workspace() {
+        let (_app, webview) = test_app();
+        let root = open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let outside = std::env::temp_dir().join(format!(
+            "essaydown-export-ipc-test-outside-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&outside, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.md")).unwrap();
+        let err = expect_export_error(&webview, "link.md", "out.docx", "docx");
+        assert_eq!(
+            err,
+            serde_json::to_value(ExportError::Workspace(WorkspaceError::PathOutsideWorkspace)).unwrap()
+        );
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn export_rejects_an_empty_path() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "", "out.docx", "docx");
+        assert_eq!(err, serde_json::to_value(ExportError::Workspace(WorkspaceError::InvalidPath)).unwrap());
+    }
+
+    #[test]
+    fn export_rejects_an_out_path_outside_the_workspace() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "../out.docx", "docx");
+        assert_eq!(
+            err,
+            serde_json::to_value(ExportError::Workspace(WorkspaceError::PathOutsideWorkspace)).unwrap()
+        );
+    }
+
+    /// Guard: an `out_path` resolving to the source document or to its `.essaydown.json` sidecar
+    /// is rejected with `ExportError::OutputOverwritesSource` (DECISIONS #review-4-r0 C5) — pandoc
+    /// would otherwise truncate either non-atomically before reading the source from stdin.
+    #[test]
+    fn export_rejects_an_out_path_equal_to_the_source_document() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "a.md", "docx");
+        assert_eq!(err, serde_json::to_value(ExportError::OutputOverwritesSource).unwrap());
+    }
+
+    #[test]
+    fn export_rejects_an_out_path_equal_to_the_source_documents_sidecar() {
+        let (_app, webview) = test_app();
+        open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let err = expect_export_error(&webview, "a.md", "a.essaydown.json", "docx");
+        assert_eq!(err, serde_json::to_value(ExportError::OutputOverwritesSource).unwrap());
+    }
+
+    /// An accepted call (a well-formed `docx` request past every new check) must still reach the
+    /// spawn/pandoc stage: whatever `export` fails with here (no bundled sidecar exists in this
+    /// mock test environment) is a `Spawn` or `Pandoc` variant, never the format, workspace or
+    /// overwrite ones the checks above exist to produce.
+    #[test]
+    fn an_accepted_docx_export_call_reaches_the_spawn_or_pandoc_stage() {
+        let (_app, webview) = test_app();
+        let root = open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            invoke_request(
+                "export",
+                serde_json::json!({ "path": "a.md", "outPath": "out.docx", "format": "docx", "contents": "hello" }),
+            ),
+        );
+        match response {
+            // The pinned pandoc sidecar is present in this dev container (`pnpm fetch-sidecars` +
+            // `pnpm assemble-sidecars`, docker/versions.env), so an accepted call can genuinely
+            // reach pandoc and succeed — the strongest proof it passed every check above.
+            Ok(body) => {
+                let outcome = body.deserialize::<serde_json::Value>().unwrap();
+                assert_eq!(outcome["out_path"], serde_json::Value::String("out.docx".to_string()));
+                assert!(root.join("out.docx").exists(), "a successful export must have actually written the file");
+            }
+            Err(err) => {
+                let text = err.as_str().expect("ExportError serializes as a string").to_string();
+                assert!(
+                    text.starts_with("Spawn:") || text.starts_with("Pandoc:"),
+                    "expected a Spawn or Pandoc error, got: {text}"
+                );
+            }
+        }
+    }
+
+    /// Sol's probe (`.evidence/reviews/4/r0/sol/probe-writer.lua`, `lua-writer-executed.txt`)
+    /// inverted: a custom Lua writer placed in the open workspace, loaded only if pandoc ever runs
+    /// with `format: "x.lua"` as its `-t` value, must never execute — `validate_format` rejects the
+    /// format before `export` resolves any path or spawns anything, so the writer's own marker file
+    /// is never created.
+    #[test]
+    fn a_lua_writer_placed_in_the_workspace_is_never_executed() {
+        let (_app, webview) = test_app();
+        let root = open_test_workspace_with(&webview, &[("a.md", "hello")]);
+        let marker = root.join("lua-writer-executed.txt");
+        let probe = format!(
+            "local f = assert(io.open('{}', 'w'))\nf:write('executed')\nf:close()\nTemplate = '$body$'\nfunction Writer(doc, opts) return '' end\n",
+            marker.to_str().unwrap()
+        );
+        std::fs::write(root.join("x.lua"), probe).unwrap();
+
+        let err = expect_export_error(&webview, "a.md", "out.docx", "x.lua");
+        assert_eq!(err, serde_json::to_value(ExportError::InvalidFormat("x.lua".to_string())).unwrap());
+        assert!(!marker.exists(), "pandoc must never load the Lua writer: export is rejected before any spawn");
     }
 }
