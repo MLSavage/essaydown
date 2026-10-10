@@ -1366,6 +1366,29 @@ function isCoreSchemaScalar(value: string): boolean {
   );
 }
 
+/**
+ * Whether pandoc's own YAML reader would give `entry` a non-empty title string (DECISIONS
+ * #review-4-r1 finding 1): `null` is no `title` key at all; a writable field is pandoc-readable
+ * unless its scalar is blank (`title:`, `""`, `''`, or all whitespace); an opaque unsupported field
+ * (`value === null` — a block scalar, a multi-line continuation, an unreadable quote) is pandoc's
+ * to read as it pleases, so this reports it readable; every other unsupported field is read by
+ * pandoc as the plain or flow value its trimmed text spells, except the three spellings that read
+ * as empty — a YAML core-schema null (`~`, `null`, reusing `CORE_SCHEMA_NULL` itself), an empty
+ * flow sequence or mapping (`[]`, `{}`), or a value that is nothing but a comment (`# c`: YAML
+ * discards an unescaped `#` and everything after it, so a line with no scalar before it leaves
+ * pandoc with no title either).
+ */
+export function hasPandocReadableTitle(entry: FrontMatterEntry | null): boolean {
+  if (entry === null) return false;
+  if (entry.writable) return entry.value.trim() !== "";
+  if (entry.value === null) return true;
+  const trimmed = entry.value.trim();
+  if (CORE_SCHEMA_NULL.test(trimmed)) return false;
+  if (trimmed === "[]" || trimmed === "{}") return false;
+  if (trimmed.startsWith("#")) return false;
+  return true;
+}
+
 /** Whether a plain scalar would be re-read as something other than this exact string. */
 function needsQuoting(value: string): boolean {
   if (value === "") return true;

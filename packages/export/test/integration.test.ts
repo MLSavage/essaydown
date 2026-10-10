@@ -354,6 +354,60 @@ describe("front-matter title vs. the file-stem fallback (DECISIONS #review-4-r0 
     expect(opf).toContain("no-title");
   });
 
+  // One epubcheck leg per false row of `hasPandocReadableTitle` (DECISIONS #review-4-r1 finding 1)
+  // except `# c` — built with the stem token export-sync computes when the front matter carries no
+  // title pandoc will read, the same way the "absence case" above does for no front matter at all.
+  it.each([
+    ["a block without title", "---\nquestion: What now?\n---\n\n# Heading\n\nBody text.\n"],
+    ["title:", "---\ntitle:\n---\n\n# Heading\n\nBody text.\n"],
+    ['title: ""', '---\ntitle: ""\n---\n\n# Heading\n\nBody text.\n'],
+    ["title: ''", "---\ntitle: ''\n---\n\n# Heading\n\nBody text.\n"],
+    ["title: '  '", "---\ntitle: '  '\n---\n\n# Heading\n\nBody text.\n"],
+    ["title: ~", "---\ntitle: ~\n---\n\n# Heading\n\nBody text.\n"],
+    ["title: null", "---\ntitle: null\n---\n\n# Heading\n\nBody text.\n"],
+    ["title: NULL", "---\ntitle: NULL\n---\n\n# Heading\n\nBody text.\n"],
+    ["title: []", "---\ntitle: []\n---\n\n# Heading\n\nBody text.\n"],
+    ["title: {}", "---\ntitle: {}\n---\n\n# Heading\n\nBody text.\n"],
+  ] as const)("%s gets the stem as its title token and passes epubcheck with dc:title the stem", (_name, source) => {
+    const dir = tempDir();
+    const outPath = "no-title.epub";
+    const target = { resourceDir: ".", outPath: join(dir, outPath), format: "epub", title: "no-title" };
+    const args = [...buildPandocArgs(target), ...LANG_EXCEPTION];
+    expect(args).toContain("title=no-title");
+
+    const result = runPandoc(dir, args, source, { ...process.env, LANG: "en_US.UTF-8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain("no-title");
+  }, 20000);
+
+  // True rows the stem never reaches (DECISIONS #review-4-r1 finding 1): pandoc's own YAML reader
+  // supplies a non-empty `dc:title` from the front matter's own value, with no title token sent.
+  it.each([
+    ["title: 42", "---\ntitle: 42\n---\n\n# Heading\n\nBody text.\n", "42"],
+    ["title: [a]", "---\ntitle: [a]\n---\n\n# Heading\n\nBody text.\n", "a"],
+    ["title: |- then a block scalar", "---\ntitle: |-\n  Block\n---\n\n# Heading\n\nBody text.\n", "Block"],
+  ] as const)("%s sends no title token and dc:title is its own value", (_name, source, expectedTitle) => {
+    const dir = tempDir();
+    const outPath = "own-title.epub";
+    const target = { resourceDir: ".", outPath: join(dir, outPath), format: "epub" };
+    const args = [...buildPandocArgs(target), ...LANG_EXCEPTION];
+    expect(args.some((token) => token.startsWith("title="))).toBe(false);
+
+    const result = runPandoc(dir, args, source, { ...process.env, LANG: "en_US.UTF-8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain(expectedTitle);
+  }, 20000);
+
   it("a stem holding a space and a non-BMP letter round-trips into dc:title", () => {
     const dir = tempDir();
     const outPath = "astral-title.epub";

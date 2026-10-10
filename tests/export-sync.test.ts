@@ -108,6 +108,42 @@ describe("exportDocument", () => {
     expect(runArgs[0]?.title).toBeUndefined();
   });
 
+  // One case per front-matter `title` spelling (DECISIONS #review-4-r1 finding 1): the stem for
+  // every spelling pandoc would not read as a non-empty title, `undefined` for every spelling it
+  // would — the same rows `hasPandocReadableTitle` enumerates in
+  // packages/core/test/front-matter-grammar.test.ts.
+  it.each([
+    ["no front matter", "# Heading\n\nBody.\n", "essay"],
+    ["a block without title", "---\nquestion: What now?\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title:", "---\ntitle:\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ['title: ""', '---\ntitle: ""\n---\n\n# Heading\n\nBody.\n', "essay"],
+    ["title: ''", "---\ntitle: ''\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: '  '", "---\ntitle: '  '\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: # c", "---\ntitle: # c\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: ~", "---\ntitle: ~\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: null", "---\ntitle: null\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: NULL", "---\ntitle: NULL\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: []", "---\ntitle: []\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: {}", "---\ntitle: {}\n---\n\n# Heading\n\nBody.\n", "essay"],
+    ["title: My Own Title", "---\ntitle: My Own Title\n---\n\n# Heading\n\nBody.\n", undefined],
+    ['title: "null"', '---\ntitle: "null"\n---\n\n# Heading\n\nBody.\n', undefined],
+    ["title: 42", "---\ntitle: 42\n---\n\n# Heading\n\nBody.\n", undefined],
+    ["title: true", "---\ntitle: true\n---\n\n# Heading\n\nBody.\n", undefined],
+    ["title: [a]", "---\ntitle: [a]\n---\n\n# Heading\n\nBody.\n", undefined],
+    ["title: {text: X}", "---\ntitle: {text: X}\n---\n\n# Heading\n\nBody.\n", undefined],
+    ["title: |- then a block scalar", "---\ntitle: |-\n  Block\n---\n\n# Heading\n\nBody.\n", undefined],
+    [
+      "a two-line plain continuation",
+      "---\ntitle: Line one\n  continued\n---\n\n# Heading\n\nBody.\n",
+      undefined,
+    ],
+  ] as const)("%s: the IPC receives title %j", async (_name, source, expected) => {
+    const { io, runArgs } = fakeIO("clean", CLEAN_OUTCOME);
+    io.readDoc = async () => source;
+    await exportDocument(io, "essay.md", "essay.docx", "docx");
+    expect(runArgs[0]?.title).toBe(expected);
+  });
+
   it("reveals the output path when the outcome arrives in export.rs's own wire spelling (DECISIONS #review-4-r0 S5)", async () => {
     // `ExportOutcome`'s `#[serde(rename_all = "camelCase")]` (export.rs): a literal JSON string,
     // not a TS object literal, so a wire-spelling regression fails here too, not only in export.rs's

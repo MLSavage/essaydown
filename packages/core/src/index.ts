@@ -104,6 +104,7 @@ export {
   readFrontMatter,
   writeFrontMatter,
   mirrorFrontMatter,
+  hasPandocReadableTitle,
   type AnchorKind,
   type CoachScope,
   type Anchor,

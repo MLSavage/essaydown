@@ -4,6 +4,7 @@ import { format } from "../src/format.js";
 import { parse } from "../src/parse.js";
 import {
   FRONT_MATTER_UNSUPPORTED,
+  hasPandocReadableTitle,
   readFrontMatter,
   writeFrontMatter,
   type FrontMatterField,
@@ -247,5 +248,40 @@ describe("a replacement value carrying a line break is refused for every quoting
     });
     expect(write.root).toBe(bare);
     expect(format(write.root)).toBe(format(bare));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasPandocReadableTitle (DECISIONS #review-4-r1 finding 1): whether pandoc's own YAML reader
+// gives the `title` key a non-empty title string, which is not the same question as "is the key
+// present" — an empty, blank, YAML-null or empty-flow spelling reads as no title at all.
+// ---------------------------------------------------------------------------
+
+describe("hasPandocReadableTitle (DECISIONS #review-4-r1 finding 1)", () => {
+  const noFrontMatter = () => parse("## Nibs\n\nSteel nibs are stiff.\n");
+
+  it.each([
+    ["no front matter", noFrontMatter, false],
+    ["a block without title", () => withFrontMatter("question: What now?"), false],
+    ["title:", () => withFrontMatter("title:"), false],
+    ['title: ""', () => withFrontMatter('title: ""'), false],
+    ["title: ''", () => withFrontMatter("title: ''"), false],
+    ["title: '  '", () => withFrontMatter("title: '  '"), false],
+    ["title: # c", () => withFrontMatter("title: # c"), false],
+    ["title: ~", () => withFrontMatter("title: ~"), false],
+    ["title: null", () => withFrontMatter("title: null"), false],
+    ["title: NULL", () => withFrontMatter("title: NULL"), false],
+    ["title: []", () => withFrontMatter("title: []"), false],
+    ["title: {}", () => withFrontMatter("title: {}"), false],
+    ["title: My Own Title", () => withFrontMatter("title: My Own Title"), true],
+    ['title: "null"', () => withFrontMatter('title: "null"'), true],
+    ["title: 42", () => withFrontMatter("title: 42"), true],
+    ["title: true", () => withFrontMatter("title: true"), true],
+    ["title: [a]", () => withFrontMatter("title: [a]"), true],
+    ["title: {text: X}", () => withFrontMatter("title: {text: X}"), true],
+    ["title: |- then a block scalar", () => withFrontMatter("title: |-", "  Block"), true],
+    ["a two-line plain continuation", () => withFrontMatter("title: Line one", "  continued"), true],
+  ] as const)("%s → %s", (_name, build, expected) => {
+    expect(hasPandocReadableTitle(readFrontMatter(build()).title)).toBe(expected);
   });
 });

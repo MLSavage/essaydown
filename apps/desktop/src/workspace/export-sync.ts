@@ -10,13 +10,16 @@
  * never reach `readDoc`/`runExport`/`reveal`, and are reported as `"not-saved"` instead of resolving
  * alike with a real export.
  *
- * `title` (DECISIONS #review-4-r0 U1) is decided here, from the just-settled bytes `readDoc`
- * returns, never from a stale copy: the document's own front-matter `title` always wins when
- * present (pandoc's `-M title=` would otherwise override it), so a title is sent only when
- * `readFrontMatter` finds none — the file's own stem, the same rule `outputPathFor` uses.
+ * `title` (DECISIONS #review-4-r0 U1, #review-4-r1 finding 1) is decided here, from the
+ * just-settled bytes `readDoc` returns, never from a stale copy: the document's own front-matter
+ * `title` always wins when pandoc's own YAML reader would give it a non-empty title string
+ * (pandoc's `-M title=` would otherwise override it), so a title is sent only when
+ * `hasPandocReadableTitle` says the front matter carries none — the file's own stem, the same
+ * rule `outputPathFor` uses. A `title` key present but empty, blank, YAML-null or an empty flow
+ * collection is not a title pandoc will read, so the stem is sent for it too.
  */
 
-import { parse, readFrontMatter } from "@essaydown/core";
+import { hasPandocReadableTitle, parse, readFrontMatter } from "@essaydown/core";
 import { stemOf } from "./paths";
 
 export type ExportFlushResult = "clean" | "saved" | "conflict" | "failed";
@@ -60,7 +63,7 @@ export async function exportDocument(
   const flush = await io.flush();
   if (flush === "conflict" || flush === "failed") return { status: "not-saved", flush };
   const contents = await io.readDoc(docPath);
-  const hasOwnTitle = readFrontMatter(parse(contents)).title !== null;
+  const hasOwnTitle = hasPandocReadableTitle(readFrontMatter(parse(contents)).title);
   const title = hasOwnTitle ? undefined : stemOf(docPath);
   const outcome = await io.runExport({ path: docPath, outPath, format, contents, title });
   // Best-effort OS integration (there is no cross-desktop-environment reveal on Linux, `export.rs`'s
