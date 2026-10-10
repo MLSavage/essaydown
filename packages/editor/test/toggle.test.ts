@@ -120,8 +120,10 @@ class FakeSourceView implements BoundSourceView {
   readonly written: string[] = [];
 
   dispatch(spec: TransactionSpec): void {
-    this.state = this.state.update(spec).state;
-    this.written.push(this.text());
+    const transaction = this.state.update(spec);
+    this.state = transaction.state;
+    // A text written, not a configuration: the binding installs its change log by dispatch (4.27).
+    if (transaction.docChanged) this.written.push(this.text());
   }
 
   text(): string {

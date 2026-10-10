@@ -1,6 +1,7 @@
-import type { Nodes, PhrasingContent, Root, RootContent } from "mdast";
+import type { Nodes, Paragraph, PhrasingContent, Root, RootContent } from "mdast";
 import {
   ROOT_PATH,
+  carryEdit,
   childPath,
   format,
   formatWithMap,
@@ -12,13 +13,19 @@ import {
   spellingOffsets,
   spellingPoint,
   type NodeRange,
+  type EditRegion,
   type PositionEntry,
   type PositionMap,
+  type TopLevelEdit,
 } from "@essaydown/core";
-import type {
-  EditorState as SourceEditorState,
-  Extension,
-  TransactionSpec,
+import {
+  MapMode,
+  StateEffect,
+  StateField,
+  type ChangeSet,
+  type EditorState as SourceEditorState,
+  type Extension,
+  type TransactionSpec,
 } from "@codemirror/state";
 import { keymap as codeMirrorKeymap, type KeyBinding } from "@codemirror/view";
 import { keymap as proseMirrorKeymap } from "prosemirror-keymap";
@@ -1271,8 +1278,18 @@ export function bindCodeMirror(
   const schedule = options.schedule ?? timerSchedule;
   let shown = store.getState().document.root;
   let shownText = "";
+  /**
+   * The parse of `shownText` when the binding made it (a commit), whose offsets are `shownText`'s;
+   * null after a pull, whose root carries no offsets into the text the view shows.
+   */
+  let shownTree: Root | null = null;
   /** The text typed since the last commit, and the cancel of the commit scheduled for it. */
   let pending: string | null = null;
+  /**
+   * CodeMirror's change sets from `shownText` to `pending`, in order; null when some transaction of
+   * the burst could not be read from the log, and the commit then carries nothing.
+   */
+  let pendingChanges: ChangeSet[] | null = [];
   /**
    * When the pending segment's first keystroke landed and when its latest did — the `from` and the
    * `at` its commit carries, per the grouping rule above. Meaningless while `pending` is `null`,
@@ -1282,9 +1299,43 @@ export function bindCodeMirror(
   let pendingAt = 0;
   let cancel: (() => void) | null = null;
 
+  // The change log (see {@link ChangeLog}), installed on the view this binding was given — when
+  // its state is a CodeMirror state at all; a view that is not one is bound as before, carrying
+  // nothing.
+  const log = StateField.define<ChangeLog>({
+    create: () => ({ changes: null, prev: null }),
+    update: (value, transaction) =>
+      transaction.docChanged ? { changes: transaction.changes, prev: value } : value,
+  });
+  const logged = (): ChangeLog | undefined =>
+    typeof (view.state as Partial<SourceEditorState>).field === "function"
+      ? view.state.field(log, false)
+      : undefined;
+  if (typeof (view.state as Partial<SourceEditorState>).field === "function") {
+    view.dispatch({ effects: StateEffect.appendConfig.of(log) });
+  }
+  let read = logged();
+
+  /** The change sets logged since the last call, oldest first; null when the log lost its place. */
+  const taken = (): ChangeSet[] | null => {
+    const current = logged();
+    if (current === undefined) return null;
+    const out: ChangeSet[] = [];
+    let at: ChangeLog | null = current;
+    while (at !== null && at !== read) {
+      if (at.changes !== null) out.push(at.changes);
+      at = at.prev;
+    }
+    const found = at === read;
+    read = current;
+    current.prev = null;
+    return found ? out.reverse() : null;
+  };
+
   /** Forget the pending text and unschedule its commit. */
   const drop = (): void => {
     pending = null;
+    pendingChanges = [];
     if (cancel !== null) cancel();
     cancel = null;
   };
@@ -1293,22 +1344,50 @@ export function bindCodeMirror(
     const text = pending;
     const from = pendingFrom;
     const at = pendingAt;
+    const steps = pendingChanges;
     drop();
     if (text === null) return;
     const { document, commit } = store.getState();
+    const beforeText = shownText;
+    const beforeTree = shownTree;
     const root = parse(text);
     shown = root;
     shownText = text;
-    commit(root, document.sidecar, { coalesceKey, at, from });
+    shownTree = root;
+    const changes = composed(steps, beforeText.length, text.length);
+    // The sidecar is carried through CodeMirror's own change set (task 4.27; DECISIONS
+    // #review-4-r0 C4), exactly as the rendered view carries it through its transaction. The
+    // parse of the text before the burst is made only when the sidecar has an entry to ask about,
+    // and is used only when its blocks are the store's blocks one for one.
+    let edit: TopLevelEdit | null = null;
+    const described = (): TopLevelEdit => {
+      if (edit !== null) return edit;
+      const tree = beforeTree ?? parse(beforeText);
+      edit =
+        changes !== null && tree.children.length === document.root.children.length
+          ? sourceEdit(tree, beforeText, root, text, changes)
+          : unmappedEdit(document.root, root);
+      return edit;
+    };
+    const sidecar = carryEdit(document, root, {
+      regions: () => described().regions(),
+      mapBlock: (index) => described().mapBlock(index),
+      mapOffset: (index, offset) => described().mapOffset(index, offset),
+    });
+    commit(root, sidecar, { coalesceKey, at, from });
   };
 
   const pull = (root: Root): void => {
     drop();
     shown = root;
+    shownTree = null;
     const text = format(root);
     shownText = text;
-    if (view.state.doc.toString() === text) return;
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+    if (view.state.doc.toString() !== text) {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+    }
+    // What the pull wrote is not an edit of the user's: the next burst starts from it.
+    taken();
   };
 
   pull(shown);
@@ -1326,12 +1405,17 @@ export function bindCodeMirror(
       // text last *seen* is the pending one while a commit is waiting: typing a character and
       // deleting it again inside one window is a change back to `shownText`, and taking that for
       // an echo would leave the pending commit to write the deleted character back.
-      if (text === (pending ?? shownText)) return;
+      const steps = taken();
+      if (text === (pending ?? shownText)) {
+        if (pending !== null) pendingChanges = joined(pendingChanges, steps);
+        return;
+      }
       // The keystrokes' own times, not the commit's: see the grouping rule in the module comment.
       // The first keystroke opens the segment and is what continuity is decided from; the latest
       // is what the entry keeps.
       const at = now();
       if (pending === null) pendingFrom = at;
+      pendingChanges = pending === null ? steps : joined(pendingChanges, steps);
       pending = text;
       pendingAt = at;
       if (cancel !== null) cancel();
@@ -1344,6 +1428,249 @@ export function bindCodeMirror(
       unsubscribe();
     },
   };
+}
+
+/* ------------------------------------------------------------------ the source edit ------- */
+
+/**
+ * The source view's own change log, one link per document-changing CodeMirror transaction, newest
+ * first. {@link bindCodeMirror} installs it as a state field of the view it is given, so the edit
+ * a commit carries the sidecar through is CodeMirror's change set — what the user's keys did —
+ * and never a diff of two strings, which cannot tell a twin typed above an item from one typed
+ * below it. `prev` is cut by the binding once it has read past a link, so the log holds only the
+ * burst not yet committed.
+ */
+interface ChangeLog {
+  readonly changes: ChangeSet | null;
+  prev: ChangeLog | null;
+}
+
+/** The source span of a parsed node, or null for a node the parser gave no offsets. */
+function spanOf(node: Nodes): { start: number; end: number } | null {
+  const start = node.position?.start.offset;
+  const end = node.position?.end.offset;
+  return start === undefined || end === undefined ? null : { start, end };
+}
+
+/** One inline leaf of a parsed paragraph: where its plain text starts, how wide it is, its bytes. */
+interface PlainLeaf {
+  readonly node: PhrasingContent;
+  readonly plain: number;
+  readonly width: number;
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * The leaves of `paragraph` in document order, each with its slice of core's `paragraphText` (a
+ * text, an inline code and an inline tag their value; an image its alt; a break one) and its
+ * source span; null when one has no offsets.
+ */
+function plainLeaves(paragraph: Paragraph): PlainLeaf[] | null {
+  const out: PlainLeaf[] = [];
+  let plain = 0;
+  const visit = (node: PhrasingContent): boolean => {
+    if ("children" in node) return node.children.every(visit);
+    const span = spanOf(node);
+    if (span === null) return false;
+    const width =
+      node.type === "text" || node.type === "inlineCode" || node.type === "html"
+        ? node.value.length
+        : node.type === "image"
+          ? (node.alt ?? "").length
+          : node.type === "break"
+            ? 1
+            : 0;
+    out.push({ node, plain, width, ...span });
+    plain += width;
+    return true;
+  };
+  return paragraph.children.every(visit) ? out : null;
+}
+
+/**
+ * Where each unit of a leaf's value starts in `text`, and where each ends: a text's through the
+ * spelling table (escapes, character references, continuation prefixes), an inline tag's one byte
+ * per unit, an inline code's value found once inside its backticks. Null when the bytes do not
+ * spell the value under those rules, so a caller is never handed a wrong alignment.
+ */
+function leafSpelling(
+  leaf: PlainLeaf,
+  text: string,
+): { readonly starts: readonly number[]; readonly ends: readonly number[] } | null {
+  const { node, start, end } = leaf;
+  if (node.type === "text") return spellingOffsets(node.value, text, start) ?? null;
+  if (node.type !== "inlineCode" && node.type !== "html") return null;
+  const at = node.type === "html" ? 0 : text.slice(start, end).indexOf(node.value);
+  if (at === -1 || text.slice(start + at, start + at + node.value.length) !== node.value) return null;
+  const starts = Array.from({ length: node.value.length + 1 }, (_, index) => start + at + index);
+  return { starts, ends: starts.slice(1) };
+}
+
+/**
+ * The source offset of the character at plain-text offset `plain` of a paragraph (what a sentence's
+ * `start` counts), or null when its leaf's bytes cannot be aligned or no character is there. An
+ * atom (an image, a break) is one character wide in neither direction: an offset inside its plain
+ * text is its first byte.
+ */
+function sourceOfPlain(leaves: readonly PlainLeaf[], text: string, plain: number): number | null {
+  const leaf = leaves.find((one) => plain >= one.plain && plain < one.plain + one.width);
+  if (leaf === undefined) return null;
+  if (leaf.node.type === "image" || leaf.node.type === "break") return leaf.start;
+  return leafSpelling(leaf, text)?.starts[plain - leaf.plain] ?? null;
+}
+
+/**
+ * The plain-text offset of the character at source offset `at` of a paragraph, the inverse of
+ * {@link sourceOfPlain}. **Ownership, stated once:** the leaves partition the plain text into
+ * adjacent half-open slices; a byte inside a character's spelling belongs to that character, a byte
+ * inside an atom to the atom, and a byte no character spells (a delimiter, a gap before a leaf, a
+ * zero-width leaf) to the next character — past the last one, to the end of the plain text. Null
+ * when the leaf holding `at` cannot be aligned.
+ */
+function plainOfSource(leaves: readonly PlainLeaf[], text: string, at: number): number | null {
+  let total = 0;
+  for (const leaf of leaves) {
+    total = leaf.plain + leaf.width;
+    if (leaf.width === 0) continue;
+    if (at < leaf.start) return leaf.plain;
+    if (at >= leaf.end) continue;
+    if (leaf.node.type === "image" || leaf.node.type === "break") return leaf.plain;
+    const spelling = leafSpelling(leaf, text);
+    if (spelling === null) return null;
+    const index = spelling.ends.findIndex((end) => at < end);
+    return leaf.plain + (index === -1 ? leaf.width : index);
+  }
+  return total;
+}
+
+/**
+ * One source-view edit as core's `carryEdit` reads it (task 4.27; DECISIONS #review-4-r0 C4), in
+ * the indices of the two parsed roots either side of it: `before` is the parse of `beforeText`,
+ * `after` of `afterText`, and `changes` is CodeMirror's change set from the one text to the other.
+ * The rendered view's counterpart is `store.ts`'s `carryThrough`; both answer in the same terms.
+ *
+ * **Regions**: an old block is *kept* when no changed range touches its span (an insertion at
+ * either edge touches it) and the new document has a block at exactly the span the change set
+ * shifts it to — not one that starts there and runs on, as a paragraph does when the blank line
+ * after it is deleted. Its bytes are then the same bytes. Kept blocks are in the same order on both sides, and
+ * every run between two of them is a region — larger than the edit only where the edit sat at a
+ * block's edge, which is slower, never wrong.
+ *
+ * **mapBlock**: an old block goes to the block holding its first byte, mapped forward with the
+ * position kept after anything inserted there; nowhere when that byte was deleted or lands between
+ * blocks.
+ *
+ * **mapOffset**: the same mapping one character at a time. A plain-text offset of an old paragraph
+ * becomes a source offset through its leaves' spellings ({@link sourceOfPlain}), goes through the
+ * change set kept after anything inserted there, and comes back through the spellings of the
+ * paragraph it landed in ({@link plainOfSource}). Nowhere when that character was deleted, when it
+ * lands outside a top-level paragraph, or when either paragraph's bytes cannot be aligned — and
+ * `carryEdit` falls back to `mapBlock` there.
+ */
+export function sourceEdit(
+  before: Root,
+  beforeText: string,
+  after: Root,
+  afterText: string,
+  changes: ChangeSet,
+): TopLevelEdit {
+  const blockAt = (at: number): number =>
+    after.children.findIndex((child) => {
+      const span = spanOf(child);
+      return span !== null && span.start <= at && at < span.end;
+    });
+  const touched: { from: number; to: number }[] = [];
+  changes.iterChangedRanges((from, to) => touched.push({ from, to }));
+
+  const regions = (): EditRegion[] => {
+    const starts = new Map<number, number>();
+    after.children.forEach((child, index) => {
+      const span = spanOf(child);
+      if (span !== null) starts.set(span.start, index);
+    });
+    // An untouched span is shifted whole, so its bytes are the same and the order is kept.
+    const kept: [number, number][] = [];
+    before.children.forEach((child, index) => {
+      const span = spanOf(child);
+      if (span === null || touched.some(({ from, to }) => from <= span.end && to >= span.start)) return;
+      const at = starts.get(changes.mapPos(span.start));
+      const twin = at === undefined ? null : spanOf(after.children[at]);
+      if (at !== undefined && twin?.end === changes.mapPos(span.end)) kept.push([index, at]);
+    });
+    const out: EditRegion[] = [];
+    let was = -1;
+    let now = -1;
+    for (const [index, at] of [...kept, [before.children.length, after.children.length]]) {
+      const region = {
+        before: Array.from({ length: index - was - 1 }, (_, k) => was + 1 + k),
+        after: Array.from({ length: at - now - 1 }, (_, k) => now + 1 + k),
+      };
+      if (region.before.length + region.after.length > 0) out.push(region);
+      was = index;
+      now = at;
+    }
+    return out;
+  };
+
+  return {
+    regions,
+    mapBlock: (index) => {
+      const child = before.children[index] as RootContent | undefined;
+      const span = child === undefined ? null : spanOf(child);
+      if (span === null) return null;
+      const at = changes.mapPos(span.start, 1, MapMode.TrackAfter);
+      if (at === null) return null;
+      const block = blockAt(at);
+      return block === -1 ? null : block;
+    },
+    mapOffset: (index, plain) => {
+      const child = before.children[index] as RootContent | undefined;
+      if (child?.type !== "paragraph") return null;
+      const leaves = plainLeaves(child);
+      const from = leaves === null ? null : sourceOfPlain(leaves, beforeText, plain);
+      if (from === null) return null;
+      const at = changes.mapPos(from, 1, MapMode.TrackAfter);
+      if (at === null) return null;
+      const block = blockAt(at);
+      const landed = block === -1 ? undefined : after.children[block];
+      if (landed?.type !== "paragraph") return null;
+      const landedLeaves = plainLeaves(landed);
+      const offset = landedLeaves === null ? null : plainOfSource(landedLeaves, afterText, at);
+      return offset === null ? null : { index: block, offset };
+    },
+  };
+}
+
+/** The edit {@link sourceEdit} cannot describe: everything replaced, nothing mapped — no entry moves. */
+function unmappedEdit(before: Root, after: Root): TopLevelEdit {
+  return {
+    regions: () => [
+      {
+        before: before.children.map((_, index) => index),
+        after: after.children.map((_, index) => index),
+      },
+    ],
+    mapBlock: () => null,
+    mapOffset: () => null,
+  };
+}
+
+/** Two runs of change sets one after the other; unknown when either is. */
+function joined(first: ChangeSet[] | null, second: ChangeSet[] | null): ChangeSet[] | null {
+  return first === null || second === null ? null : [...first, ...second];
+}
+
+/**
+ * `steps` as one change set from a text of `from` units to one of `to`, or null when they are not
+ * one: a step unknown, none logged, or the steps not between those two lengths (text the view
+ * never held, such as a `change` no transaction made).
+ */
+function composed(steps: ChangeSet[] | null, from: number, to: number): ChangeSet | null {
+  if (steps === null || steps.length === 0) return null;
+  // The log links each transaction to the one before it, so the steps always chain.
+  const out = steps.slice(1).reduce((all, step) => all.compose(step), steps[0]);
+  return out.length === from && out.newLength === to ? out : null;
 }
 
 /* ------------------------------------------------------------------ the chord ------------- */
