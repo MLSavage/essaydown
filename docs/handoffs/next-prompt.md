@@ -1,24 +1,20 @@
-Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 094: `git show handoff/094:docs/handoffs/094-phase-4-review-r2-reconciliation-pending.md`. It is committed on `handoff/094`, stacked on `handoff/093` (cut from `phase/4` at `2e4248a`), and supersedes 093. Neither is in `phase/4` yet: `phase/4..handoff/094` is two docs-only commits, which this session cherry-picks into `.wt/4.5.r2d`.
+Read docs/PRINCIPAL.md (its "Model and escalation" section applies: you are the Opus 5.5 principal; Fable only on its trigger list, with a written brief), then continue from handoff 095: `git show handoff/095:docs/handoffs/095-phase-4-verify-r3h-gate-failed.md`. It is committed on `handoff/095`, cut from `phase/4` at `7f0313c`, and supersedes 094 (093 and 094 are in `phase/4` through `task(4.5.r2d)`). `phase/4..handoff/095` is one docs-only commit, which the next planning or reconciliation commit cherry-picks.
 
 **State.**
-- The runner stopped at `PRINCIPAL 4.5.r2d` (pane `essaydown:runner` at zsh). This fresh session runs the reconciliation of review set 4.5, attempt r2.
-- Review r2 on `2e4248a`:
-  - Claude (`4.5.r2a`): FAIL, 1/0/0.
-  - Sol (`4.5.r2b`): PASS, 0/0/0. Sol passed after one single-reviewer retry that followed a Codex usage limit. Its a1 partial evidence is in `.evidence/reviews/4/r2/sol.usage-limit-a1/`, as context only.
-- Claude's blocker: `hasPandocReadableTitle` returns true for a malformed-block `title:`, `""` or `~` (for example beside `tags:` + `- essay`). The EPUB then gets an empty title and export reports success.
-- `phase/4` = `origin/phase/4` = `2e4248a` (0 behind at writing). `main` = `8aba511`.
+- The runner is idle: `GATE-FAILED 4.verify.r3h a1` (run 38110743562 at `7f0313c`), then `PLAN-GATE plan.4.verify.r3h.r0` and `ROTATE-PRINCIPAL` (pane `essaydown:runner` at zsh).
+- Among the gated jobs only `e2e-shell (ubuntu-latest)` failed: `autosave.spec.ts:201` read `HelloX` after a 600 ms pause, and the `V` reached disk later (cases 2–4 read `HelloXV`). The principal reads it as #066's debounce-margin class at a case 4.22 did not convert; Fable has not been asked yet. Windows (recorded, #047): one 5000 ms timeout in `sentences-zero-width.test.ts:268`.
+- `#review-4-r2` is done (FAIL; Michael took the fix); 4.33 and 4.verify.r3 passed at attempt 1. `4.close` depends on `4.5.r3d`.
+- `phase/4` = `7f0313c`, `origin/phase/4` 2 behind at writing. `main` = `8aba511`.
 - Michael travels the week after 2026-10-10, and the Mini is powered off for the trip. Rotate at an idle point when he asks, never mid-gate.
 
 Your job this session, in order:
 
 1. Run `ralph/ralph.sh status` and `ralph/ralph.sh doctor`. Give Michael the one-line state, plus `git push origin phase/4` if `git rev-list --count origin/phase/4..phase/4` is not 0.
-2. **Reconcile `PRINCIPAL 4.5.r2d`** in `.wt/4.5.r2d` on `task/4.5.r2d`:
-   - First run `git cherry-pick handoff/093 handoff/094`.
-   - Optionally run a container probe (pandoc + epubcheck) on the exact `title:` + `tags:` + `- essay` document, the way #review-4-r1's probe was run, so the blocker is observed and not only read.
-   - Write a Fable brief on `.evidence/reviews/4/r2/{claude,sol}/`. It includes the two WARN lines: read or mention.
-   - Take the blocker to Michael before any fix chain (#041 D1).
-   - Then commit `#review-4-r2`. The same commit appends its own `- [4.5.r2d] ` journal line. If Michael takes the fix, it also carries the fix rows, the `4.close` rewire and `EXPECTED_COUNT`. The promise goes only in the `wip(4.5.r2d)` commit message.
-3. Restart the runner: `tmux send-keys -t essaydown:runner 'ralph/ralph.sh run --phase 4 2>&1 | tee -a .evidence/runner.log' Enter`. Then arm the positional watcher from handoff 094: `start=275135`, `n` = the RAW count recounted, a persistent Monitor (30-minute cap). On every expiry and after every retry, re-arm it, run `status`, and run a catch-up grep.
+2. **PLAN-GATE `plan.4.verify.r3h.r0`:**
+   - Write a Fable brief on `.evidence/ci/4.verify.r3h/a1/` and handoff 095's Gotchas. The question: is this #066's class at :201, and what is the minimal `.g1` repair? Read the `[autosave]` readings (#066) and the `[4.22, …]` line in docs/V1.1-BACKLOG.md for a trigger that names this case.
+   - A test-only repair inside a fired trigger needs no Michael ask (#066's precedent); lost text is Michael's before any chain (#041 D1).
+   - Run `ralph/ralph.sh plan`. In `.wt/plan.4.verify.r3h.r0`, first `git cherry-pick handoff/095`, then the planning commit: the DECISIONS entry, the repair task(s) and `4.verify.r3.g1` (+h), `4.5.r3a/b` rewired onto `4.verify.r3.g1` (the producer, not the gate id), `EXPECTED_COUNT`, validate-tasks, and deps asserted in the generated tasks.json. The promise goes only in the `wip(plan.…)` message. Handoff 091 and #066/#068 are the shape.
+3. Restart the runner: `tmux send-keys -t essaydown:runner 'ralph/ralph.sh run --phase 4 2>&1 | tee -a .evidence/runner.log' Enter`. Then arm the positional watcher from handoff 095: `start=275135`, `n` = the RAW count recounted (93 at writing), a persistent Monitor (30-minute cap). On every expiry and after every retry, re-arm it, run `status`, and run a catch-up grep.
 4. **Handle each stop signal** as PRINCIPAL.md says:
    - A capped attempt that the runner carries on: nothing.
    - `NO-JOURNAL`, or `STUCK` from a capped run: a lesson, then `retry` (#027, #038). For a reviewer, retry that reviewer alone (#043).
@@ -26,7 +22,7 @@ Your job this session, in order:
    - `STUCK` after three attempts: a Fable brief.
    - A verifier gate: `scripts/gate.sh <gate id>` backgrounded, with its output file read. Read the `[autosave]` readings per #066.
    - `GATE-FAILED`: a Fable brief, then a repair via `ralph/ralph.sh plan`.
-   - `PRINCIPAL 4.5.r3d` (if a fix chain runs): rotate. A fresh session reconciles it.
+   - `PRINCIPAL 4.5.r3d`: rotate. A fresh session runs that reconciliation (review set 4.5, attempt r3).
    - `4.close`: idle boundary.
 5. **Rotate** (`/rotate`) at every stop signal that ends a working block and before context passes about 150k.
    - Mid-phase, a handoff goes on `handoff/NNN` from a temporary worktree, stacked on the newest `handoff/NNN` whose content is not yet in `phase/4` (compare content, because a cherry-picked ref is never an ancestor).
