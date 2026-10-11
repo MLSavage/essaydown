@@ -966,6 +966,9 @@ function yamlNodeOf(root: Root): { node: Yaml; index: number } | null {
 const KEY_LINE = /^([^\s#][^:]*):(?:[ \t]([^\n]*))?$/u;
 const BLANK_OR_COMMENT = /^\s*(?:#[^\n]*)?$/u;
 const INDENTED = /^[ \t]+\S/u;
+/** A column-0 YAML block-sequence item (`- x` or a bare `-`): the shape pandoc reads a key's value
+ * as a list by, when the key's own line ends with nothing after the colon (DECISIONS #review-4-r2). */
+const SEQUENCE_ITEM = /^-(?:[ \t]|$)/u;
 
 interface KeyLine {
   /** The key's *identity*: a quoted spelling is decoded, so `"question"` and `question` collide. */
@@ -1038,14 +1041,19 @@ function scanFrontMatter(value: string): { lines: string[]; keys: KeyLine[]; mal
 
   // A key whose next non-blank line is indented has a value this task cannot rewrite in place.
   const withContinuation = keys.map((entry) => {
-    for (let i = entry.line + 1; i < lines.length; i += 1) {
-      if (BLANK_OR_COMMENT.test(lines[i])) continue;
-      return { ...entry, continued: INDENTED.test(lines[i]) };
-    }
-    return entry;
+    const next = nextSignificantLine(lines, entry.line);
+    return next === undefined ? entry : { ...entry, continued: INDENTED.test(next) };
   });
 
   return { lines, keys: withContinuation, malformed };
+}
+
+/** The first line after `afterIndex` that is not blank or a comment, or `undefined` past the end. */
+function nextSignificantLine(lines: readonly string[], afterIndex: number): string | undefined {
+  for (let i = afterIndex + 1; i < lines.length; i += 1) {
+    if (!BLANK_OR_COMMENT.test(lines[i])) return lines[i];
+  }
+  return undefined;
 }
 
 /**
@@ -1308,11 +1316,21 @@ export function readFrontMatter(root: Root): FrontMatter {
     return { present: false, value: "", malformed: false, title: null, question: null };
   }
 
-  const { keys, malformed } = scanFrontMatter(yaml.node.value);
+  const { lines, keys, malformed } = scanFrontMatter(yaml.node.value);
   const entryFor = (key: FrontMatterKey): FrontMatterEntry | null => {
     const matches = keys.filter((line) => line.key === key);
     if (matches.length === 0) return null;
-    if (malformed) return { key, writable: false, reason: "malformed", value: null };
+    if (malformed) {
+      // A line that made some *other* part of the block malformed does not erase this key's own
+      // text — except when the key's own value is itself a continuation (`continued`) or a
+      // column-0 sequence (DECISIONS #review-4-r2: `title:` then `- a`, which pandoc reads as a
+      // list `title` cannot speak for), where the stem must not override what the key really holds.
+      const line = matches[0];
+      const next = nextSignificantLine(lines, line.line);
+      const isSequence = next !== undefined && SEQUENCE_ITEM.test(next);
+      const value = line.continued || isSequence ? null : line.raw.trim();
+      return { key, writable: false, reason: "malformed", value };
+    }
     if (matches.length > 1) {
       return { key, writable: false, reason: "duplicate", value: matches[0].raw.trim() };
     }
@@ -1368,21 +1386,32 @@ function isCoreSchemaScalar(value: string): boolean {
 
 /**
  * Whether pandoc's own YAML reader would give `entry` a non-empty title string (DECISIONS
- * #review-4-r1 finding 1): `null` is no `title` key at all; a writable field is pandoc-readable
- * unless its scalar is blank (`title:`, `""`, `''`, or all whitespace); an opaque unsupported field
- * (`value === null` — a block scalar, a multi-line continuation, an unreadable quote) is pandoc's
- * to read as it pleases, so this reports it readable; every other unsupported field is read by
- * pandoc as the plain or flow value its trimmed text spells, except the three spellings that read
- * as empty — a YAML core-schema null (`~`, `null`, reusing `CORE_SCHEMA_NULL` itself), an empty
- * flow sequence or mapping (`[]`, `{}`), or a value that is nothing but a comment (`# c`: YAML
- * discards an unescaped `#` and everything after it, so a line with no scalar before it leaves
- * pandoc with no title either).
+ * #review-4-r1 finding 1, #review-4-r2): `null` is no `title` key at all; a writable field is
+ * pandoc-readable unless its scalar is blank (`title:`, `""`, `''`, or all whitespace); `value ===
+ * null` is pandoc's to read as it pleases, so this reports it readable — guard G9 enumerates, per
+ * `FrontMatterUnsupportedReason`, which producers can carry `null` and which cannot, so this list
+ * is not repeated here. A blank trimmed `value` is never readable. A `value` opening on a quote (the
+ * quoted-key route passes its raw, still-quoted text straight through) is decoded with this
+ * scanner's own `readSingleQuoted`/`readDoubleQuoted` before the blank test; one that does not
+ * decode cleanly (an unterminated quote, junk after the close) is pandoc's own YAML reader to read,
+ * so this reports it readable, the same as `value === null`. Every other `value` is read by pandoc
+ * as the plain or flow text its trimmed, unquoted text spells, except the three spellings that read
+ * as empty — a YAML core-schema null (`~`, `null`, reusing `CORE_SCHEMA_NULL` itself), an empty flow
+ * sequence or mapping (`[]`, `{}`), or a value that is nothing but a comment (`# c`: YAML discards
+ * an unescaped `#` and everything after it) — so a *quoted* `"null"` or `'~'` stays readable.
  */
 export function hasPandocReadableTitle(entry: FrontMatterEntry | null): boolean {
   if (entry === null) return false;
   if (entry.writable) return entry.value.trim() !== "";
   if (entry.value === null) return true;
   const trimmed = entry.value.trim();
+  if (trimmed === "") return false;
+  const head = trimmed[0];
+  if (head === "'" || head === '"') {
+    const read = head === "'" ? readSingleQuoted(trimmed) : readDoubleQuoted(trimmed);
+    if (!read.ok || !SCALAR_TAIL.test(read.rest)) return true;
+    return read.value.trim() !== "";
+  }
   if (CORE_SCHEMA_NULL.test(trimmed)) return false;
   if (trimmed === "[]" || trimmed === "{}") return false;
   if (trimmed.startsWith("#")) return false;

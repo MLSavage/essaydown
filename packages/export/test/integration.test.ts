@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { XMLParser } from "fast-xml-parser";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { parse } from "../../core/src/parse.js";
+import { hasPandocReadableTitle, readFrontMatter } from "../../core/src/sidecar.js";
 import { buildPandocArgs, isMissingResourceWarning, outputPathFor, resourceDirFor } from "../src/index.js";
 
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/markdown", import.meta.url));
@@ -406,6 +407,57 @@ describe("front-matter title vs. the file-stem fallback (DECISIONS #review-4-r0 
     expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
     const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
     expect(opf).toContain(expectedTitle);
+  }, 20000);
+
+  // Three legs for the malformed-block fix (DECISIONS #review-4-r2): a neighbour line that makes
+  // the whole block malformed used to send the stem even for a title the key's own line still
+  // spells out. The title fed to `buildPandocArgs` is computed the same way export-sync.ts
+  // computes it — `hasPandocReadableTitle` over the real parser's own front matter — never a
+  // hand-picked token, so a predicate regression here fails the same way it would in the app.
+  function titleTargetFor(source: string, outPath: string): { title?: string } {
+    const hasOwnTitle = hasPandocReadableTitle(readFrontMatter(parse(source)).title);
+    return hasOwnTitle ? {} : { title: outPath.replace(/\.epub$/u, "") };
+  }
+
+  it.each([
+    [
+      "title: beside tags: then - essay",
+      "---\ntitle:\ntags:\n- essay\n---\n\n# Heading\n\nBody text.\n",
+      "stem.epub",
+    ],
+    ['"title": alone', '---\n"title":\n---\n\n# Heading\n\nBody text.\n', "stem.epub"],
+  ] as const)("%s gets the stem as its title token and passes epubcheck with dc:title the stem", (_name, source, outPath) => {
+    const dir = tempDir();
+    const target = { resourceDir: ".", outPath: join(dir, outPath), format: "epub", ...titleTargetFor(source, outPath) };
+    const args = [...buildPandocArgs(target), ...LANG_EXCEPTION];
+    expect(args).toContain("title=stem");
+
+    const result = runPandoc(dir, args, source, { ...process.env, LANG: "en_US.UTF-8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain("stem");
+  }, 20000);
+
+  it("title: Real beside tags: then - essay sends no title token and dc:title is Real", () => {
+    const dir = tempDir();
+    const outPath = "has-title.epub";
+    const source = "---\ntitle: Real\ntags:\n- essay\n---\n\n# Heading\n\nBody text.\n";
+    const target = { resourceDir: ".", outPath: join(dir, outPath), format: "epub", ...titleTargetFor(source, outPath) };
+    const args = [...buildPandocArgs(target), ...LANG_EXCEPTION];
+    expect(args.some((token) => token.startsWith("title="))).toBe(false);
+
+    const result = runPandoc(dir, args, source, { ...process.env, LANG: "en_US.UTF-8" });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+
+    const epubPath = join(dir, outPath);
+    expect(() => runValidator("epubcheck", [epubPath])).not.toThrow();
+    const opf = execFileSync("unzip", ["-p", epubPath, "EPUB/content.opf"], { encoding: "utf8" });
+    expect(opf).toContain("Real");
   }, 20000);
 
   it("a stem holding a space and a non-BMP letter round-trips into dc:title", () => {

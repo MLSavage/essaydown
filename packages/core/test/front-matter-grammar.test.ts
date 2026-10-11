@@ -285,3 +285,111 @@ describe("hasPandocReadableTitle (DECISIONS #review-4-r1 finding 1)", () => {
     expect(hasPandocReadableTitle(readFrontMatter(build()).title)).toBe(expected);
   });
 });
+
+// ---------------------------------------------------------------------------
+// DECISIONS #review-4-r2: a malformed block's `title` key keeps its own line's text (G1-G4), the
+// quoted-key route decodes a quoted value before the blank test (G5-G8), and G9 is the exhaustive
+// per-reason instrument that replaces a hand-written producer list.
+// ---------------------------------------------------------------------------
+
+describe("a malformed block still reports the title key's own text (DECISIONS #review-4-r2)", () => {
+  it("G1: `title: Real` beside a compact sequence keeps its own value and reads it", () => {
+    const root = withFrontMatter("title: Real", "tags:", "- essay");
+    const entry = readFrontMatter(root).title;
+    expect(entry).toMatchObject({ writable: false, reason: "malformed", value: "Real" });
+    expect(hasPandocReadableTitle(entry)).toBe(true);
+  });
+
+  it("G2: a blank title beside a compact sequence reads as no title, for every blank spelling", () => {
+    for (const line of ["title:", 'title: ""', "title: ~"]) {
+      const root = withFrontMatter(line, "tags:", "- essay");
+      const entry = readFrontMatter(root).title;
+      expect(entry).toMatchObject({ writable: false, reason: "malformed" });
+      expect(hasPandocReadableTitle(entry)).toBe(false);
+    }
+  });
+
+  it("G3: a continuation beside a compact sequence has no single-line value, but is pandoc's to read", () => {
+    const root = withFrontMatter("title:", "  Real", "tags:", "- essay");
+    const entry = readFrontMatter(root).title;
+    expect(entry).toMatchObject({ writable: false, reason: "malformed", value: null });
+    expect(hasPandocReadableTitle(entry)).toBe(true);
+  });
+
+  it("G4: `title:` followed by its own compact sequence has no single-line value, but is pandoc's to read", () => {
+    const root = withFrontMatter("title:", "- a");
+    const entry = readFrontMatter(root).title;
+    expect(entry).toMatchObject({ writable: false, reason: "malformed", value: null });
+    expect(hasPandocReadableTitle(entry)).toBe(true);
+  });
+
+  it('G5: a bare quoted key (`"title":`) reads as no title', () => {
+    const root = withFrontMatter('"title":');
+    const entry = readFrontMatter(root).title;
+    expect(entry).toMatchObject({ writable: false, reason: "malformed" });
+    expect(hasPandocReadableTitle(entry)).toBe(false);
+  });
+
+  it("G6: a quoted key with a decodably-blank quoted value reads as no title, for every blank spelling", () => {
+    for (const line of ['"title": ""', "\"title\": ''", "\"title\": '  '", '"title": "  "']) {
+      const root = withFrontMatter(line);
+      const entry = readFrontMatter(root).title;
+      expect(entry).toMatchObject({ writable: false, reason: "malformed" });
+      expect(hasPandocReadableTitle(entry)).toBe(false);
+    }
+  });
+
+  it("G7: a quoted key whose quoted value decodes to a core-schema-null spelling still reads as that text", () => {
+    for (const line of ['"title": "null"', "\"title\": '~'"]) {
+      const root = withFrontMatter(line);
+      const entry = readFrontMatter(root).title;
+      expect(entry).toMatchObject({ writable: false, reason: "malformed" });
+      expect(hasPandocReadableTitle(entry)).toBe(true);
+    }
+  });
+
+  it("G8: a quoted key with an undecodable (unterminated) quoted value is pandoc's own to read", () => {
+    const root = withFrontMatter('"title": "abc');
+    const entry = readFrontMatter(root).title;
+    expect(entry).toMatchObject({ writable: false, reason: "malformed" });
+    expect(hasPandocReadableTitle(entry)).toBe(true);
+  });
+
+  // G9: every FrontMatterUnsupportedReason's title-bearing instances, enumerated by a table typed
+  // against the reason union itself — adding a new reason to the union fails this file to compile
+  // until the new reason gets its own entry here (#review-1-r8 N3). `null` is a reason that either
+  // never attaches to a `title` field (`no-front-matter`, which only `writeFrontMatter` returns) or
+  // whose every producer forces `value` to `null` (`block-scalar`, `multi-line`), so it cannot admit
+  // both a blank and a non-blank instance and has nothing to assert here beyond G1-G8 above.
+  const G9_PROBES: Record<
+    FrontMatterUnsupportedReason,
+    { readonly blank: readonly string[]; readonly nonBlank: readonly string[] } | null
+  > = {
+    "block-scalar": null,
+    flow: { blank: ["title: []"], nonBlank: ["title: [a]"] },
+    indicator: { blank: ["title: # c"], nonBlank: ["title: -a"] },
+    "multi-line": null,
+    duplicate: { blank: ["title:", "title: X"], nonBlank: ["title: X", "title: Y"] },
+    malformed: {
+      blank: ["title:", "tags:", "- essay"],
+      nonBlank: ["title: Real", "tags:", "- essay"],
+    },
+    "no-front-matter": null,
+  };
+
+  it("G9: every reason that admits both a blank and a non-blank title reads the predicate accordingly", () => {
+    for (const [reason, probe] of Object.entries(G9_PROBES) as [
+      FrontMatterUnsupportedReason,
+      { readonly blank: readonly string[]; readonly nonBlank: readonly string[] } | null,
+    ][]) {
+      if (probe === null) continue;
+      const blankEntry = readFrontMatter(withFrontMatter(...probe.blank)).title;
+      expect(blankEntry).toMatchObject({ writable: false, reason });
+      expect(hasPandocReadableTitle(blankEntry)).toBe(false);
+
+      const nonBlankEntry = readFrontMatter(withFrontMatter(...probe.nonBlank)).title;
+      expect(nonBlankEntry).toMatchObject({ writable: false, reason });
+      expect(hasPandocReadableTitle(nonBlankEntry)).toBe(true);
+    }
+  });
+});

@@ -108,38 +108,81 @@ describe("exportDocument", () => {
     expect(runArgs[0]?.title).toBeUndefined();
   });
 
-  // One case per front-matter `title` spelling (DECISIONS #review-4-r1 finding 1): the stem for
-  // every spelling pandoc would not read as a non-empty title, `undefined` for every spelling it
-  // would — the same rows `hasPandocReadableTitle` enumerates in
-  // packages/core/test/front-matter-grammar.test.ts.
+  // Two rows carry no `title` line at all, so no shape below has anything to vary; each is its own
+  // single check rather than a row of the shape matrix.
   it.each([
-    ["no front matter", "# Heading\n\nBody.\n", "essay"],
-    ["a block without title", "---\nquestion: What now?\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title:", "---\ntitle:\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ['title: ""', '---\ntitle: ""\n---\n\n# Heading\n\nBody.\n', "essay"],
-    ["title: ''", "---\ntitle: ''\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: '  '", "---\ntitle: '  '\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: # c", "---\ntitle: # c\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: ~", "---\ntitle: ~\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: null", "---\ntitle: null\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: NULL", "---\ntitle: NULL\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: []", "---\ntitle: []\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: {}", "---\ntitle: {}\n---\n\n# Heading\n\nBody.\n", "essay"],
-    ["title: My Own Title", "---\ntitle: My Own Title\n---\n\n# Heading\n\nBody.\n", undefined],
-    ['title: "null"', '---\ntitle: "null"\n---\n\n# Heading\n\nBody.\n', undefined],
-    ["title: 42", "---\ntitle: 42\n---\n\n# Heading\n\nBody.\n", undefined],
-    ["title: true", "---\ntitle: true\n---\n\n# Heading\n\nBody.\n", undefined],
-    ["title: [a]", "---\ntitle: [a]\n---\n\n# Heading\n\nBody.\n", undefined],
-    ["title: {text: X}", "---\ntitle: {text: X}\n---\n\n# Heading\n\nBody.\n", undefined],
-    ["title: |- then a block scalar", "---\ntitle: |-\n  Block\n---\n\n# Heading\n\nBody.\n", undefined],
-    [
-      "a two-line plain continuation",
-      "---\ntitle: Line one\n  continued\n---\n\n# Heading\n\nBody.\n",
-      undefined,
-    ],
-  ] as const)("%s: the IPC receives title %j", async (_name, source, expected) => {
+    ["no front matter", "# Heading\n\nBody.\n"],
+    ["a block without title", "---\nquestion: What now?\n---\n\n# Heading\n\nBody.\n"],
+  ] as const)("%s: the IPC receives the stem", async (_name, source) => {
     const { io, runArgs } = fakeIO("clean", CLEAN_OUTCOME);
     io.readDoc = async () => source;
+    await exportDocument(io, "essay.md", "essay.docx", "docx");
+    expect(runArgs[0]?.title).toBe("essay");
+  });
+
+  // One row per front-matter `title` spelling (DECISIONS #review-4-r1 finding 1), each the single
+  // physical line (or lines, for the two multi-line rows) the key's own value occupies, and the
+  // expected IPC title: the stem for every spelling pandoc would not read as a non-empty title,
+  // `undefined` for every spelling it would — the same rows `hasPandocReadableTitle` enumerates in
+  // packages/core/test/front-matter-grammar.test.ts.
+  const TITLE_ROWS: readonly (readonly [string, readonly string[], string | undefined])[] = [
+    ["title:", ["title:"], "essay"],
+    ['title: ""', ['title: ""'], "essay"],
+    ["title: ''", ["title: ''"], "essay"],
+    ["title: '  '", ["title: '  '"], "essay"],
+    ["title: # c", ["title: # c"], "essay"],
+    ["title: ~", ["title: ~"], "essay"],
+    ["title: null", ["title: null"], "essay"],
+    ["title: NULL", ["title: NULL"], "essay"],
+    ["title: []", ["title: []"], "essay"],
+    ["title: {}", ["title: {}"], "essay"],
+    ["title: My Own Title", ["title: My Own Title"], undefined],
+    ['title: "null"', ['title: "null"'], undefined],
+    ["title: 42", ["title: 42"], undefined],
+    ["title: true", ["title: true"], undefined],
+    ["title: [a]", ["title: [a]"], undefined],
+    ["title: {text: X}", ["title: {text: X}"], undefined],
+    ["title: |- then a block scalar", ["title: |-", "  Block"], undefined],
+    ["a two-line plain continuation", ["title: Line one", "  continued"], undefined],
+  ];
+
+  // Three block shapes (DECISIONS #review-4-r2): the key alone (the shape above tested); beside a
+  // sibling key the app's grammar refuses outright (`tags:` then a column-0 compact sequence,
+  // which makes the whole block malformed) — a neighbour line that used to erase every key's value
+  // with it; and the key itself spelled with quotes, which the app's writer cannot address and
+  // reads through a different route entirely (sidecar.ts's quoted-key branch). A row whose value
+  // spans more than one physical line (the block scalar and the continuation) has no quoted-key
+  // form worth asserting new behaviour for — this writer's quoted-key route never looks at
+  // continuation at all — so that shape skips those two rows.
+  const SHAPES: readonly {
+    readonly name: string;
+    readonly build: (titleLines: readonly string[]) => string | null;
+  }[] = [
+    {
+      name: "the key alone",
+      build: (titleLines) => `---\n${titleLines.join("\n")}\n---\n\n# Heading\n\nBody.\n`,
+    },
+    {
+      name: "beside tags: then - essay",
+      build: (titleLines) => `---\n${titleLines.join("\n")}\ntags:\n- essay\n---\n\n# Heading\n\nBody.\n`,
+    },
+    {
+      name: 'the key spelled "title"',
+      build: (titleLines) => {
+        if (titleLines.length > 1) return null;
+        const quoted = titleLines[0].replace(/^title:/, '"title":');
+        return `---\n${quoted}\n---\n\n# Heading\n\nBody.\n`;
+      },
+    },
+  ];
+
+  it.each(
+    SHAPES.flatMap((shape) =>
+      TITLE_ROWS.map(([name, titleLines, expected]) => [shape.name, name, shape.build(titleLines), expected] as const),
+    ).filter(([, , source]) => source !== null),
+  )("%s, %s: the IPC receives title %j", async (_shape, _name, source, expected) => {
+    const { io, runArgs } = fakeIO("clean", CLEAN_OUTCOME);
+    io.readDoc = async () => source as string;
     await exportDocument(io, "essay.md", "essay.docx", "docx");
     expect(runArgs[0]?.title).toBe(expected);
   });
