@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse } from "../../../packages/core/src/index.js";
@@ -188,17 +188,24 @@ describe("autosave and external changes", () => {
   it("an externally written sidecar survives the next autosave (DECISIONS #review-2-r0 U5)", async () => {
     const sidecarPath = join(workspace, "a.essaydown.json");
     const before = JSON.parse(readFileSync(sidecarPath, "utf8")) as Record<string, unknown>;
-    writeFileSync(
-      sidecarPath,
-      `${JSON.stringify({ ...before, title: "Synced title", topicQuestion: "Synced question" }, null, 2)}\n`,
-    );
+    const written = `${JSON.stringify({ ...before, title: "Synced title", topicQuestion: "Synced question" }, null, 2)}\n`;
+    writeFileSync(sidecarPath, written);
+    const mtimeBeforeSave = statSync(sidecarPath).mtimeMs;
     await caretToEndOf(EDITOR, `${EDITOR} p`);
     await typeText(EDITOR, "V");
-    await browser.pause(600);
+    await editOnDisk(doc, "HelloXV\n", "V");
+    // The adopted sidecar's bytes are the same before and after this save (every list empty, so
+    // nothing in it depends on the text), so the bytes cannot witness the write; the mtime is the
+    // only file-level witness that the save re-wrote it (DECISIONS #069).
+    await waitFor(
+      async () => statSync(sidecarPath).mtimeMs > mtimeBeforeSave,
+      3000,
+      "the sidecar's mtime never advanced after the autosave",
+    );
     const after = JSON.parse(readFileSync(sidecarPath, "utf8")) as { title: string; topicQuestion: string };
     assert.equal(after.title, "Synced title");
     assert.equal(after.topicQuestion, "Synced question");
-    assert.equal(readFileSync(doc, "utf8"), "HelloXV\n");
+    assert.equal(readFileSync(sidecarPath, "utf8"), written);
 
     // The second save after the adoption (DECISIONS #review-2-r1 U5): the disk now equals what the
     // pane wrote, so this save writes the pane's baseline — which must be the adopted sidecar.
